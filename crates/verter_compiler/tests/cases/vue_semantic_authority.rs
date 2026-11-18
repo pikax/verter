@@ -9,12 +9,11 @@ use verter_compiler::framework_common::registered_carrier_projection::{
 };
 use verter_compiler::framework_common::{
     svelte_semantic_authority_registration, vue_semantic_authority_registration, CatalogCapability,
-    CatalogRow, FrameworkEpoch, FrameworkParseArtifact, FrameworkSemanticAuthority,
-    ImmutableCapabilityCatalog, VueSemanticAuthority, VueSfcV3,
+    CatalogTable, FrameworkEpoch, FrameworkParseArtifact, FrameworkSemanticAuthority,
+    VueSemanticAuthority, VueSfcV3,
 };
 use verter_language::carrier_grammar::{
-    CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-    FrameworkAdapterSemanticVersion,
+    CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
 };
 use verter_language::registered_source_authority::{
     CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -46,8 +45,12 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
         )
         .expect("registered source");
     let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
-    let config =
-        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).expect("vue grammar");
+    let config = verter_compiler::framework_common::vue_grammar_config(
+        "{{",
+        "}}",
+        std::iter::empty::<&str>(),
+    )
+    .expect("vue grammar");
     grammar_authority
         .register_carrier_grammar(
             language,
@@ -152,7 +155,7 @@ fn vue_semantic_template_facts_match_catalog_payload() {
         !via_authority.components.is_empty(),
         "simple fixture must retain a component usage"
     );
-    let reminted = artifact.remint_epoch_for_tests("unknown-epoch");
+    let reminted = artifact.with_unregistered_profile_for_tests();
     assert!(
         template_facts_from_catalog(&reminted, source, TemplateFactsBasis::AdmittedArtifact)
             .is_none(),
@@ -176,7 +179,7 @@ fn vue_template_facts_foreign_artifact_is_typed_refusal() {
             )
             .expect("registered source");
         let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
-        let config = CarrierGrammarConfig::Svelte;
+        let config = verter_compiler::svelte::svelte_grammar_config();
         grammar_authority
             .register_carrier_grammar(
                 language,
@@ -281,22 +284,23 @@ fn vue_semantic_catalog_row_binds_vue_adapter_identity() {
     );
     assert_eq!(row.identity().capability(), CatalogCapability::Semantic);
     assert!(row.identity().host_epoch().is_none());
-    assert_eq!(row.identity().epoch().as_str(), VueSfcV3::ID);
+    assert_eq!(row.identity().framework_family(), VueSfcV3::MANIFEST.family);
     let _authority: &VueSemanticAuthority = row.semantic();
-    let catalog =
-        ImmutableCapabilityCatalog::<(), (), VueSemanticAuthority, (), ()>::try_from_rows([
-            CatalogRow::Semantic(row),
-        ])
-        .expect("single Vue semantic row");
+    let catalog = CatalogTable::try_from_rows([row]).expect("single Vue semantic row");
     assert_eq!(catalog.len(), 1);
 }
 
 #[test]
 fn vue_semantic_catalog_lookup_is_adapter_and_epoch_identity() {
     let artifact = registered_artifact("file:///lookup.vue", SIMPLE);
-    assert_eq!(artifact.epoch().as_str(), VueSfcV3::ID);
-    let selected = registered_semantic_for(artifact.adapter_id(), artifact.epoch())
-        .expect("Vue adapter × Vue epoch must select a semantic row");
+    assert_eq!(
+        artifact.framework_profile(),
+        &verter_compiler::framework_common::profile::framework_profile(&VueSfcV3::MANIFEST)
+            .expect("the built-in manifest is admitted")
+    );
+    let selected =
+        registered_semantic_for(artifact.carrier_profile(), artifact.framework_profile())
+            .expect("Vue adapter × Vue epoch must select a semantic row");
     let via_catalog = selected.eval_source(SIMPLE, &artifact);
     let via_authority = VueSemanticAuthority.eval_source(SIMPLE, &artifact);
     assert_eq!(
@@ -312,16 +316,22 @@ fn vue_semantic_catalog_lookup_is_adapter_and_epoch_identity() {
 #[test]
 fn planted_vue_epoch_does_not_select_a_svelte_semantic_authority() {
     let vue_row = vue_semantic_authority_registration();
-    assert!(
-        registered_semantic_for(&FrameworkAdapterId::svelte(), vue_row.identity().epoch())
-            .is_none(),
-        "a Vue epoch must not select a Svelte semantic row"
-    );
     let svelte_row = svelte_semantic_authority_registration();
     assert!(
-        registered_semantic_for(&FrameworkAdapterId::vue(), svelte_row.identity().epoch())
-            .is_none(),
-        "a Svelte epoch must not select a Vue semantic row"
+        registered_semantic_for(
+            svelte_row.identity().carrier(),
+            vue_row.identity().framework_profile()
+        )
+        .is_none(),
+        "a Vue profile must not select a Svelte semantic row"
+    );
+    assert!(
+        registered_semantic_for(
+            vue_row.identity().carrier(),
+            svelte_row.identity().framework_profile()
+        )
+        .is_none(),
+        "a Svelte profile must not select a Vue semantic row"
     );
 }
 

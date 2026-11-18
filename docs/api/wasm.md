@@ -93,7 +93,7 @@ The `Host` class exposes the shared host methods below, including
 
 | Method                                                                                      | Returns                      | Description                                                   |
 | ------------------------------------------------------------------------------------------- | ----------------------------- | --------------------------------------------------------------- |
-| `resolve(rawId)`                                                                            | `HostResolvedId \| null`     | Resolve raw ID to canonical ID                                  |
+| `resolve(rawId)`                                                                            | `HostResolvedId \| HostRejectedId` | Resolve raw ID to canonical ID, or its typed rejection |
 | `upsert(request)`                                                                           | `HostUpdateResult`           | Register/update a file                                          |
 | `compileRequest(canonicalId, request)`                                                      | `HostCompileRequestResponse` | Execute one typed compile request (throws on refusal)           |
 | `listVirtualFiles(canonicalId)`                                                             | `HostVirtualNodeKind[]`      | List virtual nodes for a file                                   |
@@ -283,6 +283,7 @@ The remaining types are re-exported from `@verter/native/host-types`:
 - `HostUpdateResult`
 - `HostUpsertRequest`
 - `HostResolvedId`
+- `HostRejectedId`
 - `HostRemoveResult`
 - `HostVirtualNodeKind`
 

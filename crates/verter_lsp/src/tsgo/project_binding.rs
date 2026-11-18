@@ -28,7 +28,7 @@ use verter_workspace::{
     decide_generated_unit_admission_with_basis, CanonicalPath, GeneratedUnitAdmission,
 };
 
-use crate::external_ts::TsgoEngineBackend;
+use verter_session::external_ts::TsgoEngineBackend;
 use verter_type_runtime::provider_hub::{ProjectBasis, ProjectBindingInput};
 
 /// The bootstrap engine version the OWNED gate resolves + mints the witness with.

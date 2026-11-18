@@ -15,8 +15,7 @@ use crate::framework_common::registered_carrier_projection::TemplateFactsProduct
 use crate::framework_common::FrameworkParseArtifact;
 use crate::svelte::carrier::SvelteParseCarrier;
 
-use super::carrier::SvelteCarrierCompiler;
-use super::carrier_frontend::SvelteSfc5;
+use super::carrier_frontend::{SvelteCarrierFrontend, SvelteSfc5};
 
 /// Svelte semantic authority: eval-source, template facts, typed identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -44,8 +43,8 @@ impl SvelteSemanticAuthority {
             return None;
         }
         crate::framework_common::registered_carrier_projection::registered_semantic_for(
-            artifact.adapter_id(),
-            artifact.epoch(),
+            artifact.carrier_profile(),
+            artifact.framework_profile(),
         )
         .map(|_| SvelteSemanticAdmission { _private: () })
     }
@@ -53,13 +52,13 @@ impl SvelteSemanticAuthority {
     /// Adapter this authority answers to.
     #[must_use]
     pub fn adapter_id(&self) -> FrameworkAdapterId {
-        SvelteCarrierCompiler.adapter_id()
+        SvelteCarrierFrontend.adapter_id()
     }
 
     /// Carrier language this authority interprets.
     #[must_use]
     pub fn carrier_language_id(&self) -> LanguageId {
-        SvelteCarrierCompiler.carrier_language_id()
+        SvelteCarrierFrontend.carrier_language_id()
     }
 }
 
@@ -108,4 +107,5 @@ pub fn svelte_semantic_authority_registration(
         SvelteSemanticAuthority.carrier_language_id(),
         Present(SvelteSemanticAuthority),
     )
+    .expect("the built-in Svelte profile manifest is admitted")
 }

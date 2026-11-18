@@ -28,7 +28,13 @@ impl ProjectionBackend for ProjectionOnly {
 
 struct DtsEpoch;
 impl FrameworkEpoch for DtsEpoch {
-    const ID: &'static str = "dts-v1";
+    const MANIFEST: verter_compiler::framework_common::profile::FrameworkProfileManifest =
+        verter_compiler::framework_common::profile::FrameworkProfileManifest {
+        family: "dts-v1",
+        release: "1",
+        admitted_majors: &[1],
+        claimed_carriers: &[],
+    };
 }
 
 fn main() {
@@ -36,6 +42,7 @@ fn main() {
         FrameworkAdapterId::new("api"),
         LanguageId::new("dts"),
         Present(ProjectionOnly),
-    );
+    )
+    .expect("the test manifest is admitted");
     let _ = row.runtime();
 }

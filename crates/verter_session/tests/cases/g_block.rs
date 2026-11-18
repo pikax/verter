@@ -19,8 +19,6 @@ mod block_2_canary_component_meta;
 mod block_2_canary_lifecycle;
 #[path = "g_block/block_2_canary_owner_self_edit.rs"]
 mod block_2_canary_owner_self_edit;
-#[path = "g_block/block_6h_architecture_guards.rs"]
-mod block_6h_architecture_guards;
 #[path = "g_block/block_6i_f1_dep_signature_cross_file.rs"]
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]

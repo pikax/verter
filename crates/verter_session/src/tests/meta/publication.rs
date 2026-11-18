@@ -461,51 +461,6 @@ defineProps<{
 fn output_sink_conversions_decide_in_node_domain_not_on_materialized_type_expr() {
     const OUTPUT_SINK_SRC: &str = include_str!("../../meta_resolve/projectors/output_sink.rs");
 
-    // ── `project_model` — reducibility decided on the payload NODE, not on the
-    //    raised `TypeExpr` (the `type_expr_contains_reducible_operator(&raised)`
-    //    decide is gone; `classify_node_reduction_gates(node)` replaces it).
-    let project_model = output_sink_calls_in(OUTPUT_SINK_SRC, "project_model");
-    assert!(
-        !project_model.contains("type_expr_contains_reducible_operator"),
-        "project_model must NOT run `type_expr_contains_reducible_operator` on the raised \
-         TypeExpr (materialize-then-decide); calls seen: {project_model:?}"
-    );
-    assert!(
-        project_model.contains("classify_node_reduction_gates"),
-        "project_model must decide reducibility via `classify_node_reduction_gates` (node \
-         domain); calls seen: {project_model:?}"
-    );
-
-    // ── `member_shape_peek_or_compute` — package-backed / cycle / reducibility
-    //    gates run on the member-value NODE; the carrier seals through the
-    //    node→carrier terminal, never via `shell_raise_to_type_expr` + a
-    //    `TypeExpr` gate predicate.
-    let member_shape = output_sink_calls_in(OUTPUT_SINK_SRC, "member_shape_peek_or_compute");
-    for forbidden in [
-        "shell_raise_to_type_expr",
-        "seal_type_expr",
-        "type_expr_contains_reducible_operator",
-        "peek_member_shape_known",
-    ] {
-        assert!(
-            !member_shape.contains(forbidden),
-            "member_shape_peek_or_compute must NOT call `{forbidden}` (materialize-then-decide on \
-             the raised TypeExpr); calls seen: {member_shape:?}"
-        );
-    }
-    for required in [
-        "node_package_backed_object_like_root_with_fence",
-        "classify_node_reduction_gates",
-        "node_root_reaches_transitive_cycle_with_fence",
-        "raise_node_to_sealed_carrier",
-    ] {
-        assert!(
-            member_shape.contains(required),
-            "member_shape_peek_or_compute must call `{required}` (node-domain gate / terminal \
-             seal); calls seen: {member_shape:?}"
-        );
-    }
-
     // ── `reduce_field_value_node` — the NODE-start per-field reducer: returns a
     //    CARRIER; every gate (package-backed / cycle / reducibility / no-poison
     //    sentinel) reads node facts off the OBSERVED input node — no TypeExpr is

@@ -825,6 +825,34 @@ pub struct FfiResolvedId {
     pub exists_in_host: bool,
     pub bundler_id: String,
     pub lsp_id: String,
+    /// `"vue"` or `"verter"`; absent for a main request and an LSP-format id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    pub scoped: bool,
+    pub raw_path: String,
+    /// The block type of a custom block request; absent for every other node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_type: Option<String>,
+}
+
+/// A raw import ID the host's id grammar rejects, with the rejection code.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiRejectedId {
+    pub rejected: String,
+    pub raw_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+}
+
+/// Outcome of resolving a raw import ID: the resolved request or its rejection.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum FfiResolveOutcome {
+    Resolved(FfiResolvedId),
+    Rejected(FfiRejectedId),
 }
 
 /// Block-specific metadata attached to a virtual file.
@@ -1861,8 +1889,9 @@ pub struct FfiStructureRange {
     pub source_space_token: String,
     pub start: u32,
     pub end: u32,
-    /// Encoding of `start`/`end` (always `utf8.v1`: structure ranges are the
-    /// native byte ranges of the registered carrier).
+    /// Encoding of `start`/`end`: `utf8.v1` for the native byte ranges of the
+    /// registered carrier, `utf16.v1` when the caller asked for JavaScript
+    /// string offsets.
     pub encoding: SpanEncodingTag,
 }
 

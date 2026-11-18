@@ -22,9 +22,9 @@
 //! the only channel that exists before its host is constructed — and
 //! reads no `initializationOptions` key for it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use verter_language::FrameworkAdapterId;
+use verter_language::{FileLanguage, FrameworkAdapterId, LanguageRegistry};
 
 /// The admitted framework set of one construction.
 ///
@@ -38,6 +38,9 @@ pub struct FrameworkOptions {
     /// historical behavior); `Some(set)` admits exactly the named,
     /// catalog-validated subset.
     admitted: Option<BTreeSet<FrameworkAdapterId>>,
+    /// Extensions (without the dot) this host classifies as the carrier of
+    /// a framework beyond the built-in carrier extensions.
+    carrier_extensions: BTreeMap<String, FrameworkAdapterId>,
 }
 
 /// Why a framework admission was rejected.
@@ -63,6 +66,8 @@ pub enum FrameworkOptionsError {
         /// The names the composed capability catalog supports, sorted.
         supported: Vec<String>,
     },
+    /// An extra carrier extension the registry refuses.
+    CarrierExtension(verter_language::CarrierExtensionError),
 }
 
 impl std::fmt::Display for FrameworkOptionsError {
@@ -87,6 +92,7 @@ impl std::fmt::Display for FrameworkOptionsError {
                 "framework admission cannot be empty — admit at least one of: {}",
                 supported.join(", ")
             ),
+            Self::CarrierExtension(error) => error.fmt(f),
         }
     }
 }
@@ -135,7 +141,78 @@ impl FrameworkOptions {
         }
         Ok(Self {
             admitted: Some(admitted),
+            carrier_extensions: BTreeMap::new(),
         })
+    }
+
+    /// These options with extra carrier suffixes: each `(suffix, framework)`
+    /// pair makes this host classify the suffix as that framework's carrier
+    /// (`.md` read as a Vue carrier). The suffix may be written with or
+    /// without its dot. Other hosts are unaffected, and the built-in rows are
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameworkOptionsError::UnknownFramework`] for a framework the
+    /// composed catalog does not name, and
+    /// [`FrameworkOptionsError::CarrierExtension`] for an extension the
+    /// registry refuses (empty, dotted, or already registered) and for one
+    /// registered twice.
+    pub fn with_carrier_extensions<I, E, F>(
+        mut self,
+        pairs: I,
+    ) -> Result<Self, FrameworkOptionsError>
+    where
+        I: IntoIterator<Item = (E, F)>,
+        E: AsRef<str>,
+        F: AsRef<str>,
+    {
+        let supported = Self::supported_names();
+        for (extension, framework) in pairs {
+            let framework = framework.as_ref();
+            if !supported.iter().any(|name| name == framework) {
+                return Err(FrameworkOptionsError::UnknownFramework {
+                    requested: framework.to_string(),
+                    supported,
+                });
+            }
+            let suffix = extension.as_ref();
+            let extension = suffix.strip_prefix('.').unwrap_or(suffix).to_string();
+            if self.carrier_extensions.contains_key(&extension) {
+                return Err(FrameworkOptionsError::CarrierExtension(
+                    verter_language::CarrierExtensionError::AlreadyRegistered(extension),
+                ));
+            }
+            let framework = FrameworkAdapterId::new(framework);
+            self.carrier_extensions.insert(extension, framework);
+        }
+        self.language_registry()?;
+        Ok(self)
+    }
+
+    /// The language registry these options classify with: the built-in
+    /// rows plus this host's extra carrier extensions.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameworkOptionsError::CarrierExtension`] for an extension the
+    /// registry refuses.
+    pub fn language_registry(&self) -> Result<LanguageRegistry, FrameworkOptionsError> {
+        let languages = Self::carrier_languages();
+        let extensions = self
+            .carrier_extensions
+            .iter()
+            .map(|(extension, framework)| {
+                let language = languages
+                    .iter()
+                    .find(|(id, _)| id == framework)
+                    .map(|(_, language)| language.clone())
+                    .expect("a carrier extension names a framework the catalog composes");
+                (extension.as_str(), language)
+            });
+        LanguageRegistry::built_in()
+            .with_carrier_extensions(extensions)
+            .map_err(FrameworkOptionsError::CarrierExtension)
     }
 
     /// Validate an explicit admission from adapter ids.
@@ -170,6 +247,17 @@ impl FrameworkOptions {
 
     /// The sorted names the composed capability catalog supports — the
     /// diagnostic half of every rejection above.
+    /// Each composed vertical with the carrier language its catalog row
+    /// registers.
+    fn carrier_languages() -> Vec<(FrameworkAdapterId, FileLanguage)> {
+        super::registry::FrameworkCapabilityCatalog::built_in()
+            .expect("every built-in frontend capability row publishes a carrier grammar fact")
+            .rows()
+            .iter()
+            .map(|row| (row.adapter_id().clone(), row.file_language().clone()))
+            .collect()
+    }
+
     fn supported_names() -> Vec<String> {
         let mut names: Vec<String> = super::registry::FrameworkCapabilityCatalog::built_in()
             .expect("every built-in frontend capability row publishes a carrier grammar fact")

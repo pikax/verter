@@ -61,16 +61,19 @@ fn terminal_partial_field_type_publishes_finite_utility_shape() {
         .evaluated_types
         .as_ref()
         .expect("component meta should include evaluated types");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let field = evaluated
-        .props
+        .define_props
         .iter()
-        .find(|field| field.name == "editorOptions")
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "editorOptions")
         .expect("editorOptions prop should be published");
 
     let field_ty = verter_session::test_only::semantic_source_probe::demand_type_expr(
         &host,
         "/Editor.vue",
-        field.authority.source().expect("present source"),
+        field.ty.present().expect("present source"),
     )
     .unwrap_or_else(|| panic!("`editorOptions`'s published source must demand-materialize"));
     let TypeExpr::Object(object) = &field_ty else {

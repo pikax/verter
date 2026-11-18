@@ -904,7 +904,7 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
         CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
         RuntimeProductRequest, VueCompileRequest,
     };
-    use verter_compiler::framework_common::vue_bridge::compile_registered_vue_artifact;
+    use verter_compiler::standalone::registered_audit_compile;
     use verter_macro_dto::{
         AuthoredMemberOrdinal, MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry,
         MacroRuntimeOutcome, MacroRuntimeShape, OrderedRuntimeConstructors,
@@ -1017,7 +1017,7 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
             source, &request, "vue",
         );
         attempt.stage_vue_macro_semantics(macros.clone());
-        let rehoused = compile_registered_vue_artifact(
+        let rehoused = registered_audit_compile(
             source,
             &artifact,
             &request,
@@ -1025,6 +1025,7 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
             &attempt,
             &alloc_b,
         )
+        .expect("the Vue runtime row serves the audited compile")
         .expect("registered Vue artifact compiles");
 
         assert_eq!(

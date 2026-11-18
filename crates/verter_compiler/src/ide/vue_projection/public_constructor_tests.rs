@@ -18,6 +18,73 @@ fn declaration(contract: &VuePublicConstructorContract) -> String {
     contract.declaration().expect("setup renders a constructor")
 }
 
+#[test]
+fn plain_options_defaults_supply_instance_aliases_to_the_checking_scope() {
+    let contract = project_public_constructor(
+        Some(block("export default { data() { return { count: 1 }; }, methods: { increment() { this.count++; } } };")),
+        None, None,
+    ).expect("options project");
+    let text = contract
+        .declaration_over("__Scope", &PublicDeclarationExtras::default())
+        .expect("the Options instance has a checking declaration");
+    assert!(
+        text.contains(
+            "type __VerterPublicInstance = InstanceType<typeof __VerterOptionsConstructor>"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("type __VerterPublicProps = __VerterPublicInstance[\"$props\"]"),
+        "{text}"
+    );
+    let empty = project_public_constructor(None, None, None).expect("scriptless constructor");
+    assert_eq!(empty.receipt().construct_signatures, 1);
+    assert!(empty
+        .declaration()
+        .expect("empty public surface")
+        .contains("new (props?: __VerterPublicProps)"));
+}
+
+#[test]
+fn combined_instances_retain_options_members_beside_setup_contracts() {
+    let contract = project_public_constructor(
+        Some(block("export default { data() { return { count: 1 }; } };")),
+        Some(block("defineProps<{ label: string }>();")),
+        None,
+    )
+    .expect("combined scripts project");
+    let text = declaration(&contract);
+    assert!(
+        text.contains("InstanceType<typeof __VerterOptionsConstructor>"),
+        "{text}"
+    );
+    assert!(text.contains("({ label: string })"), "{text}");
+}
+
+#[test]
+fn setup_contracts_override_options_props_events_and_exposed_members() {
+    let contract = project_public_constructor(
+        Some(block("export default { props: { count: Number }, data() { return { shown: 1 }; } };")),
+        Some(block("defineProps<{ count: string }>(); defineEmits<{ save: [value: number] }>(); const shown = 'text'; defineExpose({ shown });")),
+        None,
+    ).expect("combined contracts");
+    let text = declaration(&contract);
+    let emit = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("$emit:"))
+        .expect("emit member");
+    assert!(!emit.contains("InstanceType"), "{text}");
+    let props = text
+        .lines()
+        .find(|line| line.starts_with("type __VerterPublicProps"))
+        .expect("props alias");
+    assert!(!props.contains("InstanceType"), "{text}");
+    assert!(
+        text.contains("keyof import(\"vue\").ShallowUnwrapRef<ReturnType<typeof __VerterExpose>>"),
+        "{text}"
+    );
+}
+
 const PICKER_GENERIC: &str = "const T extends string | number = string";
 
 const PICKER_SETUP: &str = r#"import { ref, type VNode } from "vue";
@@ -165,7 +232,8 @@ fn required_props_keep_one_constructor_with_a_required_argument() {
         None,
     );
     assert_eq!(model.props_requirement, PropsRequirement::Required);
-    assert!(declaration(&model).contains("\"modelValue\": string; \"modelModifiers\"?:"));
+    assert!(declaration(&model)
+        .contains("\"modelValue\": string; modelModifiers?: Record<string, true | undefined>;"));
     let runtime = project(
         "defineProps({ id: { type: Number, required: true } });\n",
         None,
@@ -202,8 +270,15 @@ fn instance_publishes_typed_framework_and_exposed_members() {
     assert!(rendered.contains("((event: \"update:open\", value: boolean) => void)"));
     assert!(rendered.contains("\"onUpdate:open\"?: (value: boolean) => void"));
     assert!(rendered.contains(
-        "import(\"vue\").EmitsToProps<import(\"vue\").TypeEmitsToOptions<({ change: [value: T]; close: [] })>>"
+        "import(\"vue\").EmitsToProps<__VerterTypeEmitsToOptions<({ change: [value: T]; close: [] })>>"
     ));
+    // The conversion is declared once beside the aliases that read it.
+    assert_eq!(
+        rendered
+            .matches("type __VerterTypeEmitsToOptions<T> =")
+            .count(),
+        1
+    );
     assert_eq!(contract.options.name.as_deref(), Some("Picker"));
     assert_eq!(contract.options.inherit_attrs, Some(false));
     assert_eq!(
@@ -290,7 +365,10 @@ fn default_export_is_never_callable() {
 #[test]
 fn rendered_fields_keep_authored_types() {
     let contract = picker();
+    // Vue's fixed conversion of type-declared events is not a rendered field.
     let rendered = declaration(&contract);
+    assert_eq!(rendered.matches(TYPE_EMITS_DECLARATIONS).count(), 1);
+    let rendered = rendered.replace(TYPE_EMITS_DECLARATIONS, "");
     assert!(rendered.contains("({ test: T; label?: string })"));
     assert!(rendered.contains("\"open\"?: boolean"));
     assert!(
@@ -314,6 +392,47 @@ fn rendered_fields_keep_authored_types() {
         ]
     );
     assert!(declaration(&open).contains("{ readonly \"a\"?: any }"));
+}
+
+/// A model's modifiers prop is keyed by the authored modifier type when the
+/// call supplies one, so a key outside it is not accepted; without one it
+/// keeps Vue's open string keys.
+#[test]
+fn model_modifiers_prop_is_keyed_by_the_authored_modifier_type() {
+    for (setup, member) in [
+        (
+            "defineModel();\n",
+            "modelModifiers?: Record<string, true | undefined>;",
+        ),
+        (
+            "defineModel(\"count\");\n",
+            "countModifiers?: Record<string, true | undefined>;",
+        ),
+        (
+            "defineModel<string, 'trim' | 'lazy'>();\n",
+            "modelModifiers?: Partial<Record<'trim' | 'lazy', true>>;",
+        ),
+        (
+            "defineModel<string, 'trim'>(\"title\");\n",
+            "titleModifiers?: Partial<Record<'trim', true>>;",
+        ),
+    ] {
+        let rendered = declaration(&project(setup, None));
+        assert!(rendered.contains(member), "{setup}: {member} in {rendered}");
+        assert_eq!(
+            rendered.matches("Modifiers?:").count(),
+            1,
+            "{setup}: exactly one modifiers prop in {rendered}"
+        );
+    }
+
+    // A modifier type naming a binder parameter specializes with the binder.
+    let generic = project("defineModel<string, M>();\n", Some("M extends string"));
+    assert_eq!(
+        generic.receipt().binder_dependent_surfaces,
+        vec![PublicSurface::Models]
+    );
+    assert!(declaration(&generic).contains("modelModifiers?: Partial<Record<M, true>>;"));
 }
 
 #[test]
@@ -637,4 +756,157 @@ fn refuses_what_the_setup_projection_refuses() {
         None,
     );
     assert_eq!(shadowed.props, DeclaredSurface::None);
+}
+
+/// `rendered` without its expose provider function, the one part
+/// `declaration_over` leaves to the caller.
+fn without_provider(rendered: &str) -> String {
+    let Some(start) = rendered
+        .find("async function __VerterExpose")
+        .or_else(|| rendered.find("function __VerterExpose"))
+    else {
+        return rendered.to_string();
+    };
+    let end = start + rendered[start..].find("\n}\n").expect("provider closes") + 3;
+    format!("{}{}", &rendered[..start], &rendered[end..])
+}
+
+#[test]
+fn declaration_over_agrees_with_declaration_apart_from_the_provider_function() {
+    let mut contracts = vec![picker()];
+    for probe in REQUIREMENT_PROBES {
+        contracts.push(
+            project_public_constructor(
+                probe.normal.map(block),
+                Some(block(probe.setup)),
+                probe.generic,
+            )
+            .expect("projects"),
+        );
+    }
+    for contract in contracts {
+        let over = contract
+            .declaration_over(EXPOSE_PROVIDER, &PublicDeclarationExtras::default())
+            .expect("setup renders a constructor");
+        assert_eq!(over, without_provider(&declaration(&contract)));
+    }
+    let over_scope = picker()
+        .declaration_over("__Scope", &PublicDeclarationExtras::default())
+        .expect("setup renders a constructor");
+    assert!(over_scope.contains("ShallowUnwrapRef<ReturnType<typeof __Scope<T>>>"));
+    assert!(!over_scope.contains("function "), "{over_scope}");
+}
+
+#[test]
+fn declaration_over_applies_the_extras_of_other_products() {
+    let extras = PublicDeclarationExtras {
+        props_intersection: Some("{ title?: string }".to_string()),
+        attrs_type: Some("{ title?: string }".to_string()),
+    };
+    let rendered = picker()
+        .declaration_over(EXPOSE_PROVIDER, &extras)
+        .expect("setup renders a constructor");
+    assert!(
+        rendered.contains("> & ({ title?: string });\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("\"$props\" | \"$emit\" | \"$slots\" | \"$attrs\">"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("  readonly $attrs: { title?: string };\n"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn an_options_carrier_reads_the_authored_constructor_in_the_checking_scope() {
+    let options = project_public_constructor(Some(block("export default {};\n")), None, None)
+        .expect("projects");
+    let rendered = options
+        .declaration_over(EXPOSE_PROVIDER, &PublicDeclarationExtras::default())
+        .expect("Options checking aliases");
+    assert!(rendered.contains("InstanceType<typeof __VerterOptionsConstructor>"));
+    assert!(!rendered.contains("function "));
+}
+
+#[test]
+fn expose_callee_names_the_authored_callee_only_when_members_are_exposed() {
+    let picker = picker();
+    let callee = picker.expose_callee().expect("picker exposes members");
+    assert_eq!(
+        &PICKER_SETUP[callee.start as usize..callee.end as usize],
+        "defineExpose"
+    );
+    assert!(!picker.setup_is_async());
+    let empty = project("defineExpose();\n", None);
+    assert_eq!(empty.expose_callee(), None);
+    let awaiting = project(
+        "const a = await Promise.resolve(1);\ndefineExpose({ a });\n",
+        None,
+    );
+    assert!(awaiting.setup_is_async());
+    assert!(awaiting.expose_callee().is_some());
+}
+
+#[test]
+fn argument_expose_provider_returns_the_exposed_argument_without_setup_statements() {
+    assert_eq!(
+        picker().argument_expose_provider("__Scope").as_deref(),
+        Some(
+            "function __Scope<const T extends string | number = string>() {\nreturn ({ reset, current });\n}\n"
+        )
+    );
+    let awaiting = project(
+        "const a = await Promise.resolve(1);\ndefineExpose({ a });\n",
+        None,
+    );
+    assert_eq!(
+        awaiting.argument_expose_provider("__Scope").as_deref(),
+        Some("async function __Scope() {\nreturn ({ a });\n}\n")
+    );
+    assert_eq!(
+        project("defineExpose();\n", None).argument_expose_provider("__Scope"),
+        None
+    );
+}
+
+#[test]
+fn authored_default_declaration_extras_reach_both_public_props_sites() {
+    let contract = project_public_constructor(
+        Some(block("export default { props: { title: Number } };")),
+        None,
+        None,
+    )
+    .unwrap();
+    let extras = PublicDeclarationExtras {
+        props_intersection: Some(
+            "Omit<import(\"vue\").AnchorHTMLAttributes, \"title\">".to_string(),
+        ),
+        attrs_type: Some("{ href?: string }".to_string()),
+    };
+    let output = contract.declaration_over("__Scope", &extras).unwrap();
+    assert!(output.contains("AnchorHTMLAttributes"), "{output}");
+    assert!(
+        output.contains("readonly $props: __VerterPublicProps"),
+        "{output}"
+    );
+    assert!(
+        output.contains("readonly $attrs: { href?: string }"),
+        "{output}"
+    );
+    assert!(
+        output.contains("__VerterUseContract<typeof __VerterOptionsComponent>"),
+        "{output}"
+    );
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, &output, oxc_span::SourceType::ts())
+            .parse();
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "{:?}\n{output}",
+        parsed.diagnostics
+    );
 }

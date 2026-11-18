@@ -32,7 +32,7 @@ use super::analyze::{
     atrule_name_span, component_name, is_keyframes_node, is_pseudo_class_component,
     keyframes_name_token_span, relative_steps, remove_css_prefix, CssAnalysis, KeyframeName,
 };
-use crate::code_transform::{CodeTransform, CodeTransformError, SourceMapOptions};
+use crate::code_transform::{CodeTransform, CodeTransformError, MappedTransform, SourceMapOptions};
 
 /// A fail-closed render refusal: the tree or spans handed to the renderer
 /// were malformed — an out-of-range or mid-character span, an inconsistent
@@ -75,7 +75,7 @@ pub(crate) fn render_stylesheet(
     let allocator = Allocator::default();
     let body_span = Span::new(tree.source().origin(), tree.source().end());
     let mut renderer = Renderer {
-        code: CodeTransform::<M>::new_in(source, &allocator),
+        code: CodeTransform::<M>::new_mapped_in(source, &allocator),
         source,
         tree,
         analysis,
@@ -113,7 +113,7 @@ pub(crate) fn render_stylesheet(
         return Err(RenderError { span });
     }
     if let Some(error) = edit_failure {
-        let offset = edit_failure_offset(error);
+        let offset = error.offset();
         return Err(RenderError {
             span: Span::new(offset, offset),
         });
@@ -137,16 +137,6 @@ fn map_basename(filename: &str) -> &str {
     filename.rsplit(['/', '\\']).next().unwrap_or(filename)
 }
 
-fn edit_failure_offset(error: CodeTransformError) -> u32 {
-    match error {
-        CodeTransformError::OutOfRange { offset, .. }
-        | CodeTransformError::MidChar { offset }
-        | CodeTransformError::ZeroLengthRange { offset }
-        | CodeTransformError::ReplacedContentSplit { offset } => offset,
-        CodeTransformError::ReversedRange { start, .. } => start,
-    }
-}
-
 /// The parent of a visited selector list — the official `path.at(-1)`
 /// discrimination between a rule PRELUDE and a pseudo-class ARGUMENT list.
 enum ListParent<'a> {
@@ -155,7 +145,7 @@ enum ListParent<'a> {
 }
 
 struct Renderer<'a, M: verter_audit::observe::ObserveExec> {
-    code: CodeTransform<'a, M>,
+    code: MappedTransform<'a, M>,
     source: &'a str,
     tree: &'a StyleSyntaxIr,
     analysis: &'a CssAnalysis,

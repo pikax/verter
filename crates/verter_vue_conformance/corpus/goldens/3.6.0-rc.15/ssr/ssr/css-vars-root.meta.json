@@ -1,0 +1,71 @@
+{
+  "schema": 2,
+  "caseId": "ssr/css-vars-root",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/css-vars-root.vue",
+    "sha256": "42a2bc2c07a66090a2eef06ac82cd9c028443f873fd627aa3a6b8cdf22e85a47"
+  },
+  "options": {
+    "sha256": "592244533c70dad599e97bd30fbb716fd52b756c58e099cbdc7286a347de7bb4",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/ssr/css-vars-root.vue",
+      "id": "ssr/css-vars-root",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/css-vars-root.js",
+      "sha256": "793278e660bc9bdb572475f49ebecae5a30b752f403de8807c0f51fbc130889f",
+      "bytes": 841
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/css-vars-root.map.json",
+      "sha256": "2e9ec2407ae47e87fb5410fda3f93fc58f3e2ef8a014ee098aa6e807677128d7"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "mergeProps",
+      "alias": "_mergeProps"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    }
+  ]
+}

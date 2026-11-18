@@ -1,0 +1,30 @@
+error[E0624]: associated function `ordinary` is private
+  --> tests/cases/compile-fail/catalog_identity_takes_no_spelled_profile.rs:10:30
+   |
+10 |       let _ = CatalogIdentity::ordinary(
+   |                                ^^^^^^^^ private associated function
+   |
+  ::: src/framework_common/catalog.rs
+   |
+   | /     fn ordinary<E: FrameworkEpoch>(
+   | |         adapter_id: FrameworkAdapterId,
+   | |         carrier_language_id: LanguageId,
+   | |         capability: CatalogCapability,
+   | |     ) -> Result<Self, ReleaseDescriptorError> {
+   | |_____________________________________________- private associated function defined here
+
+error: cannot construct `CatalogIdentity` with struct literal syntax due to private fields
+  --> tests/cases/compile-fail/catalog_identity_takes_no_spelled_profile.rs:15:13
+   |
+15 |     let _ = CatalogIdentity {
+   |             ^^^^^^^^^^^^^^^
+16 |         adapter_id: FrameworkAdapterId::new("vue"),
+   |         ------------------------------------------ private field
+17 |         carrier_language_id: LanguageId::new("vue"),
+   |         ------------------------------------------- private field
+18 |         framework_family: "vue",
+   |         ----------------------- private field
+19 |         capability: CatalogCapability::Frontend,
+   |         --------------------------------------- private field
+   |
+   = note: ...and other private fields `carrier`, `framework_profile` and `host_epoch` that were not provided

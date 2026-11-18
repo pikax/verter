@@ -1,0 +1,9 @@
+error[E0382]: use of moved value: `handle`
+  --> tests/cases/compile-fail/slot_handle_fills_once.rs:11:24
+   |
+ 9 |     let handle = builder.reserve_slot(SyntacticContract::Expression);
+   |         ------ move occurs because `handle` has type `SlotHandle`, which does not implement the `Copy` trait
+10 |     builder.fill_empty(handle).unwrap();
+   |                        ------ value moved here
+11 |     builder.fill_empty(handle).unwrap();
+   |                        ^^^^^^ value used here after move

@@ -100,7 +100,7 @@ impl<'a> SvelteRenameScriptFactState<'a> {
 /// claimants.
 /// Checked AFTER the editor-owned yield so an editor-plugin route still defers
 /// to the editor's own rename.
-pub(super) fn rename_request_admission(
+pub(super) async fn rename_request_admission(
     server: &VerterLanguageServer,
     uri: &Uri,
 ) -> RenameAdmission {
@@ -110,6 +110,7 @@ pub(super) fn rename_request_admission(
     if server.documents.get_virtual_source_uri(uri).is_some() {
         return RenameAdmission::Decline;
     }
+    server.await_initial_ownership().await;
     match server.carrier_multi_claimancy(uri) {
         CarrierMultiClaimancy::Ready => {
             RenameAdmission::Refuse(multi_claimant_rename_unavailable_error())

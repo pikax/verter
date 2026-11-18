@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/conditionals/if-else-if-else.vue"
+  ],
+  "names": [],
+  "mappings": ";;;MAOW,aAAM;;aACD,aAAM;;;;;;sBACD,aAAM",
+  "sourcesContent": [
+    "\n  <p v-if=\"status === 'loading'\">Loading</p>\n  <p v-else-if=\"status === 'error'\">Failed</p>\n  <p v-else>Done: {{ status }}</p>\n"
+  ]
+}

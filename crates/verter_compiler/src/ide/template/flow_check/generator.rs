@@ -35,7 +35,7 @@
 //! authored byte the check does not use is removed. Synthetic text carries no
 //! source mapping.
 
-use super::deps::{Allocator, CodeTransform};
+use super::deps::{Allocator, CodeTransform, MappedTransform};
 use super::seam::{
     BranchKind, Callback, CallbackFunction, CallbackSite, Chain, CheckPlan, ExprItem, Frame,
     FrameBinding, GeneratedCheck, GenerationWork, GuardSite, Item, Layout, Mapping, Piece,
@@ -111,7 +111,7 @@ pub fn generate_with(
 
     let allocator = Allocator::default();
     let mut emitter = Emitter {
-        ct: CodeTransform::new(source, &allocator),
+        ct: CodeTransform::new_mapped(source, &allocator),
         source,
         strategy,
         path: Vec::new(),
@@ -336,7 +336,7 @@ impl Validation {
 }
 
 struct Emitter<'a> {
-    ct: CodeTransform<'a>,
+    ct: MappedTransform<'a>,
     source: &'a str,
     strategy: GuardStrategy,
     /// Rendered condition terms of the current path ([`GuardStrategy::ReplayPath`]).

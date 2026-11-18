@@ -25,17 +25,17 @@
     "@verter/types": "workspace:*",
     "@verter/wasm": "workspace:*",
     "fflate": "^0.8.3",
-    "vue": "3.6.0-rc.5"
+    "vue": "3.6.0-rc.15"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
     "@shikijs/monaco": "^4.5.0",
     "@verter/unplugin": "workspace:*",
     "@vitejs/plugin-vue": "^6.0.10",
-    "@vue/reactivity": "3.6.0-rc.5",
-    "@vue/runtime-core": "3.6.0-rc.5",
-    "@vue/runtime-dom": "3.6.0-rc.5",
-    "@vue/shared": "3.6.0-rc.5",
+    "@vue/reactivity": "3.6.0-rc.15",
+    "@vue/runtime-core": "3.6.0-rc.15",
+    "@vue/runtime-dom": "3.6.0-rc.15",
+    "@vue/shared": "3.6.0-rc.15",
     "csstype": "^3.2.3",
     "happy-dom": "^21.0.4",
     "monaco-editor-core": "^0.57.0",

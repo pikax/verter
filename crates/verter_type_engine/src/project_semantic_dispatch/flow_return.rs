@@ -3017,44 +3017,106 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )))
     }
 
-    /// Read what a flow body requested in its delivery shape. A request is read under the
-    /// checking site it was made under, as the body would read it at the
-    /// place it made it.
-    pub(super) fn read_requested(&self, wait: ReadWait, canonical: &str) -> ReadDelivery {
-        let ReadWait {
-            key,
-            nesting,
-            shape,
-            checking_site,
-            lexical,
-            ..
-        } = wait;
+    /// Read what a flow body requested in its delivery shape. A request is
+    /// read under the checking site it was made under, as the body would
+    /// read it at the place it made it: a type lowering's read under the
+    /// type site its lowering runs in, every other read under the site its
+    /// answerer runs in already. A staged read is handed back unread, with
+    /// whether it is answered `in_place`: its reader makes it inside its own
+    /// stage ([`Self::read_staged`]). An observed read is answered as it
+    /// would be otherwise, inside an observation its holder adopts or
+    /// discards ([`ReadDelivery::Observed`]).
+    pub(super) fn read_requested(
+        &self,
+        mut wait: ReadWait,
+        canonical: &str,
+        in_place: bool,
+    ) -> ReadDelivery {
+        self.debug_assert_answerable(&wait);
+        if std::mem::take(&mut wait.observed) {
+            return ReadDelivery::Observed(Box::new(
+                self.observe_read(|| self.read_requested(wait, canonical, in_place)),
+            ));
+        }
+        let _site = self.checking_site_scope(wait.checking_site);
+        match wait.shape {
+            ReadShape::Staged => ReadDelivery::Staged(Box::new(wait), in_place),
+            ReadShape::Node => {
+                let _demand_scope = wait
+                    .lexical
+                    .then(|| self.enter_lexical_demand(Arc::from(canonical)));
+                ReadDelivery::Node(Box::new(self.execute_type_node(*wait.key)))
+            }
+            ReadShape::Whole => ReadDelivery::Value(Box::new(self.read_whole(wait, canonical))),
+        }
+    }
+
+    /// The request a type lowering makes for the read it stands at, in that
+    /// read's delivery shape, under the checking site the lowering runs in.
+    fn lowering_wait(&self, request: super::lower::LowerRead) -> ReadWait {
+        let shape = match request.shape {
+            super::lower::LowerReadShape::Node => ReadShape::Node,
+            super::lower::LowerReadShape::Whole => ReadShape::Whole,
+        };
+        FlowReadDriver::request(self, request.key, shape, ReadOrigin::Lowering)
+    }
+
+    /// Make a staged read inside the stage of the reader that consumes it,
+    /// attributed as answering its request would have made it: in place
+    /// under the request's own site, or as the answer its root read gives.
+    pub(super) fn read_staged(
+        &self,
+        wait: ReadWait,
+        canonical: &str,
+        in_place: bool,
+    ) -> crate::semantic_query::CacheRead<QueryResult<SemanticQueryValue>> {
+        self.debug_assert_answerable(&wait);
         verter_debug_assert!(
-            nesting == ReadNesting::of(&key)
+            self.checking_site.get() == wait.checking_site,
+            "a staged read is made under the checking site it was requested under"
+        );
+        #[cfg(any(test, feature = "test-support"))]
+        let _attribution = if in_place {
+            (
+                Some(body_reads::enter_in_place()),
+                body_reads::enter_site(wait.origin.name()),
+                None,
+            )
+        } else {
+            (
+                None,
+                body_reads::enter_site("answer_read"),
+                Some(body_reads::enter_request_answer()),
+            )
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = in_place;
+        self.read_whole(wait, canonical)
+    }
+
+    /// A whole read under the lexical demand its request was made under.
+    fn read_whole(
+        &self,
+        wait: ReadWait,
+        canonical: &str,
+    ) -> crate::semantic_query::CacheRead<QueryResult<SemanticQueryValue>> {
+        let _demand_scope = wait
+            .lexical
+            .then(|| self.enter_lexical_demand(Arc::from(canonical)));
+        self.execute_via_cold_build_helper(*wait.key)
+    }
+
+    fn debug_assert_answerable(&self, wait: &ReadWait) {
+        verter_debug_assert!(
+            wait.nesting == ReadNesting::of(&wait.key)
                 && !matches!(
-                    *key,
+                    *wait.key,
                     SemanticQueryKey::ResolveCall(_)
                         | SemanticQueryKey::FlowReturn(_)
                         | SemanticQueryKey::Relate { .. }
                 ),
             "a body request derives its nesting from a family served by the read driver"
         );
-        verter_debug_assert!(
-            self.checking_site.get() == checking_site,
-            "a request is answered under the checking site it was made under"
-        );
-        let _demand_scope = lexical.then(|| self.enter_lexical_demand(Arc::from(canonical)));
-        match shape {
-            ReadShape::Node => match self.execute_type_node(*key) {
-                QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
-                    value, ..
-                }) => ReadDelivery::Node(value),
-                _ => ReadDelivery::None,
-            },
-            ReadShape::Whole => {
-                ReadDelivery::Value(Box::new(self.execute_via_cold_build_helper(*key)))
-            }
-        }
     }
 
     /// Whether `node` is the builtin `ReturnType<typeof callee>`
@@ -7266,10 +7328,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .type_parameters
             .iter()
             .flat_map(|tp| tp.constraint.iter().chain(tp.default.iter()))
-            .any(|gated| signature_answer_is_frame_shadowed(self, &binder_env, gated));
+            .any(|gated| signature_answer_is_frame_shadowed(self, canonical, &binder_env, gated));
         let mut params: Vec<SemanticNodeId> = Vec::with_capacity(ir.params.len());
         for param in ir.params.iter() {
-            if signature_answer_is_frame_shadowed(self, &binder_env, &param.ty) {
+            if signature_answer_is_frame_shadowed(self, canonical, &binder_env, &param.ty) {
                 signature_position_unmodeled = true;
                 params.push(super::flow_return_callee::unmodeled_position_marker(self));
                 continue;
@@ -7370,7 +7432,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let declared_return = ir
             .declared_return
             .as_ref()
-            .filter(|declared| !signature_answer_is_frame_shadowed(self, &binder_env, declared))
+            .filter(|declared| {
+                !signature_answer_is_frame_shadowed(self, canonical, &binder_env, declared)
+            })
             .map(|declared| {
                 let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
                 self.shallow_lower_type_expr_with_context(
@@ -10259,6 +10323,19 @@ fn guard_literal_type_expr(
 /// so parameter and body-leaf lowering resolve the function's binders
 /// instead of any outer same-name declaration.
 impl FlowBinderEnv {
+    /// The lowering context of one lowering step under this environment:
+    /// lent per step, so a lowering held between reads keeps the
+    /// environment, never a borrow of it.
+    pub(super) fn as_lowering(&self) -> super::lower::TypeExprLowering<'_> {
+        super::lower::TypeExprLowering {
+            env: &self.env,
+            scope: &self.scope,
+            name_resolution: &self.name_resolution,
+            scope_payload: self.scope_payload.as_ref(),
+            shadowing: &self.shadowing,
+        }
+    }
+
     /// This frame's clause instantiated by declaration order: every
     /// binder name maps to the call's final argument at its ordinal.
     /// An ordinal the mapping does not cover keeps its binder — the
@@ -10337,7 +10414,8 @@ pub(super) struct FlowBinderEnv {
 /// meanings differ on.
 fn owner_scope_answers_frame_name(
     dispatch: &impl FlowDemandDriver,
-    binder_env: &FlowBinderEnv,
+    canonical: &str,
+    binder_env: &Arc<FlowBinderEnv>,
     name: &verter_session_query::flow::slice::FrameShadowedName,
 ) -> bool {
     let probe = match name {
@@ -10356,16 +10434,10 @@ fn owner_scope_answers_frame_name(
         }
     };
     let lower_probe = |context: crate::semantic_query::ProjectionReductionContext| {
-        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        dispatch.shallow_lower_type_expr_with_context(
-            &probe,
-            &binder_env.env,
-            &binder_env.scope,
-            &binder_env.name_resolution,
-            binder_env.scope_payload.as_ref(),
-            &binder_env.shadowing,
-            &mut substitutions,
-            context,
+        lowering_in_place(
+            dispatch,
+            canonical,
+            dispatch.request_lowering(&probe, binder_env, context),
         )
     };
     let node = lower_probe(crate::semantic_query::ProjectionReductionContext::structural_transit());
@@ -10408,13 +10480,14 @@ fn owner_scope_answers_frame_name(
 /// [`verter_session_query::flow::slice::GatedType`] consumption point.
 fn signature_answer_is_frame_shadowed(
     dispatch: &impl FlowDemandDriver,
-    binder_env: &FlowBinderEnv,
+    canonical: &str,
+    binder_env: &Arc<FlowBinderEnv>,
     gated: &verter_session_query::flow::slice::GatedType,
 ) -> bool {
     gated
         .shadowed()
         .iter()
-        .any(|name| owner_scope_answers_frame_name(dispatch, binder_env, name))
+        .any(|name| owner_scope_answers_frame_name(dispatch, canonical, binder_env, name))
 }
 
 /// Which spelling of a literal comparison a narrow reads. The checker's
@@ -10926,8 +10999,8 @@ mod call_stack;
 #[path = "flow_return_helper_run.rs"]
 mod helper_run;
 use helper_run::{
-    settle_now, signature_buckets_in_place, signature_list_in_place, HelperWait, MemberPathFrame,
-    PendingHelper,
+    lowering_in_place, settle_now, signature_buckets_in_place, signature_list_in_place,
+    CarrierStep, FlowLowering, HelperWait, LowerStart, MemberPathFrame, PendingHelper,
 };
 #[path = "flow_return_nested.rs"]
 mod nested;
@@ -10944,6 +11017,8 @@ pub(super) use rails::{
 use read::{ReadDelivery, ReadNesting, ReadOrigin, ReadShape, ReadStep, ReadWait};
 #[path = "flow_return_operators.rs"]
 mod operators;
+#[path = "value_widening.rs"]
+pub(super) mod value_widening;
 pub(super) use call_stack::HeldContextualRoute;
 use call_stack::{
     AfterLists, Buckets, CallArgumentWait, CallFunctionWait, CallInFlight, CallListWait, CallNext,
@@ -10982,16 +11057,14 @@ use super::build::{AugmentationContributions, ClassAncestryReading, NormalizedTu
 use super::call_resolve::*;
 use super::dispatch_txn::RelationStep;
 use super::evaluate::StructuralFactDemandOutcome;
-use super::relation::{ComparabilityVerdict, IdentityCarrierUnwrap};
+use super::relation::{
+    ComparabilityVerdict, IdentityCarrierRead, IdentityCarrierStep, IdentityCarrierUnwrap,
+};
 use super::signature_utility::AuthoredSignatures;
-use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
-use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
     EnumLiteralType, NodeScopeId, ProjectionReductionContext, ResolveCallKey, SemanticQueryOutput,
     SignatureKind,
 };
-use rustc_hash::FxHashMap;
-use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::TypeExpr;
 
 /// Finish an awaited operand from the whole read, retaining its partial status.
@@ -11015,6 +11088,19 @@ fn finish_awaited_normalize_for_flow(
 /// ([`ReadStep::Wait`]), which the body's evaluation suspends at and its
 /// root read answers ([`Self::answer_read`]).
 pub(super) trait FlowReadDriver {
+    /// Begin an identity-carrier walk, retaining it only when it requests a read.
+    fn request_carrier(&self, node: SemanticNodeId) -> CarrierStep;
+    /// Continue the standing walk with its requested read, handed back
+    /// staged: the walk makes it inside its own stage, for the body in
+    /// `canonical`.
+    fn deliver_carrier(
+        &self,
+        walk: &mut IdentityCarrierRead,
+        delivery: ReadDelivery,
+        canonical: &str,
+    ) -> ReadStep<IdentityCarrierUnwrap>;
+    /// Release the recordings of a walk its holder stops carrying.
+    fn release_carrier(&self, walk: Box<IdentityCarrierRead>);
     /// Request a read under the current checking site.
     fn request(&self, key: SemanticQueryKey, shape: ReadShape, origin: ReadOrigin) -> ReadWait;
     /// Advance the retained indexed walk to its next requested read.
@@ -11051,6 +11137,31 @@ pub(super) trait FlowReadDriver {
         list: &mut super::continuation_stages::SignatureListRead,
         delivery: ReadDelivery,
     ) -> ReadStep<Option<Vec<SemanticNodeId>>>;
+    /// Begin lowering a body-position type under the evaluator's binder
+    /// environment `binder`: its node, or the lowering and the read it
+    /// waits on first. Each step runs under the type checking site.
+    fn request_lowering<'e>(
+        &self,
+        expr: &'e TypeExpr,
+        binder: &Arc<FlowBinderEnv>,
+        context: ProjectionReductionContext,
+    ) -> LowerStart<'e>;
+    /// Begin lowering a type in the file owner scope `owner_scope`, as
+    /// the owner-scope lowering entry does in place: its node, or the
+    /// lowering and the read it waits on first.
+    fn request_owner_lowering<'e>(
+        &self,
+        owner_scope: (&str, verter_type_expr::TopLevelOwnerId),
+        expr: &'e TypeExpr,
+        context: ProjectionReductionContext,
+    ) -> LowerStart<'e>;
+    /// Continue a lowering with the answer of the read it waited on: its
+    /// node, or the read it waits on next.
+    fn deliver_lowering<'e>(
+        &self,
+        lowering: &mut FlowLowering<'e>,
+        delivery: ReadDelivery,
+    ) -> ReadStep<SemanticNodeId>;
     /// Answer a read the body requested and its root read answers.
     fn answer_read(&self, wait: ReadWait, canonical: &str) -> ReadDelivery;
     /// Drive a call not yet begun to its first answer.
@@ -11103,6 +11214,24 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         &self,
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort>;
+    /// Open an observed read's delivery ([`ReadDelivery::Observed`]) where
+    /// its holder consumes it: what answering it observed joins the build
+    /// that is current here, exactly as [`Self::adopt_read`] joins it. A
+    /// holder that consumes the answer inside a probe adopts it there, so the
+    /// probe's own adopt or discard decides whether it reaches the build.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    fn adopt_observed(
+        &self,
+        read: Box<super::flow_return_fact::ObservedRead<ReadDelivery>>,
+    ) -> Result<ReadDelivery, crate::semantic_query::ExecutionAbort>;
+    /// Open an observed read's delivery whose observations its holder
+    /// declines, as a probe discards its own: they are dropped, and only an
+    /// execution abort it observed survives.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    fn discard_observed(
+        &self,
+        read: Box<super::flow_return_fact::ObservedRead<ReadDelivery>>,
+    ) -> Result<ReadDelivery, crate::semantic_query::ExecutionAbort>;
     /// What recording a read the rest of the evaluation may replay records
     /// under, when it can be recorded
     /// ([`ProjectSemanticDispatch::held_transaction_read_policy`]).
@@ -11340,13 +11469,6 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         args: Arc<[SemanticNodeId]>,
         context: ProjectionReductionContext,
     ) -> Option<SemanticNodeId>;
-    fn lower_type_expr_in_owner_scope_with_context(
-        &self,
-        scope_canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        expr: &verter_type_expr::TypeExpr,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<SemanticNodeId>;
     fn materialize_flow_return_wrap(&self, result: FlowReturnResult) -> FlowReturnResult;
     fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool;
     fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict;
@@ -11496,17 +11618,6 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         shape: super::call_resolve::ArrayLiteralShape,
     ) -> super::contextual_tuple::TupleElementContext;
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
-    fn shallow_lower_type_expr_with_context(
-        &self,
-        expr: &TypeExpr,
-        env: &FxHashMap<String, SemanticNodeId>,
-        scope: &NodeScopeId,
-        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
-        scope_payload: Option<&DeclarationScopePayload>,
-        shadowing: &ScopeShadowing,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        reduction_context: ProjectionReductionContext,
-    ) -> SemanticNodeId;
     fn substitute_semantic_type_param(
         &self,
         node: SemanticNodeId,
@@ -11634,6 +11745,39 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
 impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
     for ProjectSemanticDispatch<'_, C>
 {
+    fn request_carrier(&self, node: SemanticNodeId) -> CarrierStep {
+        CarrierStep::begin(self, node)
+    }
+    fn deliver_carrier(
+        &self,
+        walk: &mut IdentityCarrierRead,
+        delivery: ReadDelivery,
+        canonical: &str,
+    ) -> ReadStep<IdentityCarrierUnwrap> {
+        let ReadDelivery::Staged(wait, in_place) = delivery else {
+            unreachable!("a carrier's read is handed back staged")
+        };
+        // The read is made inside the walk's stage: under the tracer of the
+        // deferred evaluation that named it, as the in-place walk makes it.
+        let mut wait = Some(*wait);
+        let next = self.deliver_identity_carrier_read(walk, &mut || {
+            let wait = wait.take().expect("a carrier read is made once");
+            super::narrow_value_cache_read(self.read_staged(wait, canonical, in_place))
+        });
+        let step = match next {
+            Some(key) => IdentityCarrierStep::Read(key),
+            None => self.advance_identity_carrier_read(walk),
+        };
+        match step {
+            IdentityCarrierStep::Done(done) => ReadStep::Ready(done),
+            IdentityCarrierStep::Read(key) => {
+                ReadStep::Wait(helper_run::carrier_wait(self, walk, key))
+            }
+        }
+    }
+    fn release_carrier(&self, walk: Box<IdentityCarrierRead>) {
+        self.abandon_identity_carrier_read(*walk);
+    }
     #[inline(never)]
     fn request(&self, key: SemanticQueryKey, shape: ReadShape, origin: ReadOrigin) -> ReadWait {
         #[cfg(not(any(test, feature = "test-support")))]
@@ -11644,6 +11788,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
             shape,
             checking_site: self.checking_site.get(),
             lexical: false,
+            observed: false,
             #[cfg(any(test, feature = "test-support"))]
             origin,
         }
@@ -11769,13 +11914,88 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
             ListProgress::Unsettled => ReadStep::Ready(None),
         }
     }
+    fn request_lowering<'e>(
+        &self,
+        expr: &'e TypeExpr,
+        binder: &Arc<FlowBinderEnv>,
+        context: ProjectionReductionContext,
+    ) -> LowerStart<'e> {
+        body_read_site!("request_lowering");
+        let _type_node = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
+        let mut read = self.begin_type_lowering(expr, &binder.scope, context);
+        match self.advance_type_lowering(&binder.as_lowering(), &mut read, None) {
+            super::lower::LowerProgress::Done(node) => LowerStart::Done(node),
+            super::lower::LowerProgress::Read(request) => LowerStart::Wait(
+                Box::new(FlowLowering::Body(read, Arc::clone(binder))),
+                self.lowering_wait(request),
+            ),
+        }
+    }
+    fn request_owner_lowering<'e>(
+        &self,
+        owner_scope: (&str, verter_type_expr::TopLevelOwnerId),
+        expr: &'e TypeExpr,
+        context: ProjectionReductionContext,
+    ) -> LowerStart<'e> {
+        body_read_site!("request_owner_lowering");
+        let _type_node = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
+        let (scope_canonical_id, owner) = owner_scope;
+        let mut lowering = self.begin_type_lowering_in_owner_scope_with_context(
+            scope_canonical_id,
+            owner,
+            expr,
+            context,
+        );
+        match self.advance_type_lowering(&lowering.context.as_lowering(), &mut lowering.read, None)
+        {
+            super::lower::LowerProgress::Done(node) => LowerStart::Done(node),
+            super::lower::LowerProgress::Read(request) => LowerStart::Wait(
+                Box::new(FlowLowering::Owner(lowering)),
+                self.lowering_wait(request),
+            ),
+        }
+    }
+    fn deliver_lowering<'e>(
+        &self,
+        lowering: &mut FlowLowering<'e>,
+        delivery: ReadDelivery,
+    ) -> ReadStep<SemanticNodeId> {
+        body_read_site!("deliver_lowering");
+        let _type_node = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
+        let delivered = match delivery {
+            ReadDelivery::Node(read) => super::lower::LowerDelivery::Node(*read),
+            ReadDelivery::Value(read) => super::lower::LowerDelivery::Whole(*read),
+            ReadDelivery::None | ReadDelivery::Staged(..) | ReadDelivery::Observed(_) => {
+                unreachable!("a lowering's read delivers its node read or its whole read")
+            }
+        };
+        let progress = match lowering {
+            FlowLowering::Body(read, binder) => {
+                self.advance_type_lowering(&binder.as_lowering(), read, Some(delivered))
+            }
+            FlowLowering::Owner(owner) => self.advance_type_lowering(
+                &owner.context.as_lowering(),
+                &mut owner.read,
+                Some(delivered),
+            ),
+        };
+        match progress {
+            super::lower::LowerProgress::Done(node) => ReadStep::Ready(node),
+            super::lower::LowerProgress::Read(request) => {
+                ReadStep::Wait(self.lowering_wait(request))
+            }
+        }
+    }
     fn answer_read(&self, wait: ReadWait, canonical: &str) -> ReadDelivery {
         body_read_site!("answer_read");
         // The read answers a request that reached the root read: the
         // count of body reads leaves it out.
         #[cfg(any(test, feature = "test-support"))]
         let _answer = body_reads::enter_request_answer();
-        self.read_requested(wait, canonical)
+        self.read_requested(wait, canonical, false)
     }
     fn begin_call(
         &self,
@@ -11830,7 +12050,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         let _stage = body_reads::enter_in_place();
         #[cfg(any(test, feature = "test-support"))]
         let _site = body_reads::enter_site(wait.origin.name());
-        self.read_requested(wait, canonical)
+        self.read_requested(wait, canonical, true)
     }
     fn substitute_canonical(
         &self,
@@ -11876,6 +12096,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
         body_read_site!("adopt_read");
         read.adopt(self)
+    }
+    fn adopt_observed(
+        &self,
+        read: Box<super::flow_return_fact::ObservedRead<ReadDelivery>>,
+    ) -> Result<ReadDelivery, crate::semantic_query::ExecutionAbort> {
+        FlowDemandDriver::adopt_read(self, *read)
+    }
+    fn discard_observed(
+        &self,
+        read: Box<super::flow_return_fact::ObservedRead<ReadDelivery>>,
+    ) -> Result<ReadDelivery, crate::semantic_query::ExecutionAbort> {
+        body_read_site!("discard_observed");
+        read.discard()
     }
     fn held_transaction_read_policy(
         &self,
@@ -12304,24 +12537,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             context,
         )
     }
-    fn lower_type_expr_in_owner_scope_with_context(
-        &self,
-        scope_canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        expr: &verter_type_expr::TypeExpr,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
-        body_read_site!("lower_type_expr_in_owner_scope_with_context");
-        let _type_node = self
-            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
-        ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context(
-            self,
-            scope_canonical_id,
-            owner,
-            expr,
-            context,
-        )
-    }
     fn materialize_flow_return_wrap(&self, result: FlowReturnResult) -> FlowReturnResult {
         body_read_site!("materialize_flow_return_wrap");
         ProjectSemanticDispatch::materialize_flow_return_wrap(self, result)
@@ -12551,32 +12766,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         body_read_site!("self_reference_declaration");
         ProjectSemanticDispatch::self_reference_declaration(self, node)
-    }
-    fn shallow_lower_type_expr_with_context(
-        &self,
-        expr: &TypeExpr,
-        env: &FxHashMap<String, SemanticNodeId>,
-        scope: &NodeScopeId,
-        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
-        scope_payload: Option<&DeclarationScopePayload>,
-        shadowing: &ScopeShadowing,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        reduction_context: ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        body_read_site!("shallow_lower_type_expr_with_context");
-        let _type_node = self
-            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
-        ProjectSemanticDispatch::shallow_lower_type_expr_with_context(
-            self,
-            expr,
-            env,
-            scope,
-            name_resolution,
-            scope_payload,
-            shadowing,
-            substitutions,
-            reduction_context,
-        )
     }
     fn substitute_semantic_type_param(
         &self,
@@ -12883,6 +13072,20 @@ impl<D: FlowDemandDriver> FlowCx<'_, D> {
     }
 }
 impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
+    fn request_carrier(&self, node: SemanticNodeId) -> CarrierStep {
+        self.driver.request_carrier(node)
+    }
+    fn deliver_carrier(
+        &self,
+        walk: &mut IdentityCarrierRead,
+        delivery: ReadDelivery,
+        canonical: &str,
+    ) -> ReadStep<IdentityCarrierUnwrap> {
+        self.driver.deliver_carrier(walk, delivery, canonical)
+    }
+    fn release_carrier(&self, walk: Box<IdentityCarrierRead>) {
+        self.driver.release_carrier(walk);
+    }
     fn request(&self, key: SemanticQueryKey, shape: ReadShape, origin: ReadOrigin) -> ReadWait {
         self.driver.request(key, shape, origin)
     }
@@ -12920,6 +13123,30 @@ impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
         delivery: ReadDelivery,
     ) -> ReadStep<Option<Vec<SemanticNodeId>>> {
         self.driver.deliver_signature_list(list, delivery)
+    }
+    fn request_lowering<'e>(
+        &self,
+        expr: &'e TypeExpr,
+        binder: &Arc<FlowBinderEnv>,
+        context: ProjectionReductionContext,
+    ) -> LowerStart<'e> {
+        self.driver.request_lowering(expr, binder, context)
+    }
+    fn request_owner_lowering<'e>(
+        &self,
+        owner_scope: (&str, verter_type_expr::TopLevelOwnerId),
+        expr: &'e TypeExpr,
+        context: ProjectionReductionContext,
+    ) -> LowerStart<'e> {
+        self.driver
+            .request_owner_lowering(owner_scope, expr, context)
+    }
+    fn deliver_lowering<'e>(
+        &self,
+        lowering: &mut FlowLowering<'e>,
+        delivery: ReadDelivery,
+    ) -> ReadStep<SemanticNodeId> {
+        self.driver.deliver_lowering(lowering, delivery)
     }
     fn answer_read(&self, wait: ReadWait, canonical: &str) -> ReadDelivery {
         self.driver.answer_read(wait, canonical)
@@ -12983,6 +13210,18 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
         self.driver.adopt_read(read)
+    }
+    fn adopt_observed(
+        &self,
+        read: Box<super::flow_return_fact::ObservedRead<ReadDelivery>>,
+    ) -> Result<ReadDelivery, crate::semantic_query::ExecutionAbort> {
+        self.driver.adopt_observed(read)
+    }
+    fn discard_observed(
+        &self,
+        read: Box<super::flow_return_fact::ObservedRead<ReadDelivery>>,
+    ) -> Result<ReadDelivery, crate::semantic_query::ExecutionAbort> {
+        self.driver.discard_observed(read)
     }
     fn held_transaction_read_policy(
         &self,
@@ -13340,20 +13579,6 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         self.driver
             .lower_lib_global(scope_canonical_id, owner, name, args, context)
     }
-    fn lower_type_expr_in_owner_scope_with_context(
-        &self,
-        scope_canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        expr: &verter_type_expr::TypeExpr,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
-        self.driver.lower_type_expr_in_owner_scope_with_context(
-            scope_canonical_id,
-            owner,
-            expr,
-            context,
-        )
-    }
     fn materialize_flow_return_wrap(&self, result: FlowReturnResult) -> FlowReturnResult {
         self.driver.materialize_flow_return_wrap(result)
     }
@@ -13551,28 +13776,6 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         self.driver.self_reference_declaration(node)
-    }
-    fn shallow_lower_type_expr_with_context(
-        &self,
-        expr: &TypeExpr,
-        env: &FxHashMap<String, SemanticNodeId>,
-        scope: &NodeScopeId,
-        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
-        scope_payload: Option<&DeclarationScopePayload>,
-        shadowing: &ScopeShadowing,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        reduction_context: ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        self.driver.shallow_lower_type_expr_with_context(
-            expr,
-            env,
-            scope,
-            name_resolution,
-            scope_payload,
-            shadowing,
-            substitutions,
-            reduction_context,
-        )
     }
     fn substitute_semantic_type_param(
         &self,
@@ -14679,6 +14882,20 @@ pub fn flow_read_requests_for_tests() -> usize {
     FLOW_READ_REQUESTS.with(std::cell::Cell::get)
 }
 
+/// How a holder's probe consumes a read the holder answered outside it
+/// (test-only; [`ProjectSemanticDispatch::flow_holder_probe_read_for_tests`]).
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HolderProbeForTests {
+    /// The probe opens the answer and is discarded: it was not fresh.
+    Stale,
+    /// The probe opens the answer and is adopted: it was fresh.
+    Fresh,
+    /// The holder declines the answer's observations itself, inside a probe
+    /// that is adopted.
+    DeclinedInFresh,
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// The most signature-list deliveries flow bodies on this thread may take
@@ -15770,12 +15987,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let Some(declared) = declared else {
             return;
         };
-        let binder =
-            if signature_answer_is_frame_shadowed(self.dispatch, self.st.binder_env, declared) {
-                self.unmodeled_position()
-            } else {
-                self.lower_body_type(declared.ty())
-            };
+        let binder = if signature_answer_is_frame_shadowed(
+            self.dispatch,
+            self.st.canonical,
+            self.st.binder_env,
+            declared,
+        ) {
+            self.unmodeled_position()
+        } else {
+            self.lower_body_type(declared.ty())
+        };
         self.st.receiver = Some(std::sync::Arc::new(
             class_expression::ClassReceiver::of_type(binder, Some(binder)).explicit(),
         ));
@@ -21164,14 +21385,39 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
 
     /// Begin a type leaf's evaluation on `run`: the node it lowers to, or
     /// the read that answers it, requested with the leaf waiting for the
-    /// answer on top of `run` ([`Waiting::Read`]).
+    /// answer on top of `run` ([`Waiting::Read`]). Its lowering reads
+    /// first, retained at the read it waits on; the lowered carrier then
+    /// takes the closed-utility read.
     #[inline(never)]
     fn begin_type_leaf<'e>(
         &self,
         run: &mut ExprRun<'e>,
         leaf: &'e verter_session_query::flow::slice::GatedLeaf,
     ) -> ReadStep<SemanticNodeId> {
-        let carrier = self.lower_body_type_carrier(leaf.ty());
+        match self.dispatch.request_lowering(
+            leaf.ty(),
+            self.st.binder_env,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        ) {
+            LowerStart::Done(carrier) => self.type_leaf_lowered(run, leaf, carrier),
+            LowerStart::Wait(lowering, wait) => {
+                run.waiting.push(Waiting::Read(ReadSite::Helper(Box::new(
+                    HelperWait::type_leaf(lowering, leaf),
+                ))));
+                ReadStep::Wait(wait)
+            }
+        }
+    }
+
+    /// Continue a type leaf on `run` from its lowered `carrier`: the node
+    /// it denotes, or the closed-utility read that answers it, requested
+    /// with the leaf waiting for the answer on top of `run`.
+    fn type_leaf_lowered<'e>(
+        &self,
+        run: &mut ExprRun<'e>,
+        leaf: &'e verter_session_query::flow::slice::GatedLeaf,
+        carrier: SemanticNodeId,
+    ) -> ReadStep<SemanticNodeId> {
         let step = self.body_type_read(carrier);
         if matches!(step, ReadStep::Wait(_)) {
             run.waiting
@@ -23119,16 +23365,20 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             }
             return fact;
         }
-        let fact = self.narrow_arms_by(subject, |this, arm| {
-            Some(match this.arm_truthiness_edge(arm, negated) {
-                crate::semantic_query::TruthinessInhabitance::Yes => true,
-                crate::semantic_query::TruthinessInhabitance::No => false,
-                crate::semantic_query::TruthinessInhabitance::Undecided => {
-                    undecided = true;
-                    true
-                }
-            })
-        });
+        let fact = if let Some(current) = self.subject_current_node(subject) {
+            let arms = self.enumerated_union_arms_or_self(current);
+            let arms = self.truthiness_arms_in_place(arms, negated, false);
+            undecided |= arms.undecided;
+            if arms.survivors.is_empty() {
+                ArmFilter::NoSurvivor
+            } else if !arms.dropped {
+                ArmFilter::Unchanged
+            } else {
+                ArmFilter::Narrowed(self.union(&arms.survivors))
+            }
+        } else {
+            ArmFilter::Unchanged
+        };
         if undecided {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 verter_session_query::flow::policy::FlowGap::GuardNarrowing,
@@ -23149,48 +23399,19 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         negated: bool,
     ) -> Option<GuardNarrowing> {
-        use crate::semantic_query::TruthinessInhabitance;
         let current = self.subject_current_node(subject)?;
         let arms = self.enumerated_union_arms_or_self(current);
-        let graph = self.dispatch.graph();
-        let is_boolean = |arm: &SemanticNodeId| {
-            graph.node_data(*arm).as_deref()
+        if !arms.iter().any(|arm| {
+            self.dispatch.arena().node_data(*arm).as_deref()
                 == Some(&SemanticNodeData::Primitive(PrimitiveKind::Boolean))
-        };
-        if !arms.iter().any(is_boolean) {
+        }) {
             return None;
         }
-        let mut survivors = Vec::with_capacity(arms.len() + 1);
-        let mut dropped = false;
-        for arm in arms {
-            // With `strictNullChecks` off `true` carries the `Falsy` fact
-            // too (`TrueFacts`), so the falsy edge keeps `boolean` whole.
-            if is_boolean(&arm) && negated && !self.st.nullability.is_strict() {
-                survivors.push(arm);
-                continue;
-            }
-            if is_boolean(&arm) {
-                survivors.push(graph.intern_node(SemanticNodeData::Literal(
-                    crate::semantic_query::LiteralValue::Boolean(!negated),
-                )));
-                dropped = true;
-                continue;
-            }
-            match self.arm_truthiness_edge(arm, negated) {
-                TruthinessInhabitance::No => dropped = true,
-                TruthinessInhabitance::Yes => survivors.push(arm),
-                TruthinessInhabitance::Undecided => {
-                    self.record_degradation(FlowReturnDegradation::FlowGap(
-                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
-                    ));
-                    survivors.push(arm);
-                }
-            }
-        }
-        if !dropped {
+        let arms = self.truthiness_arms_in_place(arms, negated, true);
+        if !arms.dropped {
             return Some(GuardNarrowing::Unchanged);
         }
-        let node = self.union(&survivors);
+        let node = self.union(&arms.survivors);
         Some(GuardNarrowing::Narrowed(subject.clone(), node))
     }
 
@@ -23209,7 +23430,17 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         arm: SemanticNodeId,
         negated: bool,
     ) -> crate::semantic_query::TruthinessInhabitance {
-        let settled = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+        let settled = self.truthiness_carrier_in_place(arm);
+        self.classify_truthiness_edge(settled, negated)
+    }
+
+    /// Classify only after the carrier's standing walk has answered.
+    fn classify_truthiness_edge(
+        &mut self,
+        settled: IdentityCarrierUnwrap,
+        negated: bool,
+    ) -> crate::semantic_query::TruthinessInhabitance {
+        let settled = match settled {
             super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
             super::relation::IdentityCarrierUnwrap::Unresolvable => {
                 return crate::semantic_query::TruthinessInhabitance::Undecided;
@@ -25469,14 +25700,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             name: Arc::clone(ctor),
             type_arguments: Arc::from(Vec::new().into_boxed_slice()),
         };
-        let Some(instance) = self.dispatch.lower_type_expr_in_owner_scope_with_context(
-            self.st.canonical,
-            self.st.owner,
-            &ctor_ty,
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        ) else {
-            return GuardNarrowing::Unchanged;
-        };
+        let instance = self.lower_owner_in_place(self.st.canonical, self.st.owner, &ctor_ty);
         // A union of at least two arms an index stands for is neither
         // `any` nor `unknown`; its guard reads it through the index.
         let indexed = self.indexed_subject(subject);
@@ -26002,20 +26226,18 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         subject: SemanticNodeId,
         key: &str,
     ) -> Option<SemanticNodeId> {
-        let key_node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+        let key_node = self.lower_owner_in_place(
             self.st.canonical,
             self.st.owner,
             &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
                 key.to_string(),
             )),
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )?;
-        let unknown_node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+        );
+        let unknown_node = self.lower_owner_in_place(
             self.st.canonical,
             self.st.owner,
             &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown),
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )?;
+        );
         let utility = self.dispatch.lower_lib_global(
             self.st.canonical,
             self.st.owner,
@@ -26599,12 +26821,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         {
             return None;
         }
-        self.dispatch.lower_type_expr_in_owner_scope_with_context(
-            self.st.canonical,
-            self.st.owner,
-            callee.ty(),
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )
+        Some(self.lower_owner_in_place(self.st.canonical, self.st.owner, callee.ty()))
     }
 
     /// [`Self::narrow_to_predicate_target_consuming`] over an already
@@ -27320,18 +27537,47 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     }
 
     /// [`Self::lower_body_type`]'s carrier: the type lowered, before a
-    /// closed signature utility in it is read as its answer.
+    /// closed signature utility in it is read as its answer. Its reads are
+    /// answered in place.
     fn lower_body_type_carrier(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
-        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        self.dispatch.shallow_lower_type_expr_with_context(
+        self.lower_in_place(
             ty,
-            &self.st.binder_env.env,
-            &self.st.binder_env.scope,
-            &self.st.binder_env.name_resolution,
-            self.st.binder_env.scope_payload.as_ref(),
-            &self.st.binder_env.shadowing,
-            &mut substitutions,
+            self.st.binder_env,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
+    }
+
+    /// Lower `ty` under `binder` where nothing suspends: each read its
+    /// lowering waits on is answered at once.
+    fn lower_in_place(
+        &self,
+        ty: &verter_type_expr::TypeExpr,
+        binder: &Arc<FlowBinderEnv>,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        lowering_in_place(
+            self.dispatch,
+            self.st.canonical,
+            self.dispatch.request_lowering(ty, binder, context),
+        )
+    }
+
+    /// Lower `ty` in the file owner scope `(scope, owner)` where nothing
+    /// suspends: each read its lowering waits on is answered at once.
+    fn lower_owner_in_place(
+        &self,
+        scope: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        ty: &verter_type_expr::TypeExpr,
+    ) -> SemanticNodeId {
+        lowering_in_place(
+            self.dispatch,
+            self.st.canonical,
+            self.dispatch.request_owner_lowering(
+                (scope, owner),
+                ty,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            ),
         )
     }
 
@@ -27357,7 +27603,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &self,
         name: &verter_session_query::flow::slice::FrameShadowedName,
     ) -> bool {
-        owner_scope_answers_frame_name(self.dispatch, self.st.binder_env, name)
+        owner_scope_answers_frame_name(self.dispatch, self.st.canonical, self.st.binder_env, name)
     }
 
     /// Evaluate one region, returning its contributor nodes and whether
@@ -29227,21 +29473,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         };
         let base = if signature_answer_is_frame_shadowed(
             self.dispatch,
+            self.st.canonical,
             &binder_env,
             &authority.declared,
         ) {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
             self.unmodeled_position()
         } else {
-            let mut substitutions = Vec::new();
-            self.dispatch.shallow_lower_type_expr_with_context(
+            self.lower_in_place(
                 authority.declared.ty(),
-                &binder_env.env,
-                &binder_env.scope,
-                &binder_env.name_resolution,
-                binder_env.scope_payload.as_ref(),
-                &binder_env.shadowing,
-                &mut substitutions,
+                &binder_env,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
         };
@@ -29289,13 +29530,13 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // frame's, or a class expression's over it for a class member: the
         // nested signature sits inside that scope, so every binder in scope
         // there is in scope here too.
-        let binder_env = self.dispatch.flow_binder_env(
+        let binder_env = Arc::new(self.dispatch.flow_binder_env(
             self.st.canonical,
             self.st.owner,
             type_parameters,
             Some(outer_env),
             Some(anchor),
-        );
+        ));
         // The SAME signature gate the root evaluation takes. A nested
         // signature sits inside the enclosing frame's body, so its
         // annotations, its type-parameter constraints / defaults, and
@@ -29316,7 +29557,14 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 .constraint
                 .iter()
                 .chain(clause_param.default.iter())
-                .any(|gated| signature_answer_is_frame_shadowed(self.dispatch, &binder_env, gated))
+                .any(|gated| {
+                    signature_answer_is_frame_shadowed(
+                        self.dispatch,
+                        self.st.canonical,
+                        &binder_env,
+                        gated,
+                    )
+                })
             {
                 continue;
             }
@@ -29338,7 +29586,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let mut signature_params: Vec<crate::semantic_query::FunctionParam> =
             Vec::with_capacity(nested_params.len());
         for param in nested_params.iter() {
-            if signature_answer_is_frame_shadowed(self.dispatch, &binder_env, &param.ty) {
+            if signature_answer_is_frame_shadowed(
+                self.dispatch,
+                self.st.canonical,
+                &binder_env,
+                &param.ty,
+            ) {
                 let node = self.unmodeled_position();
                 params.push(node);
                 signature_params.push(crate::semantic_query::FunctionParam {
@@ -29351,15 +29604,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 });
                 continue;
             }
-            let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-            let node = self.dispatch.shallow_lower_type_expr_with_context(
+            let node = self.lower_in_place(
                 param.ty.ty(),
-                &binder_env.env,
-                &binder_env.scope,
-                &binder_env.name_resolution,
-                binder_env.scope_payload.as_ref(),
-                &binder_env.shadowing,
-                &mut substitutions,
+                &binder_env,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             );
             let node = self
@@ -29392,44 +29639,41 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // parameter annotation takes: a shadowed answer carries the typed
         // marker in the RETURN position and degrades the enclosing result.
         if let Some(declared) = declared_return {
-            let return_type =
-                if signature_answer_is_frame_shadowed(self.dispatch, &binder_env, declared) {
-                    self.record_degradation(
-                        crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                    );
-                    self.unmodeled_position()
-                } else {
-                    let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                    self.dispatch.shallow_lower_type_expr_with_context(
-                        declared.ty(),
-                        &binder_env.env,
-                        &binder_env.scope,
-                        &binder_env.name_resolution,
-                        binder_env.scope_payload.as_ref(),
-                        &binder_env.shadowing,
-                        &mut substitutions,
-                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                    )
-                };
+            let return_type = if signature_answer_is_frame_shadowed(
+                self.dispatch,
+                self.st.canonical,
+                &binder_env,
+                declared,
+            ) {
+                self.record_degradation(
+                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                );
+                self.unmodeled_position()
+            } else {
+                self.lower_in_place(
+                    declared.ty(),
+                    &binder_env,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )
+            };
             // The predicate target takes the same frame gate and binder
             // environment as the return it stands beside.
             let predicate = declared_predicate.and_then(|declared| {
                 let target = declared.target().map(|target| {
-                    if signature_answer_is_frame_shadowed(self.dispatch, &binder_env, target) {
+                    if signature_answer_is_frame_shadowed(
+                        self.dispatch,
+                        self.st.canonical,
+                        &binder_env,
+                        target,
+                    ) {
                         self.record_degradation(
                             crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
                         );
                         self.unmodeled_position()
                     } else {
-                        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                        self.dispatch.shallow_lower_type_expr_with_context(
+                        self.lower_in_place(
                             target.ty(),
-                            &binder_env.env,
-                            &binder_env.scope,
-                            &binder_env.name_resolution,
-                            binder_env.scope_payload.as_ref(),
-                            &binder_env.shadowing,
-                            &mut substitutions,
+                            &binder_env,
                             crate::semantic_query::ProjectionReductionContext::structural_transit(),
                         )
                     }
@@ -30028,13 +30272,8 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             if slice.name != param.name {
                 return None;
             }
-            slice.default.as_ref().and_then(|gated| {
-                self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                    self.st.canonical,
-                    target.declaration.owner,
-                    gated.ty(),
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                )
+            slice.default.as_ref().map(|gated| {
+                self.lower_owner_in_place(self.st.canonical, target.declaration.owner, gated.ty())
             })
         })
     }
@@ -31011,15 +31250,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     self.record_degradation(FlowReturnDegradation::UnmodeledPosition);
                     return self.eval_expr(operand);
                 }
-                let mut substitutions = Vec::new();
-                let contextual = self.dispatch.shallow_lower_type_expr_with_context(
+                let contextual = self.lower_in_place(
                     target.ty(),
-                    &self.st.binder_env.env,
-                    &self.st.binder_env.scope,
-                    &self.st.binder_env.name_resolution,
-                    self.st.binder_env.scope_payload.as_ref(),
-                    &self.st.binder_env.shadowing,
-                    &mut substitutions,
+                    self.st.binder_env,
                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         crate::semantic_query::ProjectionMode::Skeleton,
                     ),
@@ -31624,12 +31857,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 .collect(),
             type_args: Vec::new(),
         });
-        self.dispatch.lower_type_expr_in_owner_scope_with_context(
-            self.st.canonical,
-            self.st.owner,
-            &callee_expr,
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )
+        Some(self.lower_owner_in_place(self.st.canonical, self.st.owner, &callee_expr))
     }
 
     /// Whether a same-file direct callee is an EXPORTED function whose
@@ -32414,14 +32642,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     .collect(),
                 type_args: Vec::new(),
             });
-            let Some(callee_node) = self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                self.st.canonical,
-                self.st.owner,
-                &callee,
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
-            ) else {
-                return CallNext::Value(self.degraded_unrepresentable_callee());
-            };
+            let callee_node = self.lower_owner_in_place(self.st.canonical, self.st.owner, &callee);
             // The checker still checks the call against the annotated
             // type: for a lone non-generic signature the executor
             // decides applicability first, and an undecided executor
@@ -32935,12 +33156,11 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 frame_rooted = true;
                 Some(node)
             }
-            None => self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            None => Some(self.lower_owner_in_place(
                 self.st.canonical,
                 self.st.owner,
                 &type_arguments[0],
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
-            ),
+            )),
         };
         // A callee its object proves absent is the checker's TS2339,
         // and a call of its error type is untyped.

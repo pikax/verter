@@ -37,6 +37,11 @@ export interface HostCompileRequestResponse {
    * One row per requested product kind, in request order.
    */
   products: Array<HostCompiledProduct>;
+  /**
+   * The compile's complete artifact set as terminal JSON, present
+   * exactly when the compile published one.
+   */
+  artifactSet?: string;
 }
 
 /**

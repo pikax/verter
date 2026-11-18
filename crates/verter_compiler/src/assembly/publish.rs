@@ -44,6 +44,19 @@ pub enum ArtifactSchemaError {
     UnknownRootArtifact,
     /// A staged handoff's root artifact carries no produced content.
     UnavailableRootArtifact,
+    /// Style facts sit on an artifact that is not a style, or a style
+    /// artifact carries none.
+    StyleFactsMismatch,
+    /// A style or metadata artifact does not name exactly one owning module
+    /// through its own relation kind, or another role carries such a relation.
+    MisplacedRoleRelation,
+    /// A `StyleOf` or `MetadataOf` relation targets an artifact that is not
+    /// a module.
+    RoleRelationTargetNotModule,
+    /// Two style artifacts of one module share a block index.
+    DuplicateStyleIndex,
+    /// A module has more than one metadata artifact.
+    DuplicateMetadata,
 }
 
 impl std::fmt::Display for ArtifactSchemaError {
@@ -160,6 +173,7 @@ impl CompileArtifactSet {
                 )?;
             }
         }
+        validate_roles(&artifacts)?;
         Ok(Self {
             source_units: sources,
             artifacts,
@@ -231,6 +245,65 @@ impl CompileArtifactSet {
     }
 }
 
+/// The role invariants [`super::artifact_graph::ArtifactGraph`] walks on:
+/// style facts sit exactly on style artifacts; each style or metadata
+/// artifact names exactly one module through its own relation kind; one
+/// module's styles have distinct block indexes; and a module has at most one
+/// metadata artifact. Relation targets are already known to exist.
+fn validate_roles(
+    artifacts: &[super::fragment::CompileArtifact],
+) -> Result<(), ArtifactSchemaError> {
+    use super::artifact_graph::ArtifactRole;
+    use super::fragment::ArtifactRelationKind;
+    use std::collections::{BTreeMap, BTreeSet};
+    use ArtifactSchemaError as E;
+    let roles: BTreeMap<_, _> = artifacts
+        .iter()
+        .map(|artifact| (artifact.id(), artifact.role()))
+        .collect();
+    let mut style_indexes = BTreeSet::new();
+    let mut described = BTreeSet::new();
+    for artifact in artifacts {
+        let role = artifact.role();
+        if (role == ArtifactRole::Style) != artifact.style().is_some() {
+            return Err(E::StyleFactsMismatch);
+        }
+        let mut owner = None;
+        for relation in &artifact.relations {
+            let carrier = match relation.kind {
+                ArtifactRelationKind::StyleOf => ArtifactRole::Style,
+                ArtifactRelationKind::MetadataOf => ArtifactRole::Metadata,
+                ArtifactRelationKind::DependsOn
+                | ArtifactRelationKind::CompanionOf
+                | ArtifactRelationKind::DeclarationOf => continue,
+            };
+            if role != carrier || owner.replace(&relation.target).is_some() {
+                return Err(E::MisplacedRoleRelation);
+            }
+            if roles.get(&relation.target) != Some(&ArtifactRole::Module) {
+                return Err(E::RoleRelationTargetNotModule);
+            }
+        }
+        match (role, owner, artifact.style()) {
+            (ArtifactRole::Module, _, _) => {}
+            (ArtifactRole::Style, Some(module), Some(facts)) => {
+                if !style_indexes.insert((module, facts.index)) {
+                    return Err(E::DuplicateStyleIndex);
+                }
+            }
+            (ArtifactRole::Metadata, Some(module), _) => {
+                if !described.insert(module) {
+                    return Err(E::DuplicateMetadata);
+                }
+            }
+            (ArtifactRole::Style | ArtifactRole::Metadata, _, _) => {
+                return Err(E::MisplacedRoleRelation)
+            }
+        }
+    }
+    Ok(())
+}
+
 impl serde::Serialize for CompileArtifactSet {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use super::fragment::ArtifactContent;
@@ -273,16 +346,21 @@ impl serde::Serialize for CompileArtifactSet {
                     "segments": segments,
                 })
             }).collect();
-            json!({
+            let mut artifact = json!({
                 "id": hex::encode(a.id().canonical_bytes()), "sourceUnit": hex::encode(a.source_unit().canonical_bytes()),
                 "product": a.product().wire_tag(), "language": a.language().as_str(), "name": a.name(),
+                "role": a.role(),
                 "provenance": {
                     "inputBasis": hex::encode(a.provenance.input_basis.canonical_bytes()),
                     "producer": hex::encode(a.provenance.producer.canonical_bytes()),
                     "inputs": a.provenance.inputs.iter().map(|s| hex::encode(s.canonical_bytes())).collect::<Vec<_>>(),
                 },
                 "content": content, "relations": relations, "maps": maps,
-            })
+            });
+            if let (Some(style), Value::Object(fields)) = (a.style(), &mut artifact) {
+                fields.insert("style".to_string(), json!(style));
+            }
+            artifact
         }).collect();
         let custom_blocks: Vec<_> = self.custom_blocks.iter().map(|block| {
             use super::custom_block::CustomBlockContent;
@@ -328,7 +406,7 @@ impl serde::Serialize for CompileArtifactSet {
                 },
             })
         }).collect();
-        let mut terminal = json!({"schemaVersion": 1, "coordinates": "utf8-bytes", "sourceUnits": sources, "artifacts": artifacts, "customBlocks": custom_blocks});
+        let mut terminal = json!({"schemaVersion": 2, "coordinates": "utf8-bytes", "sourceUnits": sources, "artifacts": artifacts, "customBlocks": custom_blocks});
         // Keep wire order stable even when another crate enables serde_json's
         // preserve_order feature through Cargo feature unification.
         terminal.sort_all_objects();
@@ -470,6 +548,11 @@ pub(crate) struct ArtifactContribution<'a> {
     pub dialect: FragmentDialect,
     pub source_projection_map: Option<String>,
     pub runtime_source_map: Option<String>,
+    /// The grammar the compiler's own producers witnessed `code` in, when
+    /// they wrote all of it ([`super::emit_plan::EmittedArtifact::grammar`]).
+    /// A complete module witnessed in [`Self::dialect`] is not parsed again;
+    /// supplied or external bytes carry none and always are.
+    pub grammar: Option<super::fragment::GrammarWitness>,
 }
 
 /// A published artifact. Fields are private — the only mint site is
@@ -690,9 +773,11 @@ pub(crate) fn publish(
         // a JS artifact must reject TypeScript-only syntax rather than
         // silently accept it under TSX.
         if is_code_bearing(contribution.kind) {
-            if let Some(reason) =
-                super::fragment::final_module_parse_errors(&contribution.code, contribution.dialect)
-            {
+            if let Some(reason) = super::fragment::module_parse_errors(
+                &contribution.code,
+                contribution.dialect,
+                contribution.grammar,
+            ) {
                 return Err(AssemblyRefusal::FinalParseFailed {
                     kind: contribution.kind,
                     reason,
@@ -717,3 +802,7 @@ pub(crate) fn publish(
 #[cfg(test)]
 #[path = "publish_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "grammar_witness_tests.rs"]
+mod grammar_witness_tests;

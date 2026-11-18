@@ -49,8 +49,12 @@
 //! of this file is the compile-time half of that guarantee: a field that could
 //! carry an engine query would not satisfy its bounds.
 
-use super::chunk::Chunk;
+use smallvec::SmallVec;
+
 use super::code_transform::CodeTransform;
+use super::fallible::CodeTransformError;
+use super::freeze::chunk_content;
+use crate::emission::{Piece, Provenance};
 
 /// The class of a byte range in the PROJECTED surface. Closed and exhaustive: a
 /// projected region matching no variant is a lowering defect, not a fifth class.
@@ -164,8 +168,22 @@ pub struct MappingProduct {
 
 impl MappingProduct {
     /// Derive the product from the transform's emission record.
-    #[must_use]
-    pub fn of(transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`CodeTransformError::MapNotCaptured`] for a transform created without
+    /// map capture.
+    pub fn of(
+        transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
+    ) -> Result<Self, CodeTransformError> {
+        transform.require_map()?;
+        Ok(Self::of_captured(transform))
+    }
+
+    /// The product of a transform that captured map facts.
+    pub(super) fn of_captured(
+        transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
+    ) -> Self {
         let (projected, insertion_anchors) = project(transform);
         let carrier_len = transform.original().len() as u32;
         let carrier = partition_carrier(&projected, carrier_len);
@@ -311,8 +329,10 @@ fn project(
         }
     };
 
-    record_anchor(transform.intro(), generated);
-    push_synthesized(&mut out, &mut generated, transform.intro().len() as u32);
+    if let Some(intro) = transform.sole_intro_piece() {
+        record_anchor(intro, generated);
+    }
+    push_synthesized(&mut out, &mut generated, transform.intro_len() as u32);
 
     // The high-water mark of authored source already emitted. Identity means
     // the region's correspondence is a pure offset delta consistent with
@@ -324,177 +344,78 @@ fn project(
     // rewrote it.
     let mut emitted_through: u32 = 0;
 
-    for chunk in transform.chunks() {
-        let content = match chunk {
-            Chunk::Original { start, end } => &transform.original()[*start as usize..*end as usize],
-            Chunk::Moved { content, .. }
-            | Chunk::Overwritten { content, .. }
-            | Chunk::InsertedMapped { content, .. }
-            | Chunk::OverwrittenSegmented { content, .. }
-            | Chunk::Inserted { content }
-            | Chunk::InsertedAnchored { content, .. } => content,
-        };
-        record_anchor(content, generated);
-        match chunk {
-            Chunk::Original { start, end } => {
-                let len = end.saturating_sub(*start);
-                if len > 0 {
-                    let class = if *start >= emitted_through {
+    // Every byte through the one interpretation: the pieces each chunk
+    // becomes, the same pieces a frozen transform holds.
+    let mut pieces: SmallVec<[Piece<'_>; 4]> = SmallVec::new();
+    for (chunk, relocated) in transform.leaf_chunks() {
+        if let Some(content) = chunk_content(chunk) {
+            record_anchor(content, generated);
+        }
+        pieces.clear();
+        transform.leaf_pieces(chunk, relocated, &mut |piece| pieces.push(piece));
+        for piece in &pieces {
+            let len = transform.piece_text(piece).len() as u32;
+            if len == 0 {
+                continue;
+            }
+            let (class, carrier) = match piece.provenance() {
+                Provenance::Exact { source_start } => {
+                    // A relocated run holds authored bytes at a position a
+                    // move chose: never an identity correspondence.
+                    let class = if !piece.relocated() && source_start >= emitted_through {
                         ProjectedClass::Identity
                     } else {
                         ProjectedClass::Relocated
                     };
-                    push_coalesced(
-                        &mut out,
-                        ProjectedRegion {
-                            generated: MappingSpan {
-                                start: generated,
-                                end: generated + len,
-                            },
-                            class,
-                            carrier: Some(MappingSpan {
-                                start: *start,
-                                end: *end,
-                            }),
+                    (
+                        class,
+                        MappingSpan {
+                            start: source_start,
+                            end: source_start + len,
                         },
-                    );
-                    emitted_through = emitted_through.max(*end);
+                    )
                 }
-                generated += len;
-            }
-            Chunk::Moved {
-                start,
-                end,
-                content,
-                replacement,
-            } => {
-                let len = content.len() as u32;
-                if len > 0 {
-                    push_coalesced(
-                        &mut out,
-                        ProjectedRegion {
-                            generated: MappingSpan {
-                                start: generated,
-                                end: generated + len,
-                            },
-                            class: if *replacement {
-                                ProjectedClass::Rewritten
-                            } else {
-                                ProjectedClass::Relocated
-                            },
-                            carrier: Some(MappingSpan {
-                                start: *start,
-                                end: *end,
-                            }),
-                        },
-                    );
-                    emitted_through = emitted_through.max(*end);
-                    generated += len;
+                Provenance::Rewritten { source } => (
+                    ProjectedClass::Rewritten,
+                    MappingSpan {
+                        start: source.start,
+                        end: source.end,
+                    },
+                ),
+                // A point accounts for no authored extent: its preimage is the
+                // zero-width span at that point.
+                Provenance::Anchor { source_offset } => (
+                    ProjectedClass::Rewritten,
+                    MappingSpan {
+                        start: source_offset,
+                        end: source_offset,
+                    },
+                ),
+                Provenance::Unmapped | Provenance::External(_) => {
+                    push_synthesized(&mut out, &mut generated, len);
+                    continue;
                 }
+            };
+            push_coalesced(
+                &mut out,
+                ProjectedRegion {
+                    generated: MappingSpan {
+                        start: generated,
+                        end: generated + len,
+                    },
+                    class,
+                    carrier: Some(carrier),
+                },
+            );
+            // A point stands at the authored position without emitting it.
+            if !matches!(piece.provenance(), Provenance::Anchor { .. }) {
+                emitted_through = emitted_through.max(carrier.end);
             }
-            Chunk::Overwritten {
-                start,
-                end,
-                content,
-            } => {
-                let len = content.len() as u32;
-                if len > 0 {
-                    if transform.is_unmapped_overwrite(content) {
-                        // Wholly synthetic replacement text: it has no
-                        // correspondence to the span it stands in for, not even
-                        // the single "starts here" claim an ordinary overwrite
-                        // carries. The replaced carrier extent is then left with
-                        // no projection at all, which is what makes it Elided.
-                        push_synthesized(&mut out, &mut generated, len);
-                    } else {
-                        push_coalesced(
-                            &mut out,
-                            ProjectedRegion {
-                                generated: MappingSpan {
-                                    start: generated,
-                                    end: generated + len,
-                                },
-                                class: ProjectedClass::Rewritten,
-                                carrier: Some(MappingSpan {
-                                    start: *start,
-                                    end: *end,
-                                }),
-                            },
-                        );
-                        emitted_through = emitted_through.max(*end);
-                        generated += len;
-                    }
-                }
-            }
-            Chunk::InsertedMapped {
-                content,
-                source_start,
-                content_offset,
-            } => {
-                let len = content.len() as u32;
-                let offset = (*content_offset).min(len);
-                push_synthesized(&mut out, &mut generated, offset);
-                if offset < len {
-                    push_coalesced(
-                        &mut out,
-                        ProjectedRegion {
-                            generated: MappingSpan {
-                                start: generated,
-                                end: generated + (len - offset),
-                            },
-                            class: ProjectedClass::Rewritten,
-                            // A mapped insertion stands at a carrier POINT: it
-                            // accounts for no authored extent, so its preimage
-                            // is the zero-width span at that point.
-                            carrier: Some(MappingSpan {
-                                start: *source_start,
-                                end: *source_start,
-                            }),
-                        },
-                    );
-                    generated += len - offset;
-                }
-            }
-            Chunk::OverwrittenSegmented {
-                content, anchors, ..
-            } => {
-                let content_len = content.len() as u32;
-                let mut local: u32 = 0;
-                for anchor in *anchors {
-                    if anchor.length == 0 || anchor.content_offset < local {
-                        continue;
-                    }
-                    push_synthesized(&mut out, &mut generated, anchor.content_offset - local);
-                    push_coalesced(
-                        &mut out,
-                        ProjectedRegion {
-                            generated: MappingSpan {
-                                start: generated,
-                                end: generated + anchor.length,
-                            },
-                            // An anchor is an authored lexeme copied verbatim
-                            // into generated scaffolding that shifted it: exact
-                            // bytes at a different position.
-                            class: ProjectedClass::Relocated,
-                            carrier: Some(MappingSpan {
-                                start: anchor.source_pos,
-                                end: anchor.source_pos + anchor.length,
-                            }),
-                        },
-                    );
-                    emitted_through = emitted_through.max(anchor.source_pos + anchor.length);
-                    generated += anchor.length;
-                    local = anchor.content_offset + anchor.length;
-                }
-                push_synthesized(&mut out, &mut generated, content_len.saturating_sub(local));
-            }
-            Chunk::Inserted { content } | Chunk::InsertedAnchored { content, .. } => {
-                push_synthesized(&mut out, &mut generated, content.len() as u32);
-            }
+            generated += len;
         }
     }
 
-    push_synthesized(&mut out, &mut generated, transform.outro().len() as u32);
+    push_synthesized(&mut out, &mut generated, transform.outro_len() as u32);
     insertion_anchors.sort_unstable();
     insertion_anchors.dedup();
     (out, insertion_anchors)

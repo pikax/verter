@@ -74,7 +74,7 @@ impl SourceUnit {
 /// Lineage identity for a compiler fragment: logical source (from its
 /// canonical id) plus the unit's role. Revision and content stay off this
 /// constructor — hashing a path string into [`SourceUnitId`] is forbidden.
-pub(crate) fn source_unit_id(canonical_id: &str, logical_role: &str) -> SourceUnitId {
+pub fn source_unit_id(canonical_id: &str, logical_role: &str) -> SourceUnitId {
     SourceUnitId::from_lineage(&carrier_source_id(canonical_id), logical_role)
 }
 

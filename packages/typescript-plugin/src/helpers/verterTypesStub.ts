@@ -6,6 +6,11 @@
 // Keep in sync when Rust TSX codegen adds new @verter/types imports.
 
 export const VERTER_TYPES_STUB = `\
+// Minimal @verter/types fallback for provider resolution.
+// Served virtually when the project doesn't have @verter/types installed.
+// Contains only the exports referenced by generated TSX.
+// Keep in sync with: packages/typescript-plugin/src/helpers/verterTypesStub.ts
+
 import type {
   ShallowUnwrapRef,
   ComponentObjectPropsOptions,
@@ -77,8 +82,12 @@ export type ExtractComponentProps<T> = T extends { new (): infer I }
         ? P
         : {};
 export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
-export declare function componentConstructor<T extends new (...args: any[]) => any>(comp: T): ConstructorParameters<T> extends [] ? new (props: unknown) => InstanceType<T> : T;
-export declare function componentConstructor<P, A extends any[], R>(comp: (props: P, ...args: A) => R): new (props: P) => R;
+export declare function componentConstructor<T extends new (...args: any[]) => any>(
+  comp: T,
+): ConstructorParameters<T> extends [] ? new (props: unknown) => InstanceType<T> : T;
+export declare function componentConstructor<P, A extends any[], R>(
+  comp: (props: P, ...args: A) => R,
+): new (props: P) => R;
 export declare function componentConstructor<T>(comp: T): new (props: unknown) => T;
 export type AsyncComponentOptionsProps<T> = (T extends { props: infer P }
   ? P extends readonly (infer K)[]
@@ -94,9 +103,7 @@ export type AsyncComponent<T> = T extends abstract new (...args: any) => any
   ? T
   : T extends (...args: any) => any
     ? T
-    : new (
-        ...args: any[]
-      ) => import("vue").ComponentPublicInstance<AsyncComponentOptionsProps<T>>;
+    : new (...args: any[]) => import("vue").ComponentPublicInstance<AsyncComponentOptionsProps<T>>;
 export declare function asyncComponent<T>(comp: T): AsyncComponent<T>;
 export declare function instantiateComponent<T, P>(
   comp: T,
@@ -109,13 +116,17 @@ export declare function extractArgumentsFromRenderSlot<
   component: { $slots: TSlots },
   slotName: N,
 ): TSlots[N] extends ((...args: infer P) => any) | undefined ? P[0] : never;
-export type ExtractLeafElement<T> = T extends HTMLElement
-  ? T
-  : T extends { $el: infer E }
-    ? ExtractLeafElement<E>
-    : T extends { new (): infer I }
-      ? ExtractLeafElement<I>
-      : never;
+export type ExtractLeafElement<T> = 0 extends 1 & T
+  ? any
+  : T extends HTMLElement | SVGElement | MathMLElement
+    ? T
+    : T extends { $el: infer E }
+      ? ExtractLeafElement<E>
+      : T extends { new (): infer I }
+        ? ExtractLeafElement<I>
+        : T extends { readonly $props: unknown; readonly $slots: unknown; $emit: unknown }
+          ? any
+          : never;
 export type ExtractDirectives<T> = {
   [K in keyof T as T[K] extends Directive<any, any, any, any>
     ? K extends \`v\${Capitalize<string>}\`
@@ -129,11 +140,21 @@ export declare function runCustomDirective<
 >(
   instance: TInstance,
   directive: TDirective,
-): ExtractLeafElement<TInstance> extends infer El extends HTMLElement
+): ExtractLeafElement<TInstance> extends infer El extends HTMLElement | SVGElement | MathMLElement
   ? TDirective extends Directive<infer TElement, infer TValue, infer M extends string, infer TArg>
-    ? El extends TElement
-      ? (instance: TInstance, value: TValue, arg: TArg | undefined, modifiers: { [K in M]?: true }) => void
-      : (instance: TElement, value: TValue, arg: TArg | undefined, modifiers: { [K in M]?: true }) => void
+    ? [El] extends [TElement]
+      ? (
+          instance: TInstance,
+          value: TValue,
+          arg: TArg | undefined,
+          modifiers: { [K in M]?: true },
+        ) => void
+      : (
+          instance: TElement,
+          value: TValue,
+          arg: TArg | undefined,
+          modifiers: { [K in M]?: true },
+        ) => void
     : false
   : false;
 export declare function retrieveSetupDirectives<T>(
@@ -183,11 +204,22 @@ export declare function checkRequiredSlots<T>(
 ): void;
 
 // flow/flow.ts — template condition re-narrowing and v-for frames
-export type FlowSame<A, B> = (<G>() => G extends A ? 1 : 2) extends <G>() => G extends B ? 1 : 2 ? true : false;
-export type FlowKept<R, S> = S extends unknown ? (FlowSame<R, S> extends true ? true : never) : never;
-export type FlowExcluded<R, S> = R extends unknown ? ([FlowKept<R, S>] extends [never] ? R : never) : never;
+export type FlowSame<A, B> =
+  (<G>() => G extends A ? 1 : 2) extends <G>() => G extends B ? 1 : 2 ? true : false;
+export type FlowKept<R, S> = S extends unknown
+  ? FlowSame<R, S> extends true
+    ? true
+    : never
+  : never;
+export type FlowExcluded<R, S> = R extends unknown
+  ? [FlowKept<R, S>] extends [never]
+    ? R
+    : never
+  : never;
 export declare function flowNarrow<S>(reference: unknown, snapshot: S): reference is S;
-export declare function flowExcluded<S>(snapshot: S): <R>(reference: R) => reference is FlowExcluded<R, S>;
+export declare function flowExcluded<S>(
+  snapshot: S,
+): <R>(reference: R) => reference is FlowExcluded<R, S>;
 export declare const flowBranch: boolean;
 export declare function flowEach1<V>(source: readonly V[] | null | undefined): V;
 export declare function flowEach1<V>(source: Iterable<V> | null | undefined): V;
@@ -196,20 +228,32 @@ export declare function flowEach1<S extends object>(source: S | null | undefined
 export declare function flowEach2<V>(source: readonly V[] | null | undefined): [V, number];
 export declare function flowEach2<V>(source: Iterable<V> | null | undefined): [V, number];
 export declare function flowEach2(source: number | null | undefined): [number, number];
-export declare function flowEach2<S extends object>(source: S | null | undefined): [S[keyof S], keyof S];
+export declare function flowEach2<S extends object>(
+  source: S | null | undefined,
+): [S[keyof S], keyof S];
 export declare function flowEach3<V>(source: readonly V[] | null | undefined): [V, number, number];
 export declare function flowEach3<V>(source: Iterable<V> | null | undefined): [V, number, number];
 export declare function flowEach3(source: number | null | undefined): [number, number, number];
-export declare function flowEach3<S extends object>(source: S | null | undefined): [S[keyof S], keyof S, number];
+export declare function flowEach3<S extends object>(
+  source: S | null | undefined,
+): [S[keyof S], keyof S, number];
 
 // instance/instance.ts
-export type PublicInstanceFromMacro<Props, Emits, Expose, Slots, Attrs, El extends Element = Element> = {
+export type PublicInstanceFromMacro<
+  Props,
+  Emits,
+  Expose,
+  Slots,
+  Attrs,
+  El extends Element = Element,
+> = {
   $props: Props;
   $emit: Emits;
   $slots: Slots;
   $attrs: Attrs;
   $el: El;
-} & Props & Expose;
+} & Props &
+  Expose;
 
 // vue/vue.ts
 export declare function shallowUnwrapRef<T>(obj: T): ShallowUnwrapRef<T>;
@@ -237,12 +281,19 @@ interface PropOptions<T = any, D = T> {
 // ── Box helpers (vue/vue.macros.ts) ─────────────────────────────
 
 // defineProps
-export declare function defineProps_Box<PropNames extends string = string>(props: PropNames[]): PropNames[];
-export declare function defineProps_Box<PP extends ComponentObjectPropsOptions = ComponentObjectPropsOptions>(props: PP): PP;
+export declare function defineProps_Box<PropNames extends string = string>(
+  props: PropNames[],
+): PropNames[];
+export declare function defineProps_Box<
+  PP extends ComponentObjectPropsOptions = ComponentObjectPropsOptions,
+>(props: PP): PP;
 export declare function defineProps_Box<TypeProps>(): TypeProps;
 
 // withDefaults
-export declare function withDefaults_Box<T, Defaults extends InferDefaults<T>>(props: T, defaults: Defaults): [T, Defaults];
+export declare function withDefaults_Box<T, Defaults extends InferDefaults<T>>(
+  props: T,
+  defaults: Defaults,
+): [T, Defaults];
 
 // defineEmits
 export declare function defineEmits_Box<EE extends string = string>(emitOptions: EE[]): EE[];
@@ -258,7 +309,7 @@ export declare function defineOptions_Box<
   Mixin extends ComponentOptionsMixin = ComponentOptionsMixin,
   Extends extends ComponentOptionsMixin = ComponentOptionsMixin,
   InheritAttrs extends true | false = true,
-  T = Record<string, any>
+  T = Record<string, any>,
 >(
   options?: T &
     ComponentOptionsBase<{}, RawBindings, D, C, M, Mixin, Extends, {}> & {
@@ -267,27 +318,29 @@ export declare function defineOptions_Box<
       expose?: never;
       slots?: never;
       inheritAttrs?: InheritAttrs;
-    }
+    },
 ): T;
 
 // defineModel
 export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-  options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>
+  options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>,
 ): ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>;
 export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
-  options?: PropOptions<T> & DefineModelOptions<T, G, S>
+  options?: PropOptions<T> & DefineModelOptions<T, G, S>,
 ): PropOptions<T> & DefineModelOptions<T, G, S>;
 export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
   name: string,
-  options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>
+  options: ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>,
 ): [string, ({ default: any } | { required: true }) & PropOptions<T> & DefineModelOptions<T, G, S>];
 export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(
   name: string,
-  options?: PropOptions<T> & DefineModelOptions<T, G, S>
+  options?: PropOptions<T> & DefineModelOptions<T, G, S>,
 ): [string, PropOptions<T> & DefineModelOptions<T, G, S>];
 
 // defineExpose
-export declare function defineExpose_Box<Exposed extends Record<string, any> = Record<string, any>>(exposed?: Exposed): Exposed;
+export declare function defineExpose_Box<Exposed extends Record<string, any> = Record<string, any>>(
+  exposed?: Exposed,
+): Exposed;
 
 // defineSlots
 export declare function defineSlots_Box<S extends Record<string, any> = Record<string, any>>(): S;

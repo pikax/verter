@@ -1,0 +1,15 @@
+error[E0038]: the trait `TargetExecutor` is not dyn compatible
+ --> tests/cases/compile-fail/dyn_target_executor_is_rejected.rs:7:34
+  |
+7 | fn dispatch_per_node(_executor: &dyn TargetExecutor) {}
+  |                                  ^^^^^^^^^^^^^^^^^^ `TargetExecutor` is not dyn compatible
+  |
+  = note: the trait is not dyn compatible because it requires `Self: Sized`
+  = note: for a trait to be dyn compatible it needs to allow building a vtable
+          for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
+  = help: the following types implement `TargetExecutor`:
+            verter_compiler::framework::vue::ssr::VueSsrExecutor
+            verter_compiler::framework::vue::vapor::VueVaporExecutor
+            verter_compiler::framework::vue::vdom::VueVdomExecutor
+          consider defining an enum where each variant holds one of these types,
+          implementing `TargetExecutor` for this new enum and using it instead

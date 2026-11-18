@@ -1726,7 +1726,7 @@ fn build_macro_hot_ref<M: verter_audit::observe::ObserveExec>(
     // Macro-T own-body provenance: `defineProps` / `withDefaults` own-body
     // direct members carry `declared_in_macro_type_arg = true` (a props-axis
     // concern consumed by the published surface policy). Every other macro is
-    // structural. This mirrors `macro_payload_surface_provenance` —
+    // structural. This matches the macro surface producer context —
     // PROVENANCE is a structural-lowering property of the macro's own body,
     // not a demand/mode property, so it belongs on the mode-neutral mirror.
     // The parse-domain producer owns the kind classification

@@ -117,6 +117,7 @@ fn committed_corpus_covers_both_backends_with_non_empty_goldens() {
             match backend {
                 Backend::Vdom => vdom_compiled += 1,
                 Backend::Vapor => vapor_compiled += 1,
+                Backend::Ssr => {}
             }
         }
     }
@@ -225,14 +226,14 @@ fn manifest_bijection_and_artifact_hashes() {
         "manifest ↔ cases/ bijection broken (missing or stale entries)"
     );
 
-    // Case ids are unique and each declares exactly the two backends.
+    // Case ids are unique and each declares one cell per backend.
     let ids: BTreeSet<&str> = manifest.cases.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids.len(), manifest.cases.len(), "duplicate case ids");
     for case in &manifest.cases {
         assert_eq!(
             case.backends.len(),
             Backend::ALL.len(),
-            "case {} must declare vdom + vapor cells",
+            "case {} must declare vdom + vapor + ssr cells",
             case.id
         );
 
@@ -366,4 +367,54 @@ fn generator_check_mode_reproduces_committed_goldens() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Every case lists a compiled server-render cell whose module defines and
+/// attaches `ssrRender`.
+#[test]
+fn manifest_lists_server_render_for_every_case() {
+    let corpus = corpus_root();
+    let manifest = load_manifest();
+    for case in &manifest.cases {
+        let cell = case
+            .backends
+            .get(&Backend::Ssr)
+            .unwrap_or_else(|| panic!("case {} must list an ssr cell", case.id));
+        assert_eq!(
+            cell.disposition,
+            Disposition::Compiled,
+            "case {} ssr cell must compile",
+            case.id
+        );
+        let golden_rel = cell.golden.as_ref().expect("compiled ⇒ golden path");
+        assert!(
+            golden_rel.contains("/ssr/"),
+            "ssr golden {golden_rel} must live under the ssr directory"
+        );
+        let code = read_text_normalized(&corpus_file(&corpus, golden_rel)).expect("read golden");
+        assert!(
+            code.contains("function ssrRender(")
+                && code.contains("_sfc_main.ssrRender = ssrRender"),
+            "ssr golden {golden_rel} must define and attach ssrRender"
+        );
+    }
+}
+
+/// Server-render goldens, including their `vue/server-renderer` helper
+/// imports, canonicalize for the structural comparator.
+#[test]
+fn server_render_goldens_canonicalize() {
+    let corpus = corpus_root();
+    let manifest = load_manifest();
+    for case in &manifest.cases {
+        let golden_rel = case.backends[&Backend::Ssr]
+            .golden
+            .as_ref()
+            .expect("compiled ⇒ golden path");
+        let code = read_text_normalized(&corpus_file(&corpus, golden_rel)).expect("read golden");
+        let source = read_text_normalized(&corpus_file(&corpus, &case.sfc)).expect("read SFC");
+        let authored = verter_vue_conformance::authored_identifiers(&source);
+        verter_vue_conformance::canon::canonicalize_module(&code, &authored)
+            .unwrap_or_else(|e| panic!("canonicalize {golden_rel}: {e}"));
+    }
 }

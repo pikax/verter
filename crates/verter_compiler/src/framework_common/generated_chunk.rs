@@ -2,7 +2,16 @@
 
 use std::ops::Range;
 
-use oxc_sourcemap::{SourceMap, SourceMapBuilder, Token};
+use verter_audit::observe::Uncaptured;
+
+use crate::assembly::compose::encoded;
+use crate::assembly::emit_plan::{EmissionBuilder, EmitPlanBuilder, MapMode};
+#[cfg(test)]
+use crate::assembly::map_input::{
+    generated_position as byte_position, GeneratedPosition as Position,
+};
+use crate::assembly::map_input::{validate_and_decode, DecodedFragmentMap};
+use crate::work_ledger::CompilerWorkLedger;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedChunkOutput {
@@ -22,75 +31,23 @@ pub struct GeneratedFragment<'a> {
     pub range: Range<u32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Position {
-    line: u32,
-    column: u32,
-}
-
-fn byte_position(code: &str, offset: u32) -> Option<Position> {
-    let offset = usize::try_from(offset).ok()?;
-    if offset > code.len() || !code.is_char_boundary(offset) {
-        return None;
+/// A unit's map over its one source row, named by its source space. An
+/// empty map string means the caller demanded no map; a unit without a map
+/// still names its row when the other side has one.
+fn unit_map(unit: &GeneratedUnit<'_>, any_map: bool) -> Option<Option<DecodedFragmentMap>> {
+    if unit.source_map.is_empty() {
+        return Some(any_map.then(|| {
+            DecodedFragmentMap::from_segments(
+                unit.code,
+                vec![unit.source_space.to_owned()],
+                Some(vec![Some(unit.source.to_owned())]),
+                Vec::new(),
+                Vec::new(),
+            )
+        }));
     }
-    let mut position = Position { line: 0, column: 0 };
-    for character in code[..offset].chars() {
-        if character == '\n' {
-            position.line += 1;
-            position.column = 0;
-        } else {
-            position.column += character.len_utf16() as u32;
-        }
-    }
-    Some(position)
-}
-
-fn relative(position: Position, origin: Position) -> Option<Position> {
-    (position >= origin).then(|| {
-        if position.line == origin.line {
-            Position {
-                line: 0,
-                column: position.column - origin.column,
-            }
-        } else {
-            Position {
-                line: position.line - origin.line,
-                column: position.column,
-            }
-        }
-    })
-}
-
-fn append(origin: Position, relative: Position) -> Position {
-    if relative.line == 0 {
-        Position {
-            line: origin.line,
-            column: origin.column + relative.column,
-        }
-    } else {
-        Position {
-            line: origin.line + relative.line,
-            column: relative.column,
-        }
-    }
-}
-
-fn token_position(token: Token) -> Position {
-    Position {
-        line: token.get_dst_line(),
-        column: token.get_dst_col(),
-    }
-}
-
-fn add_token(builder: &mut SourceMapBuilder, token: Token, position: Position, source_id: u32) {
-    builder.add_token(
-        position.line,
-        position.column,
-        token.get_src_line(),
-        token.get_src_col(),
-        token.get_source_id().map(|_| source_id),
-        None,
-    );
+    let map = validate_and_decode(unit.source_map, unit.code).ok()?;
+    Some(Some(map.as_single_source(unit.source_space, unit.source)))
 }
 
 /// Replace a typed hole in one generated unit with a typed fragment from a
@@ -107,102 +64,69 @@ pub fn compose_generated_chunk(
 ) -> Option<GeneratedChunkOutput> {
     let shell_code = shell.code;
     let fragment_code = fragment.unit.code;
-    let output_origin = byte_position(preamble, preamble.len() as u32)?;
-    let hole_start = byte_position(shell_code, hole.start)?;
-    let hole_end = byte_position(shell_code, hole.end)?;
-    let fragment_start = byte_position(fragment_code, fragment.range.start)?;
-    let fragment_end = byte_position(fragment_code, fragment.range.end)?;
+    let before = shell_code.get(..hole.start as usize)?;
+    let after = shell_code.get(hole.end as usize..)?;
     let fragment_text =
         fragment_code.get(fragment.range.start as usize..fragment.range.end as usize)?;
-    let inserted_text = format!("\n{fragment_text}\n");
-    let fragment_origin = append(hole_start, Position { line: 1, column: 0 });
-    let inserted_end = append(
-        hole_start,
-        byte_position(&inserted_text, inserted_text.len() as u32)?,
-    );
-
-    let mut code = String::with_capacity(
-        preamble.len() + shell_code.len() - (hole.end - hole.start) as usize + inserted_text.len(),
-    );
-    code.push_str(preamble);
-    code.push_str(shell_code.get(..hole.start as usize)?);
-    code.push_str(&inserted_text);
-    code.push_str(shell_code.get(hole.end as usize..)?);
 
     // An empty source-map string is the established "no demand, no map"
     // convention for these `&str` units (pinned by
     // `composed_chunk_stays_map_empty_when_neither_side_requested_one`
     // below) — a caller that did not request source maps produces empty
-    // strings on both sides, not malformed JSON. Only a NON-empty string
-    // is parsed; an empty side contributes no tokens to the composed map
-    // instead of failing the whole splice. Composing generated bytes must
-    // not depend on whether the caller asked for a map.
-    let shell_map = (!shell.source_map.is_empty())
-        .then(|| SourceMap::from_json_string(shell.source_map))
-        .transpose()
-        .ok()?;
-    let fragment_map = (!fragment.unit.source_map.is_empty())
-        .then(|| SourceMap::from_json_string(fragment.unit.source_map))
-        .transpose()
-        .ok()?;
-    let mut builder = SourceMapBuilder::default();
-    let shell_source_id = builder.add_source_and_content(shell.source_space, shell.source);
-    let fragment_source_id =
-        builder.add_source_and_content(fragment.unit.source_space, fragment.unit.source);
-
-    if let Some(shell_map) = shell_map.as_ref() {
-        for token in shell_map.get_tokens() {
-            let position = token_position(token);
-            if position < hole_start {
-                add_token(
-                    &mut builder,
-                    token,
-                    append(output_origin, position),
-                    shell_source_id,
-                );
-            }
-        }
-    }
-
-    if let Some(fragment_map) = fragment_map.as_ref() {
-        for token in fragment_map.get_tokens() {
-            let position = token_position(token);
-            if position >= fragment_start && position < fragment_end {
-                let rebased = append(
-                    output_origin,
-                    append(fragment_origin, relative(position, fragment_start)?),
-                );
-                add_token(&mut builder, token, rebased, fragment_source_id);
-            }
-        }
-    }
-
-    if let Some(shell_map) = shell_map.as_ref() {
-        for token in shell_map.get_tokens() {
-            let position = token_position(token);
-            if position >= hole_end {
-                let rebased = append(
-                    output_origin,
-                    append(inserted_end, relative(position, hole_end)?),
-                );
-                add_token(&mut builder, token, rebased, shell_source_id);
-            }
-        }
-    }
-
-    // Preserve the same "no demand, no map" convention on the way out: if
-    // neither side supplied a map, the composed map must stay an empty
-    // string too, not a syntactically valid but token-less blob. The
-    // builder always has two sources registered (for token rebasing above),
-    // so `into_sourcemap()` alone would serialize non-empty JSON even with
-    // zero tokens.
-    let source_map = if shell_map.is_none() && fragment_map.is_none() {
-        String::new()
-    } else {
-        builder.into_sourcemap().to_json_string()
+    // strings on both sides, not malformed JSON. Composing generated bytes
+    // must not depend on whether the caller asked for a map.
+    let any_map = !shell.source_map.is_empty() || !fragment.unit.source_map.is_empty();
+    let shell_map = unit_map(&shell, any_map)?;
+    let fragment_map = unit_map(&fragment.unit, any_map)?;
+    let (before_map, after_map) = match &shell_map {
+        Some(map) => (
+            Some(map.slice(shell_code, 0, Some(hole.start))?),
+            Some(map.slice(shell_code, hole.end, None)?),
+        ),
+        None => (None, None),
+    };
+    let fragment_map = match fragment_map {
+        Some(map) => Some(map.slice(
+            fragment_code,
+            fragment.range.start,
+            Some(fragment.range.end),
+        )?),
+        None => None,
     };
 
+    let mode = if any_map {
+        MapMode::Map
+    } else {
+        MapMode::NoMap
+    };
+    let mut builder = EmissionBuilder::new(mode);
+    builder.push_borrowed(preamble);
+    push_unit(&mut builder, before, before_map);
+    builder.push_borrowed("\n");
+    push_unit(&mut builder, fragment_text, fragment_map);
+    builder.push_borrowed("\n");
+    push_unit(&mut builder, after, after_map);
+    let mut plan = EmitPlanBuilder::new(mode);
+    plan.push_fragment(builder.finish().ok()?).ok()?;
+    let artifact = plan
+        .finish()
+        .and_then(|plan| plan.write(&mut CompilerWorkLedger::<Uncaptured>::new()))
+        .ok()?;
+    let (code, source_map) = encoded(artifact, &[], None);
+    // Preserve the same "no demand, no map" convention on the way out.
+    let source_map = source_map.map_or_else(String::new, |map| map.to_json_string());
     Some(GeneratedChunkOutput { code, source_map })
+}
+
+fn push_unit<'a>(
+    builder: &mut EmissionBuilder<'a>,
+    code: &'a str,
+    map: Option<DecodedFragmentMap>,
+) {
+    match map {
+        Some(map) => builder.push_external(code, map),
+        None => builder.push_borrowed(code),
+    }
 }
 
 #[cfg(test)]

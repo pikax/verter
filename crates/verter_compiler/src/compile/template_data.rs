@@ -6,7 +6,7 @@
 
 use crate::ast::types::{AstNodeKind, ElementNode, TemplateAst};
 use crate::common::Span;
-use crate::template::code_gen::binding::BindingType;
+use crate::template::binding::BindingType;
 use crate::template::oxc::types::{OxcNodeData, OxcParsedAst};
 use crate::types::NodeId;
 use rustc_hash::FxHashMap;
@@ -1121,7 +1121,7 @@ fn extract_component_usage(
                                     let binding_is_static = bt.is_some_and(|bt| {
                                         matches!(
                                             bt.reactivity_level(),
-                                            crate::template::code_gen::binding::ReactivityLevel::Static
+                                            crate::template::binding::ReactivityLevel::Static
                                         )
                                     });
                                     if !binding_is_static {

@@ -1,0 +1,10 @@
+error[E0624]: method `pieces` is private
+  --> tests/cases/compile-fail/emission_fragment_pieces_are_read_only.rs:11:28
+   |
+11 |     let _pieces = fragment.pieces();
+   |                            ^^^^^^ private method
+   |
+  ::: src/emission/fragment.rs
+   |
+   |     pub(crate) fn pieces(&self) -> &[Piece<'a>] {
+   |     ------------------------------------------- private method defined here

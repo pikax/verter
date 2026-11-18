@@ -12,15 +12,17 @@
 
 use oxc_ast::ast::{
     BindingPattern, CallExpression, Expression, ImportDeclaration, ObjectPropertyKind, PropertyKey,
-    Statement, VariableDeclaration, VariableDeclarationKind,
+    Statement, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
 };
 
+use super::macros::detect_macro_kind;
 use super::shared::ScriptParseContext;
+use super::types::ScriptImport;
 use crate::common::Span;
 use crate::types::BindingType;
 use crate::utils::oxc::script::bindings::{
     callee_identifier_name, collect_import_binding_spans, collect_pattern_binding_spans,
-    declaration_binding_span,
+    declaration_binding_span, visit_pattern_bindings, PatternBindingPosition,
 };
 
 /// Extract binding metadata from a parsed `<script setup>` program.
@@ -35,11 +37,12 @@ use crate::utils::oxc::script::bindings::{
 pub fn extract_bindings<'a>(
     program: &oxc_ast::ast::Program<'a>,
     ctx: &ScriptParseContext<'a>,
+    aliases: &VueImportAliases<'_>,
 ) -> Vec<(Span, BindingType)> {
     let mut entries = Vec::new();
 
     for stmt in &program.body {
-        classify_statement(stmt, &mut entries, ctx);
+        classify_statement(stmt, &mut entries, ctx, aliases);
     }
 
     entries
@@ -50,10 +53,11 @@ fn classify_statement<'a>(
     stmt: &'a Statement<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
+    aliases: &VueImportAliases<'_>,
 ) {
     match stmt {
         Statement::VariableDeclaration(decl) => {
-            classify_variable_declaration(decl, entries, ctx);
+            classify_variable_declaration(decl, entries, ctx, aliases);
         }
         Statement::ImportDeclaration(import) => {
             classify_import(import, entries, ctx);
@@ -99,8 +103,11 @@ fn enum_is_all_literal(ts_enum: &oxc_ast::ast::TSEnumDeclaration) -> bool {
 /// Official `unwrapTSNode`: strip the TS-only expression wrappers
 /// (`x as T` / `<T>x` / `x!` / `x satisfies T` / `x<T>` instantiation) to reach
 /// the underlying value expression. Recursive so stacked wrappers collapse.
+/// Parentheses unwrap too: Vue reads a Babel AST, which keeps no parenthesized
+/// expression node, so `(ref(0))` and `(a, b)` are the call and the sequence.
 fn unwrap_ts_node<'a, 'b>(expr: &'b Expression<'a>) -> &'b Expression<'a> {
     match expr {
+        Expression::ParenthesizedExpression(e) => unwrap_ts_node(&e.expression),
         Expression::TSAsExpression(e) => unwrap_ts_node(&e.expression),
         Expression::TSSatisfiesExpression(e) => unwrap_ts_node(&e.expression),
         Expression::TSNonNullExpression(e) => unwrap_ts_node(&e.expression),
@@ -141,6 +148,7 @@ fn classify_variable_declaration<'a>(
     decl: &'a VariableDeclaration<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
+    aliases: &VueImportAliases<'_>,
 ) {
     let is_const = decl.kind == VariableDeclarationKind::Const;
 
@@ -158,9 +166,14 @@ fn classify_variable_declaration<'a>(
             }
         }
 
+        if is_const && !matches!(declarator.id, BindingPattern::BindingIdentifier(_)) {
+            classify_const_destructure(declarator, entries);
+            continue;
+        }
+
         let binding_type = if is_const {
             if let Some(init) = &declarator.init {
-                classify_const_init(init)
+                classify_const_init(init, aliases)
             } else {
                 BindingType::SetupConst
             }
@@ -172,6 +185,54 @@ fn classify_variable_declaration<'a>(
     }
 }
 
+/// Classify the bindings of a destructuring `const` declarator.
+///
+/// Mirrors Vue's `walkObjectPattern` / `walkArrayPattern`: whatever the
+/// initializer, a destructured binding may be a ref (`const { a } = useX()`
+/// reads a property that can hold one), so it is `setup-maybe-ref`; a rest
+/// argument is a fresh object or array, so it is `setup-const`. Under a
+/// declaring macro (`const { a } = defineEmits()`) the outermost bindings are
+/// `setup-const` too; Vue does not carry that into nested patterns.
+fn classify_const_destructure<'a>(
+    declarator: &'a VariableDeclarator<'a>,
+    entries: &mut Vec<(Span, BindingType)>,
+) {
+    let declares_macro = matches!(&declarator.init, Some(init) if is_declaring_macro_call(init));
+    visit_pattern_bindings(&declarator.id, |span, position| {
+        let binding_type = match position {
+            PatternBindingPosition::Rest => BindingType::SetupConst,
+            PatternBindingPosition::Outer if declares_macro => BindingType::SetupConst,
+            PatternBindingPosition::Outer | PatternBindingPosition::Nested => {
+                BindingType::SetupMaybeRef
+            }
+        };
+        entries.push((span, binding_type));
+    });
+}
+
+/// The callee name Vue's `isCallOf` reads: a bare identifier, seen through
+/// parentheses, since Vue's Babel AST keeps no parenthesized-expression node
+/// (`(ref)(0)` calls `ref`).
+fn vue_callee_name(callee: &Expression<'_>) -> Option<String> {
+    let mut callee = callee;
+    while let Expression::ParenthesizedExpression(paren) = callee {
+        callee = &paren.expression;
+    }
+    callee_identifier_name(callee)
+}
+
+/// Vue's `isConstMacroCall`: a call of a macro that declares the component's
+/// props, emits or slots.
+fn is_declaring_macro_call(init: &Expression<'_>) -> bool {
+    let Expression::CallExpression(call) = unwrap_ts_node(init) else {
+        return false;
+    };
+    matches!(
+        vue_callee_name(&call.callee).as_deref(),
+        Some("defineProps" | "defineEmits" | "withDefaults" | "defineSlots")
+    )
+}
+
 /// Classify the initializer of a `const` declaration.
 ///
 /// Mirrors Vue's `walkDeclaration` + `canNeverBeRef` logic (the init is
@@ -180,13 +241,14 @@ fn classify_variable_declaration<'a>(
 ///   static unary/binary/logical/conditional/sequence compositions of them,
 ///   and expression-free template literals — object/array literals are NOT
 ///   static and fall through to `SetupConst`.
-/// - Call expressions → depends on callee (ref/computed/reactive/use*)
-/// - Expressions that structurally can never be a ref (arrays, objects,
-///   functions, classes, unary, binary, update, tagged template) → `SetupConst`
+/// - Call expressions → depends on callee (see `classify_call_expression`)
+/// - Expressions that can never be a ref (`can_never_be_ref`: arrays,
+///   objects, functions, classes, unary, binary, update, tagged template,
+///   literals, a sequence ending in one) → `SetupConst`
 /// - Everything else (ternary, identifiers, member access, await, yield,
-///   assignment, sequence, etc.) → `SetupMaybeRef` because the result
-///   might be a ref at runtime
-fn classify_const_init<'a>(init: &Expression<'a>) -> BindingType {
+///   assignment, etc.) → `SetupMaybeRef` because the result might be a ref
+///   at runtime
+fn classify_const_init<'a>(init: &Expression<'a>, aliases: &VueImportAliases<'_>) -> BindingType {
     // Official `walkDeclaration` unwraps TS wrappers before every classification
     // branch, so `5 as const` / `(1 + 2) satisfies number` classify like their
     // underlying expression.
@@ -199,34 +261,13 @@ fn classify_const_init<'a>(init: &Expression<'a>) -> BindingType {
     }
 
     match init {
-        Expression::CallExpression(call) => classify_call_expression(call),
+        Expression::CallExpression(call) => classify_call_expression(call, aliases),
 
-        // Expressions that can never be a ref → SetupConst
-        // (matches Vue's canNeverBeRef(); the STATIC members of this family were
-        // already peeled off as LiteralConst by the isStaticNode check above, so
-        // only the non-static ones — `a + b`, `-x`, `{...}`, `[...]` — land here)
-        Expression::UnaryExpression(_)
-        | Expression::BinaryExpression(_)
-        | Expression::ArrayExpression(_)
-        | Expression::ObjectExpression(_)
-        | Expression::FunctionExpression(_)
-        | Expression::ArrowFunctionExpression(_)
-        | Expression::UpdateExpression(_)
-        | Expression::ClassExpression(_)
-        | Expression::TaggedTemplateExpression(_) => BindingType::SetupConst,
-
-        // For SequenceExpression, check last expression
-        Expression::SequenceExpression(seq) => {
-            if let Some(last) = seq.expressions.last() {
-                if can_never_be_ref(last) {
-                    BindingType::SetupConst
-                } else {
-                    BindingType::SetupMaybeRef
-                }
-            } else {
-                BindingType::SetupMaybeRef
-            }
-        }
+        // Expressions that can never be a ref → SetupConst (Vue's
+        // `canNeverBeRef`; the STATIC ones were already peeled off as
+        // LiteralConst above, so only non-static ones — `a + b`, `{...}`,
+        // `[...]`, a dynamic template literal — land here).
+        _ if can_never_be_ref(init, aliases) => BindingType::SetupConst,
 
         // Everything else (ternary, identifiers, member access, await,
         // yield, assignment, etc.) might evaluate to a ref
@@ -234,12 +275,25 @@ fn classify_const_init<'a>(init: &Expression<'a>) -> BindingType {
     }
 }
 
-/// Check if an expression structurally can never produce a ref value.
-/// Mirrors Vue's `canNeverBeRef()` from `@vue/compiler-sfc`.
-fn can_never_be_ref<'a>(expr: &Expression<'a>) -> bool {
-    matches!(
-        expr,
-        Expression::UnaryExpression(_)
+/// Check if an expression can never produce a ref value.
+/// Mirrors Vue's `canNeverBeRef()` from `@vue/compiler-sfc`: a call of
+/// `vue`'s `reactive` under its imported local name, the structural
+/// expressions that never yield a ref, a sequence by its last expression, and
+/// any literal. Parentheses are transparent, as in Vue's Babel AST.
+fn can_never_be_ref<'a>(expr: &Expression<'a>, aliases: &VueImportAliases<'_>) -> bool {
+    let mut expr = expr;
+    loop {
+        match expr {
+            Expression::ParenthesizedExpression(paren) => expr = &paren.expression,
+            Expression::SequenceExpression(seq) => match seq.expressions.last() {
+                Some(last) => expr = last,
+                None => return false,
+            },
+            Expression::CallExpression(call) => {
+                return vue_callee_name(&call.callee)
+                    .is_some_and(|callee| aliases.is_vue_export(&callee, "reactive"));
+            }
+            Expression::UnaryExpression(_)
             | Expression::BinaryExpression(_)
             | Expression::ArrayExpression(_)
             | Expression::ObjectExpression(_)
@@ -248,21 +302,148 @@ fn can_never_be_ref<'a>(expr: &Expression<'a>) -> bool {
             | Expression::UpdateExpression(_)
             | Expression::ClassExpression(_)
             | Expression::TaggedTemplateExpression(_)
-    )
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::RegExpLiteral(_)
+            | Expression::TemplateLiteral(_) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// The local names under which a component binds Vue's reactivity APIs,
+/// read from its scripts' existing import facts.
+///
+/// Mirrors the `vueImportAliases` table of Vue's `compileScript`, built from
+/// its `userImports`: the companion `<script>` block's imports register first,
+/// then the `<script setup>` imports. Only an import whose source is exactly
+/// `vue` enters the table (`import { ref as r } from 'vue'` maps `ref` to
+/// `r`), keyed by the imported name, the last one winning. A local name
+/// already bound by an earlier import keeps that binding, and a compiler macro
+/// imported from `vue` in `<script setup>` (`import { defineProps } from
+/// 'vue'`) is dropped. A name that is not imported from `vue` is never
+/// recognised, so a same-named local function, or an auto-imported `ref` that
+/// has no import statement, is an ordinary call.
+#[derive(Debug, Default, Clone)]
+pub struct VueImportAliases<'a> {
+    /// `(imported name, local name)` pairs of the `vue` imports.
+    bound: Vec<(&'a str, &'a str)>,
+    /// Every local name registered so far, from any source.
+    locals: Vec<&'a str>,
+}
+
+impl<'a> VueImportAliases<'a> {
+    /// Register an import of the companion `<script>` block.
+    pub fn register_companion_import(&mut self, import: &ScriptImport<'a>) {
+        self.register(import, false);
+    }
+
+    /// Register an import of the `<script setup>` block, after every
+    /// companion import.
+    pub fn register_setup_import(&mut self, import: &ScriptImport<'a>) {
+        self.register(import, true);
+    }
+
+    fn register(&mut self, import: &ScriptImport<'a>, drops_vue_macros: bool) {
+        if import.is_type_only {
+            return;
+        }
+        let from_vue = import.source == "vue";
+        for binding in &import.bindings {
+            if binding.is_type_only {
+                continue;
+            }
+            let is_dropped_macro = drops_vue_macros
+                && from_vue
+                && binding
+                    .imported
+                    .is_some_and(|imported| detect_macro_kind(imported.as_bytes()).is_some());
+            if is_dropped_macro || self.locals.contains(&binding.name) {
+                continue;
+            }
+            self.locals.push(binding.name);
+            if !from_vue {
+                continue;
+            }
+            let Some(imported) = binding.imported else {
+                continue;
+            };
+            match self.bound.iter_mut().find(|(name, _)| *name == imported) {
+                Some(entry) => entry.1 = binding.name,
+                None => self.bound.push((imported, binding.name)),
+            }
+        }
+    }
+
+    /// Whether `callee` is the local name of `vue`'s export `imported`.
+    pub fn is_vue_export(&self, callee: &str, imported: &str) -> bool {
+        self.bound
+            .iter()
+            .any(|(name, local)| *name == imported && *local == callee)
+    }
+
+    /// Resolve a named runtime Vue import to its API kind.
+    pub fn api_kind(&self, callee: &str) -> Option<super::usage::VueApiKind> {
+        self.bound.iter().find_map(|(imported, local)| {
+            (*local == callee)
+                .then(|| super::usage::detect_vue_api_call(imported.as_bytes()))
+                .flatten()
+        })
+    }
+
+    fn is_any_vue_export(&self, callee: &str, imported: &[&str]) -> bool {
+        imported
+            .iter()
+            .any(|imported| self.is_vue_export(callee, imported))
+    }
 }
 
 /// Classify a call expression in a const initializer.
-fn classify_call_expression<'a>(call: &CallExpression<'a>) -> BindingType {
-    let callee_name = callee_identifier_name(&call.callee);
+///
+/// Mirrors Vue's `walkDeclaration` for a call initializer: `reactive()`
+/// imported from `vue` is a reactive const, the declaring macros
+/// (`defineProps`, `defineEmits`, `withDefaults`, `defineSlots`) are setup
+/// consts, the ref-creating APIs imported from `vue` (`ref`, `computed`,
+/// `shallowRef`, `customRef`, `toRef`, `useTemplateRef`) and `defineModel` are
+/// refs, and every other call is `setup-maybe-ref`: `canNeverBeRef` is false
+/// for a call expression, so the result may be a ref at runtime
+/// (`const x = someFn()` where `someFn` returns `ref(…)`). Only a call to a bare
+/// identifier is recognised, as in Vue's `isCallOf`.
+fn classify_call_expression<'a>(
+    call: &CallExpression<'a>,
+    aliases: &VueImportAliases<'_>,
+) -> BindingType {
+    let Some(callee) = vue_callee_name(&call.callee) else {
+        return BindingType::SetupMaybeRef;
+    };
+    let callee = callee.as_str();
 
-    match callee_name.as_deref() {
-        Some("ref" | "computed" | "shallowRef" | "toRef" | "customRef" | "defineModel") => {
-            BindingType::SetupRef
-        }
-        Some("reactive" | "shallowReactive") => BindingType::SetupReactiveConst,
-        Some(name) if name.starts_with("use") => BindingType::SetupMaybeRef,
-        _ => BindingType::SetupConst,
+    if aliases.is_vue_export(callee, "reactive") {
+        return BindingType::SetupReactiveConst;
     }
+    match callee {
+        "defineProps" => return BindingType::SetupReactiveConst,
+        "defineEmits" | "withDefaults" | "defineSlots" => return BindingType::SetupConst,
+        "defineModel" => return BindingType::SetupRef,
+        _ => {}
+    }
+    if aliases.is_any_vue_export(
+        callee,
+        &[
+            "ref",
+            "computed",
+            "shallowRef",
+            "customRef",
+            "toRef",
+            "useTemplateRef",
+        ],
+    ) {
+        return BindingType::SetupRef;
+    }
+    BindingType::SetupMaybeRef
 }
 
 /// Check if an expression is a `defineProps()` or `withDefaults()` call.

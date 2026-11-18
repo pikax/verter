@@ -93,15 +93,6 @@ type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
 
 const ROOT_FRAME_DEPTH: u32 = 1;
 
-/// Where each relation operand's carrier walk stopped in a decision's last
-/// run, by operand and checking site: the point whose step reached a read
-/// without an answer, with the instantiations the walk took to reach it.
-/// Every node before it settled from answers the frame keeps, so the next
-/// run's operand demand resumes there, still counting toward the
-/// instantiation budget the walk from the operand would reach.
-type OperandResumes =
-    FxHashMap<(SemanticNodeId, TupleSplicePosition), super::relation::CarrierWalkPoint>;
-
 /// What a query answered to the frame that needed it: the read (with the
 /// answering result's cost receipt, for the consumer's recording), and the
 /// carrier of the result that answered it, for the consumer to replay.
@@ -176,7 +167,6 @@ pub(super) enum QueryFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities
 pub(super) enum FrameBuild {
     Instantiate(Box<InstantiateBuild>),
     Typeof(Box<TypeofBuild>),
-    Conditional(Box<ConditionalBuild>),
     Call(Box<CallBuild>),
     Flow(Box<FlowBuild>),
     Family(Box<FamilyBuild>),
@@ -402,6 +392,15 @@ pub(super) struct OperandDemand {
 }
 
 impl OperandDemand {
+    pub(super) fn empty() -> Self {
+        Self {
+            operands: None,
+            answers: FxHashMap::default(),
+            awaiting: None,
+            pending: Default::default(),
+        }
+    }
+
     pub(super) fn new(operands: [SemanticNodeId; 2]) -> Self {
         Self {
             operands: Some(operands),
@@ -416,15 +415,15 @@ impl OperandDemand {
 /// ([`ProjectSemanticDispatch::operand_answers_scope`]); dropped, the seam
 /// it hid is restored.
 pub(super) struct OperandAnswers<'d> {
-    seam: &'d verter_execution::sync_cell::SyncRefCell<Option<DecisionSeam>>,
-    outer: Option<Option<DecisionSeam>>,
+    seam: &'d verter_execution::sync_cell::SyncRefCell<Option<OperandAnswerScope>>,
+    outer: Option<Option<OperandAnswerScope>>,
 }
 
 impl Drop for OperandAnswers<'_> {
     fn drop(&mut self) {
         let seam = self.seam.replace(self.outer.take().flatten());
         verter_debug_assert!(
-            seam.is_some_and(|seam| seam.needs.is_empty()),
+            seam.is_some(),
             "a relation computing in place reaches no read it waits on"
         );
     }
@@ -552,31 +551,6 @@ impl From<InstantiatePoll> for FramePoll<'_> {
     }
 }
 
-/// A conditional type's decision between its steps: the answers to the
-/// instantiations and `typeof`s its decision read, the one it waits on and
-/// the others its last run reached without an answer.
-///
-/// The decision procedure is a function of its operands and of those
-/// answers. A step advances its sequential state with the answers the frame
-/// holds. A stage that reaches an unanswered read discards that stage's
-/// observations and resumes after delivery. Completed operand preparation
-/// and its observations remain owned by the frame. No read is ever
-/// evaluated in place one native level deeper, so a chain of conditionals each deciding over the one before is
-/// a chain of frames, and a decision over a wide union runs again once
-/// for its operands, not once per member.
-#[derive(Default)]
-pub(super) struct ConditionalBuild {
-    decision: super::conditional_decision::ConditionalDecisionState,
-    answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
-    resumes: OperandResumes,
-    awaiting: Option<SemanticQueryKey>,
-    /// The claim the awaited read entered with, until the runtime takes it.
-    claim: Option<ClaimAttempt>,
-    /// The other reads the last run reached without an answer, in the order
-    /// it reached them, each with the claim it entered with.
-    pending: std::collections::VecDeque<(SemanticQueryKey, ClaimAttempt)>,
-}
-
 /// The reads a seam's run reached that no answer holds, in the order it
 /// reached them, each with the claim it entered with, and an index of them
 /// by demand. A run over a wide union reaches a read per member; asking
@@ -639,10 +613,6 @@ impl SeamNeeds {
     fn is_empty(&self) -> bool {
         self.reached.is_empty()
     }
-
-    fn len(&self) -> usize {
-        self.reached.len()
-    }
 }
 
 impl IntoIterator for SeamNeeds {
@@ -654,58 +624,24 @@ impl IntoIterator for SeamNeeds {
     }
 }
 
-/// What a running conditional decision's reads are answered from: its
-/// frame's answers, and the reads they do not answer.
-pub(super) struct DecisionSeam {
+/// Completed operand deliveries installed only while a relation computes.
+pub(super) struct OperandAnswerScope {
     answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
-    /// Where the operand demands of the decision's last run stopped.
-    resumes: OperandResumes,
-    /// The reads the run reached that no answer holds, in the order it
-    /// reached them, each with the claim it entered with for the runtime
-    /// to produce it.
-    needs: SeamNeeds,
-    /// The frame depth a needed demand's own frame runs at.
     depth: u32,
-    /// How many queries the decision reached are evaluating in place now.
-    /// Inside one, a read the answers hold is still answered by them, but
-    /// any other evaluates as it would anywhere: a query evaluated in place
-    /// keeps what it builds, so it never reads a gap.
     nested: u32,
-    /// Only an explicit member, inferred winner or final union reduction
-    /// supplies a materialized child. Operand and relation probes retain
-    /// temporary checker context and cannot transfer it through this seam.
-    materialized_children: bool,
 }
 
 /// The seam whose run made a read that joins another task's producer
 /// ([`ProjectSemanticDispatch::join_seam_for`]).
 #[derive(Clone, Copy)]
 pub(super) enum JoinSeam {
-    Decision,
     Flow,
-}
-
-pub(super) struct ConditionalChildQueries<'d> {
-    restore: Option<(
-        &'d verter_execution::sync_cell::SyncRefCell<Option<DecisionSeam>>,
-        bool,
-    )>,
-}
-
-impl Drop for ConditionalChildQueries<'_> {
-    fn drop(&mut self) {
-        if let Some((cell, previous)) = self.restore {
-            if let Some(seam) = cell.borrow_mut().as_mut() {
-                seam.materialized_children = previous;
-            }
-        }
-    }
 }
 
 /// A query the running decision reached, evaluating in place; the seam is
 /// the decision's own again when it returns.
 pub(super) struct NestedDecisionQuery<'d> {
-    seam: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<DecisionSeam>>>,
+    seam: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<OperandAnswerScope>>>,
     flow: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<FlowSeam>>>,
     /// The root flow read's body extent's nesting, for its count of body
     /// reads.
@@ -2343,7 +2279,6 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                     // A decision's need entered already: its claim continues
                     // when the runtime starts it.
                     let claim = match frame.build.as_mut() {
-                        Some(FrameBuild::Conditional(build)) => build.claim.take(),
                         Some(FrameBuild::Relation(build)) => build.claim.take(),
                         Some(FrameBuild::Call(build)) => {
                             let claim = build.claim.take();
@@ -3021,84 +2956,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         read
     }
 
-    /// Carry a conditional decision's frame on: record a delivery as the
-    /// answer to the read it waited on, then advance the decision's retained
-    /// stage with every answer the frame holds. A read none of them answers
-    /// is the frame's next need; only its unfinished stage is discarded.
-    fn drain_conditional(
-        &self,
-        key: &SemanticQueryKey,
-        build: &mut ConditionalBuild,
-        delivery: Option<QueryDelivery>,
-        depth: u32,
-    ) -> InstantiatePoll {
-        if let Some(delivery) = delivery {
-            let answered = build
-                .awaiting
-                .take()
-                .expect("a delivery answers the read its decision waited on");
-            build.answers.insert((answered, delivery.site), delivery);
-        }
-        // The last run reached more reads without an answer: each is needed
-        // before the decision runs again.
-        if let Some((need, claim)) = build.pending.pop_front() {
-            build.awaiting = Some(need.clone());
-            build.claim = Some(claim);
-            return InstantiatePoll::Need(need);
-        }
-        let SemanticQueryKey::Conditional {
-            check,
-            extends,
-            true_branch,
-            false_branch,
-            distributive,
-            pending,
-        } = key
-        else {
-            unreachable!("a decision frame produces a conditional")
-        };
-        let installed = self.decision_seam.replace(Some(DecisionSeam {
-            answers: std::mem::take(&mut build.answers),
-            resumes: std::mem::take(&mut build.resumes),
-            needs: SeamNeeds::default(),
-            depth,
-            nested: 0,
-            materialized_children: false,
-        }));
-        verter_debug_assert!(installed.is_none(), "one decision runs per step");
-        let output = self.build_conditional_with_state(
-            *check,
-            *extends,
-            *true_branch,
-            *false_branch,
-            *distributive,
-            pending.clone(),
-            &mut build.decision,
-        );
-        let seam = self
-            .decision_seam
-            .take()
-            .expect("the decision's seam stays installed for its run");
-        build.answers = seam.answers;
-        build.resumes = seam.resumes;
-        // Each decision stage owns its speculative observation scope. A
-        // finished stage has already joined this frame's retained taint;
-        // discarding the whole step here would lose that evidence.
-        if !matches!(
-            &output.result,
-            QueryResult::Error(QueryError::ExecutionAborted(_))
-        ) {
-            let mut needs = seam.needs.into_iter();
-            if let Some((need, claim)) = needs.next() {
-                build.awaiting = Some(need.clone());
-                build.claim = Some(claim);
-                build.pending = needs.collect();
-                return InstantiatePoll::Need(need);
-            }
-        }
-        InstantiatePoll::Done(Box::new(output))
-    }
-
     pub(super) fn aborted_build_output(
         &self,
         abort: crate::semantic_query::ExecutionAbort,
@@ -3124,88 +2981,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// producer is already held; consuming that delivery does not re-enter
     /// cold-query admission.
     /// `None` when no decision runs here, or for any other query.
-    pub(super) fn read_at_decision_seam(&self, key: &SemanticQueryKey) -> Option<ValueRead> {
+    pub(super) fn read_operand_answer(&self, key: &SemanticQueryKey) -> Option<ValueRead> {
         if !matches!(
             key,
-            SemanticQueryKey::Instantiate(_)
-                | SemanticQueryKey::TypeOf { .. }
-                | SemanticQueryKey::Conditional { .. }
-                | SemanticQueryKey::ReduceUnion { .. }
+            SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. }
         ) {
             return None;
         }
-        // The answer, or what the read does without one. An answer was
-        // computed in a frame of its own, the needed demand's, so it reads
-        // as that frame's result wherever the decision's run reads it.
-        enum Seam {
-            Answered(QueryDelivery),
-            Waiting,
-            Enter,
-        }
-        let (seam, depth) = {
-            let installed = self.decision_seam.borrow();
-            let seam = installed.as_ref()?;
-            if matches!(
-                key,
-                SemanticQueryKey::Conditional { .. } | SemanticQueryKey::ReduceUnion { .. }
-            ) && !seam.materialized_children
-            {
-                return None;
-            }
-            let answered = seam
-                .answers
-                .get(&(key.clone(), self.checking_site.get()))
-                .cloned();
-            let read = match answered {
-                Some(delivery) => Seam::Answered(delivery),
-                None if seam.nested > 0 => return None,
-                None if seam.needs.contains(key, self.checking_site.get()) => Seam::Waiting,
-                None => Seam::Enter,
-            };
-            (read, seam.depth)
+        let (delivery, depth) = {
+            let installed = self.operand_answers.borrow();
+            let scope = installed.as_ref()?;
+            (
+                scope
+                    .answers
+                    .get(&(key.clone(), self.checking_site.get()))?
+                    .clone(),
+                scope.depth,
+            )
         };
-        let nesting = Nesting::Frame { depth };
-        Some(match seam {
-            Seam::Answered(delivery) => self.read_delivery(delivery, nesting),
-            Seam::Waiting => self.suspended_decision_read(),
-            Seam::Enter => match self.enter_query_frame(key, depth) {
-                Err(delivery) => {
-                    self.with_decision_seam(|seam| {
-                        seam.answers
-                            .insert((key.clone(), delivery.site), (*delivery).clone());
-                    });
-                    self.read_delivery(*delivery, nesting)
-                }
-                Ok(claim) => {
-                    self.with_decision_seam(|seam| seam.needs.push(key.clone(), claim));
-                    self.suspended_decision_read()
-                }
-            },
-        })
+        Some(self.read_delivery(delivery, Nesting::Frame { depth }))
     }
 
-    fn with_decision_seam(&self, update: impl FnOnce(&mut DecisionSeam)) {
-        update(
-            self.decision_seam
-                .borrow_mut()
-                .as_mut()
-                .expect("the decision's seam stays installed for its run"),
-        );
-    }
-
-    /// The caller supplies the complete materialized key of a member,
-    /// inferred winner or final union reduction. Other probes must retain
-    /// their checker context in their owning continuation before suspending.
-    pub(super) fn conditional_child_queries(&self) -> ConditionalChildQueries<'_> {
-        let restore = self.decision_seam.borrow_mut().as_mut().map(|seam| {
-            let previous = std::mem::replace(&mut seam.materialized_children, true);
-            (&self.decision_seam, previous)
-        });
-        ConditionalChildQueries { restore }
-    }
-
-    /// The gap a read the running decision waits on reads as.
-    fn suspended_decision_read(&self) -> ValueRead {
+    /// The typed gap a flow run reads while its dependency is pending.
+    fn suspended_flow_read(&self) -> ValueRead {
         let reasons = crate::semantic_query::PartialReasonSet::PROPAGATED;
         self.fold_local_partial_completeness(reasons);
         CacheRead {
@@ -3219,25 +3017,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Whether the running decision waits on a read: what remains of its
-    /// run is dropped, so it stops where it can.
+    /// A decision suspends at its read. Composite demand never sees a
+    /// tentative operand from a pending decision run.
     pub(super) fn decision_waits(&self) -> bool {
-        self.decision_seam
-            .borrow()
-            .as_ref()
-            .is_some_and(|seam| !seam.needs.is_empty())
+        false
     }
 
     /// Mark a query the running decision reached as evaluating in place:
     /// until it returns, reads the decision's answers do not hold evaluate
     /// as they would anywhere.
     pub(super) fn nested_decision_query(&self) -> NestedDecisionQuery<'_> {
-        let mut seam = self.decision_seam.borrow_mut();
+        let mut seam = self.operand_answers.borrow_mut();
         let mut flow = self.flow_seam.borrow_mut();
         NestedDecisionQuery {
             seam: seam.as_mut().map(|seam| {
                 seam.nested += 1;
-                &self.decision_seam
+                &self.operand_answers
             }),
             flow: flow.as_mut().map(|seam| {
                 seam.nested += 1;
@@ -3246,15 +3041,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             #[cfg(any(test, feature = "test-support"))]
             _body: super::flow_return::body_reads::enter_nested(),
         }
-    }
-
-    /// Whether a conditional decision runs here as its frame's own run, not
-    /// inside a query it evaluates in place.
-    pub(super) fn deciding_on_the_runtime(&self) -> bool {
-        self.decision_seam
-            .borrow()
-            .as_ref()
-            .is_some_and(|seam| seam.nested == 0)
     }
 
     /// The seam a read of `key` made here joins another task's producer
@@ -3277,9 +3063,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ) {
             return None;
         }
-        if self.deciding_on_the_runtime() {
-            Some(JoinSeam::Decision)
-        } else if self.flow_seam_reads_here() {
+        if self.flow_seam_reads_here() {
             Some(JoinSeam::Flow)
         } else {
             None
@@ -3304,11 +3088,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             };
         let (answer, waiting) = match seam {
-            JoinSeam::Decision => {
-                let installed = self.decision_seam.borrow();
-                let seam = installed.as_ref()?;
-                probe(&seam.answers, &seam.needs)
-            }
             JoinSeam::Flow => {
                 let installed = self.flow_seam.borrow();
                 let seam = installed.as_ref()?;
@@ -3319,7 +3098,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // The read is the one nested query level its synchronous entry
             // enters; only who produced it differs.
             Some(delivery) => Some(self.read_delivery(delivery, Nesting::Entered)),
-            None if waiting => Some(self.suspended_decision_read()),
+            None if waiting => Some(self.suspended_flow_read()),
             None => None,
         }
     }
@@ -3334,10 +3113,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         claim: ClaimAttempt,
     ) -> ValueRead {
         match seam {
-            JoinSeam::Decision => self.with_decision_seam(|seam| seam.needs.push(key, claim)),
             JoinSeam::Flow => self.with_flow_seam(|seam| seam.needs.push(key, claim)),
         }
-        self.suspended_decision_read()
+        self.suspended_flow_read()
     }
 
     /// Begin a family's build in its frame: as a continuation, its first
@@ -3546,7 +3324,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // The template stage already canonicalized its union operands.
                 FamilyStep::Need(need, family)
                     if self.reads_as_frame_need(&need)
-                        || matches!(&*family, FamilyBuild::TemplateUnion(..)) =>
+                        || matches!(&*family, FamilyBuild::TemplateUnion(..))
+                        || (matches!(&*family, FamilyBuild::Conditional(_))
+                            && matches!(need, SemanticQueryKey::ReduceUnion { .. })) =>
                 {
                     family.trace_need(&need);
                     *build = Some(FrameBuild::Family(family));
@@ -3926,10 +3706,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }),
                         )
                         .into(),
-                    // A decision keeps its deliveries as answers to its reads.
-                    Some(FrameBuild::Conditional(build)) => self
-                        .drain_conditional(&frame.key, build, delivery, frame.depth + 1)
-                        .into(),
                     // So does a call's walk, for its operands; a read its
                     // walk asks for whose entry admits it is admitted here.
                     Some(FrameBuild::Call(_)) => self.drain_call_frame(
@@ -4145,18 +3921,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticQueryKey::Conditional { .. } => {
-                match self.cold_build_budget_refusal(frame_key) {
-                    Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
-                    None => {
-                        let FrameBuild::Conditional(build) =
-                            frame_build.insert(FrameBuild::Conditional(Box::default()))
-                        else {
-                            unreachable!("the build was just inserted")
-                        };
-                        self.drain_conditional(frame_key, build, None, depth + 1)
-                            .into()
-                    }
+                if let Some(refusal) = self.cold_build_budget_refusal(frame_key) {
+                    return FramePoll::Done(Box::new(self.family_value_output(frame_key, refusal)));
                 }
+                let step = self
+                    .begin_conditional_family(frame_key, HelperDrive::Frame { depth: depth + 1 });
+                self.advance_family_frame(frame_key, frame_build, step, suspends_loads)
             }
             SemanticQueryKey::ResolveCall(_) => match self.cold_build_budget_refusal(frame_key) {
                 Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
@@ -4687,25 +4457,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         depth: u32,
         body: impl FnOnce() -> R,
     ) -> R {
-        let outer = self.decision_seam.replace(Some(DecisionSeam {
+        let outer = self.operand_answers.replace(Some(OperandAnswerScope {
             answers: std::mem::take(&mut demand.answers),
-            resumes: OperandResumes::default(),
-            needs: SeamNeeds::default(),
             depth,
             // The relation evaluates in place: its reads the answers hold
             // read them, any other evaluates as it would anywhere.
             nested: 1,
-            materialized_children: false,
         }));
         let out = body();
         let seam = self
-            .decision_seam
+            .operand_answers
             .replace(outer)
             .expect("the relation's answers stay installed while it computes");
-        verter_debug_assert!(
-            seam.needs.is_empty(),
-            "a relation computing in place reaches no read it waits on"
-        );
         demand.answers = seam.answers;
         out
     }
@@ -4723,16 +4486,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if demand.answers.is_empty() {
             return None;
         }
-        let outer = self.decision_seam.replace(Some(DecisionSeam {
+        let outer = self.operand_answers.replace(Some(OperandAnswerScope {
             answers: demand.answers,
-            resumes: OperandResumes::default(),
-            needs: SeamNeeds::default(),
             depth,
             nested: 1,
-            materialized_children: false,
         }));
         Some(OperandAnswers {
-            seam: &self.decision_seam,
+            seam: &self.operand_answers,
             outer: Some(outer),
         })
     }
@@ -4839,63 +4599,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 FramePoll::Done(output)
             }
         }
-    }
-
-    /// Demand what a relation over `operands` unwraps at the running
-    /// decision's seam, each operand's carrier walk resuming where the
-    /// decision's last run stopped it. A walk over a chain of aliases reads
-    /// one answer per hop and stops at the first hop without one, so a
-    /// demand that restarted from the operand would read every answered hop
-    /// again on each run: a chain of `n` aliases would cost `n * n / 2`
-    /// reads. The hops before the resume point settled from answers the
-    /// frame keeps, and what the demand observes is dropped, so skipping
-    /// them changes nothing the decision decides: its relation still walks
-    /// each operand whole, once, when every hop is answered.
-    ///
-    /// Each operand's entry is the checker recovery its walk ended at, every
-    /// hop answered: the error type the operand is, such as the TS2589
-    /// recovery of a walk that reached the instantiation budget.
-    pub(super) fn demand_relation_operands(
-        &self,
-        operands: [SemanticNodeId; 2],
-    ) -> [Option<SemanticNodeId>; 2] {
-        let site = self.checking_site.get();
-        let needs_now = || {
-            self.decision_seam
-                .borrow()
-                .as_ref()
-                .map_or(0, |seam| seam.needs.len())
-        };
-        operands.map(|operand| {
-            let start = self
-                .decision_seam
-                .borrow()
-                .as_ref()
-                .and_then(|seam| seam.resumes.get(&(operand, site)).copied())
-                .unwrap_or(super::relation::CarrierWalkPoint {
-                    node: operand,
-                    depth: 0,
-                });
-            let needs_before = needs_now();
-            let mut resume = start;
-            let walked = self.unwrap_identity_carrier_walk(start, &mut |reached| {
-                if needs_now() == needs_before {
-                    resume = reached;
-                }
-            });
-            self.with_decision_seam(|seam| {
-                seam.resumes.insert((operand, site), resume);
-            });
-            match walked {
-                super::relation::IdentityCarrierUnwrap::Concrete(node)
-                    if needs_now() == needs_before
-                        && self.is_conditional_checker_recovery(node) =>
-                {
-                    Some(node)
-                }
-                _ => None,
-            }
-        })
     }
 
     /// Carry a flow return's frame on: record a delivery as the answer to
@@ -5013,7 +4716,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let nesting = Nesting::Frame { depth };
         Some(match seam {
             Seam::Answered(delivery) => self.read_delivery(delivery, nesting),
-            Seam::Waiting => self.suspended_decision_read(),
+            Seam::Waiting => self.suspended_flow_read(),
             Seam::Enter => match self.enter_query_frame(key, depth) {
                 Err(delivery) => {
                     self.with_flow_seam(|seam| {
@@ -5024,7 +4727,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 Ok(claim) => {
                     self.with_flow_seam(|seam| seam.needs.push(key.clone(), claim));
-                    self.suspended_decision_read()
+                    self.suspended_flow_read()
                 }
             },
         })
@@ -5340,4 +5043,46 @@ pub fn seam_need_probes_for_tests() -> u64 {
 #[cfg(any(test, feature = "test-support"))]
 pub fn take_call_suspensions_for_tests() -> Vec<CallSuspensionForTests> {
     CALL_SUSPENSIONS_FOR_TESTS.with(|observed| std::mem::take(&mut *observed.borrow_mut()))
+}
+
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    pub(super) fn retain_operand_answer(
+        &self,
+        demand: &mut OperandDemand,
+        key: &SemanticQueryKey,
+        deliver: &mut dyn FnMut() -> CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> CacheRead<QueryResult<SemanticNodeId>> {
+        let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
+        let (mut read, facts) =
+            crate::fact_signature_helpers::install_fact_tracer(&source, deliver);
+        use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+        let carrier = match facts {
+            FactReadSetFinalise::Ok(facts) => Some(ReadSetSignature::new(facts)),
+            FactReadSetFinalise::NonCacheable(facts) => {
+                read.cache_suppress = true;
+                Some(ReadSetSignature::new(facts))
+            }
+            FactReadSetFinalise::MutationUnstable => {
+                read.cache_suppress = true;
+                None
+            }
+        };
+        if read.cache_suppress {
+            self.fold_into_top_build_local_taint_with(
+                false,
+                true,
+                crate::semantic_query::PartialReasonSet::empty(),
+            );
+        }
+        let site = self.checking_site.get();
+        demand.answers.insert(
+            (key.clone(), site),
+            QueryDelivery {
+                site,
+                read: super::widen_node_cache_read(read.clone()),
+                carrier,
+            },
+        );
+        read
+    }
 }

@@ -17,10 +17,11 @@ use verter_parser::oxc_parse::Parser;
 
 use crate::ast::types::TemplateAst;
 use crate::code_transform::CodeTransform;
+use crate::code_transform::EditRecorder;
 use crate::ide::IdeScriptOptions;
 use crate::parser::types::RootNodeScript;
-use crate::template::code_gen::binding::BindingType;
-use crate::template::code_gen::types::CodeGenOutput;
+use crate::script::process::source_type_from_lang;
+use crate::template::binding::BindingType;
 use crate::utils::oxc::vue::{
     parse_script, DeclarationKind, DefaultExportType, ScriptItem, ScriptMode,
 };
@@ -43,15 +44,18 @@ use super::{
 /// 3. Hoist type declarations to file top
 /// 4. Remove `export default { ... }` (runtime-only Options API config)
 /// 5. Register non-type import bindings for template resolution
+///
+/// Returns the companion's parsed items, so the `<script setup>` block's
+/// binding classification sees its imports as Vue's does.
 pub(super) fn process_companion_for_tsx<'alloc>(
     companion: &RootNodeScript,
-    source: &str,
+    source: &'alloc str,
     ct: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     bindings: &mut FxHashMap<&'alloc str, BindingType>,
     alloc: &'alloc Allocator,
     hoist_pos: u32,
-) {
+) -> Vec<ScriptItem<'alloc>> {
     // Remove companion <script> open tag
     ct.remove(companion.tag_open.start, companion.tag_open.end);
     // Remove companion </script> close tag
@@ -61,22 +65,18 @@ pub(super) fn process_companion_for_tsx<'alloc>(
 
     let content_span = match &companion.content {
         Some(span) => span,
-        None => return, // Self-closing <script /> — nothing to process
+        None => return Vec::new(), // Self-closing <script /> — nothing to process
     };
 
     let comp_start = content_span.start;
     let comp_str = &source[content_span.start as usize..content_span.end as usize];
 
-    // Parse companion content with OXC
-    let oxc_alloc = Allocator::default();
-    let source_type = SourceType::tsx();
-    let parser_ret = Parser::new(&oxc_alloc, comp_str, source_type).parse();
-    let parse_result = parse_script(
-        &parser_ret.program,
-        ScriptMode::Options,
-        comp_start,
-        comp_str,
-    );
+    // Parse companion content with OXC in its authored dialect, into the
+    // compile arena: the returned items outlive this call.
+    let source_type = source_type_from_lang(companion.lang.as_ref());
+    let parser_ret = Parser::new(alloc, comp_str, source_type).parse();
+    let program: &'alloc Program<'alloc> = alloc.alloc(parser_ret.program);
+    let parse_result = parse_script(program, ScriptMode::Options, comp_start, comp_str, &[]);
 
     // Hoist imports to file top (preserving sourcemap).
     for item in &parse_result.items {
@@ -150,6 +150,8 @@ pub(super) fn process_companion_for_tsx<'alloc>(
             out.overwrite(abs_start, abs_end, "");
         }
     }
+
+    parse_result.items
 }
 
 // ── Script Only (Options API) Processing ──────────────────────────
@@ -159,7 +161,7 @@ pub(super) fn process_tsx_script_only<'alloc>(
     script: &RootNodeScript,
     template_ast: Option<&TemplateAst>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     bindings: &mut FxHashMap<&'alloc str, BindingType>,
     type_constructs: &mut String,
     _alloc: &'alloc Allocator,
@@ -184,6 +186,7 @@ pub(super) fn process_tsx_script_only<'alloc>(
         ScriptMode::Options,
         content_start,
         content_str,
+        &[],
     );
 
     if should_infer_function_types(script.lang) {

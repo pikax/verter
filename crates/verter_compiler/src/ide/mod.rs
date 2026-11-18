@@ -31,9 +31,33 @@
 //!   └── ide::template::generate_ide_template() → IDE template JSX
 //! ```
 
+/// A type alias for `vue/jsx-runtime`'s `JSX.IntrinsicElements`, read as an
+/// optional module the way vue-tsc reads it.
+///
+/// The specifier resolves only through the project's own module resolution.
+/// An app that reaches `vue` through an exact `paths` entry (a Nuxt app maps
+/// `vue`, not `vue/*`) with no `vue` on its `node_modules` walk cannot resolve
+/// it. vue-tsc reads the same module in generated code it never reports, so
+/// its intrinsic elements are `any` there and nothing is reported. The alias
+/// behaves the same way: unresolved, it is the error type and reports nothing.
+/// Resolved, it is exactly the runtime's type.
+macro_rules! vue_jsx_intrinsic_elements_alias {
+    ($declare:literal, $name:literal) => {
+        concat!(
+            "// @ts-ignore optional, as in vue-tsc: unresolved, it is `any`\n",
+            $declare,
+            $name,
+            " = import('vue/jsx-runtime').JSX.IntrinsicElements;\n",
+        )
+    };
+}
+
 pub mod condition_narrowing;
+pub mod projection_declarations;
+pub mod projection_recovery;
 pub mod script;
 pub mod script_recover;
+pub mod svelte_projection;
 pub mod template;
 pub mod vue_projection;
 
@@ -141,7 +165,7 @@ pub struct IdeScriptOptions<'a> {
     /// GlobalComponents fallback collection and from the kebab component-tag
     /// rewrite, so it stays authored and types through `JSX.IntrinsicElements`
     /// exactly like any other intrinsic. Prefix semantics mirror
-    /// [`crate::compile::parse_sfc`]'s `is_custom_element` callback.
+    /// [`crate::framework_common::vue_bridge::parse_sfc`]'s `is_custom_element` callback.
     pub custom_elements: Option<&'a [String]>,
 }
 
@@ -173,19 +197,7 @@ pub struct IdeTemplateOptions<'a> {
     pub custom_elements: Option<&'a [String]>,
 }
 
-/// Whether `tag_name` matches a configured custom-element prefix.
-///
-/// Mirrors the [`crate::compile::parse_sfc`] `is_custom_element` callback
-/// byte-for-byte (`starts_with` on each configured prefix) so the parse-domain
-/// diagnostic classification and the IDE codegen agree on which tags are
-/// custom elements.
-pub(crate) fn matches_custom_element(custom_elements: Option<&[String]>, tag_name: &str) -> bool {
-    custom_elements.is_some_and(|prefixes| {
-        prefixes
-            .iter()
-            .any(|prefix| tag_name.starts_with(prefix.as_str()))
-    })
-}
+pub(crate) use verter_parser::utils::vue::tag::matches_custom_element;
 
 // ── Generic info ─────────────────────────────────────────────────
 
@@ -368,17 +380,13 @@ use crate::types::NodeProp;
 pub(crate) fn get_directive_name<'a>(prop: &NodeProp, source: &'a str) -> &'a str {
     let name = &source[prop.start as usize..prop.name_end as usize];
 
-    if name.starts_with(':') || name.starts_with('.') {
-        return "bind";
+    use verter_parser::types::{classify_directive_name, BuiltinDirective, DirectiveKind};
+    match classify_directive_name(name.as_bytes()) {
+        DirectiveKind::Bind => "bind",
+        DirectiveKind::On => "on",
+        DirectiveKind::Builtin(BuiltinDirective::Slot) => "slot",
+        _ => name.strip_prefix("v-").unwrap_or(name),
     }
-    if name.starts_with('@') {
-        return "on";
-    }
-    if name.starts_with('#') {
-        return "slot";
-    }
-
-    name.strip_prefix("v-").unwrap_or(name)
 }
 
 /// Convert a Vue event name to JSX event prop name (PascalCase segments).

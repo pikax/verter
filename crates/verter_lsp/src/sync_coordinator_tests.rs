@@ -4883,7 +4883,7 @@ fn vue_carrier_source(broken: bool) -> String {
         .map(|i| format!("    <div>{{{{ {i} }}}}</div>\n"))
         .collect();
     let bad = if broken {
-        "    <div><span></div>\n"
+        "    <div></span></div>\n"
     } else {
         ""
     };

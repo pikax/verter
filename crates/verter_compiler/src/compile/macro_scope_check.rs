@@ -15,7 +15,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::common::Span;
 use crate::diagnostics::{CompilerErrorCode, Diagnostic};
 use crate::script::prepared::PreparedScript;
-use crate::template::code_gen::binding::BindingType;
+use crate::template::binding::BindingType;
 use crate::utils::oxc::bindings::collect_expression_free_ref_spans;
 
 /// The official `@vue/compiler-sfc` rejection message template for a

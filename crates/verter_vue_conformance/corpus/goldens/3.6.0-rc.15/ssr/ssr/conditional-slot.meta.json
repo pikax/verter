@@ -1,0 +1,75 @@
+{
+  "schema": 2,
+  "caseId": "ssr/conditional-slot",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/conditional-slot.vue",
+    "sha256": "8cf666046548b33f8ae470091c3cc915fb68f422b51905f38d9f1d4c1419ea1f"
+  },
+  "options": {
+    "sha256": "dc1bc83201bef50d758a54fc4bdf3b34d52a123b7f31ff73edb1bba26aef2d00",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/ssr/conditional-slot.vue",
+      "id": "ssr/conditional-slot",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/conditional-slot.js",
+      "sha256": "78efc9448ff4e6758f7b4d1f1c70240763242d23a1334f823bcd64d9a8fa071d",
+      "bytes": 1227
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/conditional-slot.map.json",
+      "sha256": "13531bf3427636461978e7a25ce447fa020d43edc992d82dcb899bc94d65a63f"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createSlots",
+      "alias": "_createSlots"
+    },
+    {
+      "imported": "createTextVNode",
+      "alias": "_createTextVNode"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "withCtx",
+      "alias": "_withCtx"
+    }
+  ]
+}

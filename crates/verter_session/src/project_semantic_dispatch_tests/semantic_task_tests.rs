@@ -41,6 +41,14 @@ fn chain_host() -> Arc<crate::VerterHost> {
     // These tests hold semantic producers, after the independent input handoff.
     host.ensure_indexed_ready(TASK_FILE)
         .expect("the chain has indexed input");
+    // The scheduler stages behind the upsert answer before their owners
+    // release the task they ran under, so wait for that release: the tests
+    // count only the tasks and wait edges they register themselves.
+    assert!(host
+        .project_type_store()
+        .semantic_graph()
+        .task_registry_for_tests()
+        .wait_for_no_active_tasks_for_tests(std::time::Duration::from_secs(10)));
     host
 }
 
@@ -4310,8 +4318,9 @@ fn rows_answered_below_the_root(
 
 /// A root body's return argument a closed signature utility types is read
 /// by request: the evaluator requests the utility's instantiation where it
-/// stands, and the root read answers it, once. That read is counted under
-/// no site: no driver method reads it, and no run answers it in place.
+/// stands, and the root read answers it, once, after the leaf's lowering
+/// requested its own read of `k`. Neither read is counted under a site: no
+/// driver method reads it, and no run answers it in place.
 #[test]
 fn the_closed_signature_utility_is_read_by_request() {
     use verter_type_engine::project_semantic_dispatch::flow_return::{
@@ -4325,8 +4334,8 @@ fn the_closed_signature_utility_is_read_by_request() {
     let requested = flow_read_requests_for_tests() - requests;
     let cold = body_reads::take();
     assert_eq!(
-        requested, 1,
-        "the body requests the utility's read of its root read once: {cold:?}"
+        requested, 2,
+        "the body requests k's lowering read and the utility's read of its root read, once each: {cold:?}"
     );
     let below = rows_answered_below_the_root(&cold);
     assert!(
@@ -4430,6 +4439,191 @@ fn a_requested_type_leaf_read_answers_and_charges_what_the_in_place_read_does() 
             );
             assert_eq!(by_request, in_place, "{name} (polled: {polled})");
         }
+    }
+}
+
+const LOWERING_FILE: &str = "/semantic-task/lowering.ts";
+
+/// Body types whose lowering reads: a `typeof` leaf, the same read at a
+/// nested type-argument position, a same-file annotated callee its call
+/// lowers in owner scope where nothing suspends, and a `typeof` of an import
+/// whose module does not resolve.
+const LOWERING: &str = "import { gone } from \"./absent\";\n\
+                        declare const x: { v: number };\n\
+                        interface Box<T> { value: T }\n\
+                        export function leaf() { return x; }\n\
+                        export function nested() { return x as unknown as Box<typeof x>; }\n\
+                        const annotated: () => number = () => 1;\n\
+                        export function owner() { return annotated(); }\n\
+                        export function partial() { return gone; }\n";
+
+/// A fresh read of `name`'s return in [`LOWERING`]: its requested-read
+/// count, the joined comparison, the body reads it counted and its whole
+/// receipt tree.
+fn lowering_read(
+    name: &str,
+    polled: bool,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    CountedBodyReads,
+    Option<BodyReadReceipt>,
+) {
+    use verter_type_engine::project_semantic_dispatch::flow_return::{
+        body_reads, flow_read_requests_for_tests,
+    };
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        LOWERING_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(LOWERING),
+        crate::FileLanguage::script_ts(),
+    );
+    let mut dispatch = ProjectSemanticDispatch::new(&*host);
+    let key = root_return_key(&dispatch, LOWERING_FILE, name);
+    let _ = body_reads::take();
+    let requests = flow_read_requests_for_tests();
+    let read = if polled {
+        let mut entry = dispatch.poll_query(key);
+        let read = semantic_poll_contract::poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        read
+    } else {
+        dispatch.execute_via_cold_build_helper(key)
+    };
+    let requested = flow_read_requests_for_tests() - requests;
+    let rows = body_reads::take();
+    let evidence = semantic_poll_contract::joined_evidence(&dispatch, &read, |answer| {
+        display_return(&host, answer)
+    });
+    let receipt = read.receipt().priced().map(|receipt| {
+        (
+            read_summary(&dispatch, &read)
+                .5
+                .expect("a priced read has a receipt summary"),
+            receipt
+                .prerequisites()
+                .iter()
+                .map(|dependency| dependency.nesting)
+                .collect(),
+        )
+    });
+    (requested, evidence, rows, receipt)
+}
+
+/// The reads a lowering answered below the root, attributed to it.
+fn lowering_reads_in_place(rows: &CountedBodyReads) -> u64 {
+    rows.iter()
+        .filter(|((stage, site, _), _)| *stage == Some("read_in_place") && *site == "lowering")
+        .map(|(_, count)| *count)
+        .sum()
+}
+
+/// A type leaf's lowering, at the leaf and at a nested type-argument
+/// position, requests its reads where the leaf stands and the root read
+/// answers them: no lowering read is answered below the root. Forced in
+/// place, the same lowering answers each read where it stands instead, with
+/// the same value, facts, diagnostics, receipt and work.
+#[test]
+fn a_type_leafs_lowering_reads_by_request_as_it_reads_in_place() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    for name in ["leaf", "nested"] {
+        for polled in [false, true] {
+            let (requests, requested, rows, receipt) = lowering_read(name, polled);
+            let (in_place_requests, in_place, in_place_rows, in_place_receipt) =
+                with_body_reads_in_place_for_tests(|| lowering_read(name, polled));
+            assert!(
+                requests > 0,
+                "{name} requests its lowering's reads: {rows:?}"
+            );
+            assert_eq!(
+                lowering_reads_in_place(&rows),
+                0,
+                "{name}'s lowering reads are answered by the root: {rows:?}"
+            );
+            assert_eq!(in_place_requests, 0);
+            assert!(
+                lowering_reads_in_place(&in_place_rows) > 0,
+                "{name}'s forced lowering answers its reads in place: {in_place_rows:?}"
+            );
+            assert!(
+                requested.0 .0.contains("v: number") && !requested.0 .3,
+                "{name} models its answer completely: {requested:?}"
+            );
+            assert_eq!(
+                requested, in_place,
+                "{name} (polled: {polled}) preserves values, facts, diagnostics, receipt footprint and work"
+            );
+            assert_eq!(
+                receipt, in_place_receipt,
+                "{name} (polled: {polled}) preserves the whole receipt tree"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_polled_lowering_answers_what_the_synchronous_lowering_answers() {
+    for name in ["leaf", "nested", "owner"] {
+        let (requests, synchronous, _, receipt) = lowering_read(name, false);
+        let (polled_requests, polled, _, polled_receipt) = lowering_read(name, true);
+        assert_eq!(polled_requests, requests, "{name}");
+        semantic_poll_contract::assert_joined_matches(polled, &synchronous);
+        assert_eq!(
+            polled_receipt, receipt,
+            "{name} preserves the whole receipt tree"
+        );
+    }
+}
+
+/// A call's annotated same-file callee is lowered in owner scope where the
+/// call cannot suspend: its `typeof` read is answered in place, attributed
+/// to the lowering that requested it, and to no driver method of a whole
+/// lowering.
+#[test]
+fn an_owner_scope_lowering_where_nothing_suspends_is_attributed_to_the_lowering() {
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    let (_, evidence, rows, _) = lowering_read("owner", false);
+    assert_eq!(evidence.0 .0, "number", "the annotated callee's return");
+    assert!(!evidence.0 .3, "the call is modelled completely");
+    assert!(
+        rows.iter().any(|((stage, site, family), count)| {
+            *stage == Some("read_in_place")
+                && *site == "lowering"
+                && *family == SemanticQueryKeyTag::TypeOf
+                && *count > 0
+        }),
+        "the callee's read is answered in place for its lowering: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|((_, site, _), _)| !matches!(
+            *site,
+            "shallow_lower_type_expr_with_context"
+                | "lower_type_expr_in_owner_scope_with_context"
+                | "read_in_place"
+        )),
+        "no whole lowering reads at a driver method of its own: {rows:?}"
+    );
+}
+
+/// A lowering whose node read answers partially hands that read's whole
+/// envelope to the lowerer, by request as in place: the lowered result
+/// keeps the read's partiality, with the same evidence either way.
+#[test]
+fn a_partial_lowering_read_keeps_its_partiality_by_request_as_in_place() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    for polled in [false, true] {
+        let (requests, requested, rows, receipt) = lowering_read("partial", polled);
+        let (in_place_requests, in_place, _, in_place_receipt) =
+            with_body_reads_in_place_for_tests(|| lowering_read("partial", polled));
+        assert!(requests > 0, "the import's read is requested: {rows:?}");
+        assert_eq!(in_place_requests, 0);
+        assert!(
+            requested.0 .3,
+            "the unresolved import leaves the lowered result partial: {requested:?}"
+        );
+        assert_eq!(requested, in_place, "polled: {polled}");
+        assert_eq!(receipt, in_place_receipt, "polled: {polled}");
     }
 }
 
@@ -4606,8 +4800,8 @@ fn frame_and_entered_body_reads_keep_their_receipt_nesting() {
     let (in_place_requests, in_place, _, in_place_receipt) =
         with_body_reads_in_place_for_tests(|| member_path_read("mixed", false));
     assert_eq!(
-        requests, 2,
-        "the utility and member each request once: {rows:?}"
+        requests, 3,
+        "k's lowering, the utility and the member each request once: {rows:?}"
     );
     assert_eq!(polled_requests, requests);
     assert_eq!(in_place_requests, 0);
@@ -4649,6 +4843,343 @@ fn a_rootless_callable_member_keeps_its_lexical_demand() {
         );
         assert_eq!(requested, in_place);
         assert_eq!(receipt, in_place_receipt);
+    }
+}
+
+const TRUTHINESS_CARRIER_FILE: &str = "/semantic-task/truthiness-carrier.ts";
+const TRUTHINESS_CARRIER_BODY: &str = r#"
+interface Payload { value: number; }
+type Wrapped = Payload;
+export function guarded(value: Payload | null) {
+    if (!value) return 0;
+    return ({ result: value.value }).result;
+}
+export function conditional(value: Wrapped | null) {
+    return value ? ({ result: value.value }).result : 0;
+}
+export function mixed(value: Payload | boolean) {
+    if (value) return 1;
+    return value;
+}
+export function falsy(value: Payload | null) {
+    if (value) return null;
+    return value;
+}
+"#;
+
+/// The reads a fixture's root answers: only `guarded`'s return statement
+/// suspends at its member read. A ternary return argument collects its arms
+/// in place, so `conditional`'s member reads settle where they stand.
+fn truthiness_carrier_requests(name: &str) -> usize {
+    usize::from(name == "guarded")
+}
+
+/// Read a guard whose surviving parameter is consumed by a fully modeled
+/// return. Enumeration's carrier reads stay outside the truthiness arm
+/// stage, which identifies each arm's own standing walk.
+fn truthiness_carrier_read(
+    name: &str,
+    polled: bool,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    CountedBodyReads,
+    Option<BodyReadReceipt>,
+) {
+    use verter_type_engine::project_semantic_dispatch::flow_return::{
+        body_reads, flow_read_requests_for_tests,
+    };
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        TRUTHINESS_CARRIER_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(TRUTHINESS_CARRIER_BODY),
+        crate::FileLanguage::script_ts(),
+    );
+    let mut dispatch = ProjectSemanticDispatch::new(&*host);
+    let key = root_return_key(&dispatch, TRUTHINESS_CARRIER_FILE, name);
+    let _ = body_reads::take();
+    let requests = flow_read_requests_for_tests();
+    let read = if polled {
+        let mut entry = dispatch.poll_query(key);
+        let read = semantic_poll_contract::poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        read
+    } else {
+        dispatch.execute_via_cold_build_helper(key)
+    };
+    let requests = flow_read_requests_for_tests() - requests;
+    let rows = body_reads::take();
+    assert!(
+        !read.result_is_partial() && read.partial_reasons().is_empty(),
+        "{name} reaches its reader with complete evidence: {read:?}"
+    );
+    let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = read.value() else {
+        panic!("{name} must answer a modeled return: {read:?}");
+    };
+    assert!(result.degradation().is_none(), "{name}: {result:?}");
+    assert!(read.walker_diagnostics().is_empty(), "{name}: {read:?}");
+    let evidence = semantic_poll_contract::joined_evidence(&dispatch, &read, |answer| {
+        display_return(&host, answer)
+    });
+    if matches!(name, "guarded" | "conditional") {
+        assert_eq!(evidence.0 .0, "number", "{name} reads the narrowed member");
+    } else if name == "falsy" {
+        assert_eq!(
+            evidence.0 .0, "null",
+            "the falsy edge drops the object carrier"
+        );
+    }
+    let receipt = read.receipt().priced().map(|receipt| {
+        (
+            read_summary(&dispatch, &read)
+                .5
+                .expect("a priced read has its complete receipt tree"),
+            receipt
+                .prerequisites()
+                .iter()
+                .map(|dependency| dependency.nesting)
+                .collect(),
+        )
+    });
+    assert!(receipt.is_some(), "{name} retains its receipt");
+    (requests, evidence, rows, receipt)
+}
+
+#[test]
+fn a_truthiness_loop_attributes_each_carrier_read_to_its_settling_helper() {
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    for name in ["guarded", "conditional", "mixed", "falsy"] {
+        let (requests, _, rows, _) = truthiness_carrier_read(name, false);
+        assert_eq!(
+            requests,
+            truthiness_carrier_requests(name),
+            "{name}: {rows:?}"
+        );
+        if name == "conditional" {
+            assert!(
+                rows.iter().any(|((stage, site, family), count)| {
+                    *stage == Some("read_in_place")
+                        && *site == "member_path"
+                        && *family == SemanticQueryKeyTag::ProjectPath
+                        && *count > 0
+                }),
+                "the ternary return argument reads its arm's members in place: {rows:?}"
+            );
+        }
+        assert!(
+            rows.iter().any(|((stage, site, family), count)| {
+                *stage == Some("read_in_place")
+                    && *site == "carrier"
+                    && *family == SemanticQueryKeyTag::Instantiate
+                    && *count > 0
+            }),
+            "{name}'s native guard settles the retained walk: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|((stage, site, family), _)| {
+                *stage != Some("truthiness_arms")
+                    || *site != "unwrap_identity_carrier_for_relation"
+                    || *family != SemanticQueryKeyTag::Instantiate
+            }),
+            "{name}'s truthiness loop has no direct carrier unwrap: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|((stage, site, family), count)| {
+                *stage == Some("truthiness_arms")
+                    && *site == "classify_truthiness_domain_read"
+                    && *family == SemanticQueryKeyTag::ClassifyTruthinessDomain
+                    && *count > 0
+            }),
+            "{name} classifies each settled answer directly: {rows:?}"
+        );
+    }
+}
+
+#[test]
+fn requested_and_in_place_truthiness_keep_the_same_evidence_and_receipts() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    for name in ["guarded", "conditional", "mixed", "falsy"] {
+        for polled in [false, true] {
+            let (requests, requested, _, receipt) = truthiness_carrier_read(name, polled);
+            let (in_place_requests, in_place, _, in_place_receipt) =
+                with_body_reads_in_place_for_tests(|| truthiness_carrier_read(name, polled));
+            assert_eq!(requests, truthiness_carrier_requests(name), "{name}");
+            assert_eq!(in_place_requests, 0);
+            assert_eq!(
+                requested, in_place,
+                "{name} (polled: {polled}) preserves value, facts, diagnostics, footprint and work"
+            );
+            assert_eq!(
+                receipt, in_place_receipt,
+                "{name} preserves the receipt tree"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_polled_truthiness_loop_matches_its_synchronous_evidence() {
+    for name in ["guarded", "conditional", "mixed", "falsy"] {
+        let (requests, synchronous, _, receipt) = truthiness_carrier_read(name, false);
+        let (polled_requests, polled, _, polled_receipt) = truthiness_carrier_read(name, true);
+        assert_eq!(polled_requests, requests);
+        semantic_poll_contract::assert_joined_matches(polled, &synchronous);
+        assert_eq!(polled_receipt, receipt, "{name} preserves the receipt tree");
+    }
+}
+
+#[test]
+fn a_concrete_carrier_settles_without_requesting_a_read() {
+    use verter_type_engine::semantic_query::PrimitiveKind;
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    // A node interned outside a construction scope is released at once and
+    // reads as the shared miss placeholder, which is concrete itself.
+    let _builder = dispatch.enter_construction_scope();
+    let graph = dispatch.graph_arc();
+    for kind in [
+        PrimitiveKind::Number,
+        PrimitiveKind::Boolean,
+        PrimitiveKind::Null,
+    ] {
+        let concrete = graph.intern_node(SemanticNodeData::Primitive(kind));
+        let alias = graph.intern_node(SemanticNodeData::Alias(concrete));
+        assert!(
+            matches!(
+                graph.node_data(alias).as_deref(),
+                Some(SemanticNodeData::Alias(inner)) if *inner == concrete
+            ),
+            "the alias stays live, so its walk takes the hop"
+        );
+        for node in [concrete, alias] {
+            assert_eq!(
+                dispatch.flow_carrier_without_read_for_tests(node),
+                Some(concrete)
+            );
+        }
+    }
+}
+
+const CARRIER_PROOF_BASE_FILE: &str = "/semantic-task/carrier-base.ts";
+const CARRIER_PROOF_BASE: &str = "export interface Base { a: null; b: undefined; }\n";
+const CARRIER_PROOF_BOX_FILE: &str = "/semantic-task/carrier-box.ts";
+const CARRIER_PROOF_BOX: &str =
+    "import type { Base } from \"./carrier-base\";\nexport interface Box extends Base {}\n";
+const CARRIER_PROOF_FILE: &str = "/semantic-task/carrier-proof.ts";
+const CARRIER_PROOF_BODY: &str = r#"
+import type { Box } from "./carrier-box";
+export function guarded(value: Box["a"] | Box["b"]) {
+    if (value) return 1;
+    return 0;
+}
+"#;
+
+/// A truthiness arm whose carrier stands at a cold evaluation makes the
+/// evaluation's read inside that evaluation, so the proof the evaluation is
+/// published with names the file declaring what it read. Each arm projects
+/// a member that an imported interface inherits from a third file. The
+/// answer roots on that third file and the arm's node on the reading file,
+/// so the interface's own file is named only if the member read, which goes
+/// through its declaration, is recorded in the proof. The memo is dropped
+/// once the loop classifies its first arm, so the next arm's walk evaluates
+/// cold instead of serving what enumeration published.
+#[test]
+fn a_cold_carrier_evaluation_records_its_read_in_its_own_proof() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use verter_session_query::facts::version::FactVersionRef;
+    use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CARRIER_PROOF_BASE_FILE,
+        CARRIER_PROOF_BASE,
+        crate::FileLanguage::script_ts(),
+    );
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CARRIER_PROOF_BOX_FILE,
+        CARRIER_PROOF_BOX,
+        crate::FileLanguage::script_ts(),
+    );
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CARRIER_PROOF_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(CARRIER_PROOF_BODY),
+        crate::FileLanguage::script_ts(),
+    );
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = Arc::clone(dispatch.graph_arc());
+    let weak_graph = Arc::downgrade(&graph);
+    let dropped = Arc::new(AtomicBool::new(false));
+    let drop_once = Arc::clone(&dropped);
+    graph.set_produce_hook_for_tests(Some(Arc::new(move |query, _| {
+        if matches!(query, SemanticQueryKey::ClassifyTruthinessDomain { .. })
+            && !drop_once.swap(true, Ordering::SeqCst)
+        {
+            // No file reads this canonical; invalidating it only drops the
+            // deferred-evaluation memo.
+            weak_graph
+                .upgrade()
+                .expect("the host owns the graph")
+                .invalidate_canonical("/semantic-task/unread.ts");
+        }
+    })));
+    struct ClearHook<'a>(&'a verter_type_engine::semantic_query_memo::SemanticGraphStore);
+    impl Drop for ClearHook<'_> {
+        fn drop(&mut self) {
+            self.0.set_produce_hook_for_tests(None);
+        }
+    }
+    let hook = ClearHook(&graph);
+    let key = root_return_key(&dispatch, CARRIER_PROOF_FILE, "guarded");
+    let _ = body_reads::take();
+    let read = dispatch.execute_via_cold_build_helper(key);
+    let rows = body_reads::take();
+    drop(hook);
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the loop classified an arm, dropping the memo before the next arm's walk"
+    );
+    assert!(
+        !read.result_is_partial() && read.partial_reasons().is_empty(),
+        "the guard reads with complete evidence: {read:?}"
+    );
+    assert!(
+        rows.iter().any(|((stage, site, _), count)| {
+            *stage == Some("read_in_place") && *site == "carrier" && *count > 0
+        }),
+        "a truthiness carrier stood at a cold evaluation and read for it: {rows:?}"
+    );
+    let proofs: Vec<_> = graph
+        .evaluate_deferred_memo_proofs_for_tests()
+        .into_iter()
+        .filter(|(node, _)| {
+            matches!(
+                graph.node_data(*node).as_deref(),
+                Some(SemanticNodeData::IndexedAccess { .. })
+            )
+        })
+        .collect();
+    assert!(
+        !proofs.is_empty(),
+        "the member projections are published evaluations"
+    );
+    for (node, (facts, roots)) in &proofs {
+        let mut named = Vec::new();
+        for fact in facts.iter() {
+            match fact {
+                FactVersionRef::Receipt(receipt) => {
+                    named.extend(receipt.canonicals().iter().map(|c| c.to_string()));
+                }
+                fact => named.extend(fact.canonical_id().map(str::to_owned)),
+            }
+        }
+        assert!(
+            named.iter().any(|c| c == CARRIER_PROOF_BOX_FILE),
+            "the evaluation of {node:?} proves the declaration its member read went through: \
+             named {named:?}, facts {facts:?}, self-roots {roots:?}, reads {rows:?}"
+        );
     }
 }
 
@@ -16578,4 +17109,101 @@ fn a_workspace_of_another_fact_policy_cannot_be_bound() {
     host.set_workspace(Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     )));
+}
+
+const HOLDER_FILE: &str = "/semantic-task/holder-probe.ts";
+
+/// A holder whose freshness probe consumes a read the holder answered
+/// outside the probe. `typeof bad` spreads an inline 5,000-element tuple
+/// twice (an inline tuple splices; a named alias would stay a carrier): its
+/// answer is the checker's TS2799 recovery, a partial of the operation
+/// budget alone.
+///
+/// Marked observed, the read's partiality stays with the answer until the
+/// holder opens it: a stale probe that is discarded leaves the enclosing
+/// build complete, a fresh probe that is adopted carries the budget reason
+/// into it, and a holder that declines the answer itself leaves nothing
+/// even inside an adopted probe. A plain read, answered the same way,
+/// folds the reason into the enclosing build before the probe opens, so
+/// discarding the probe cannot remove it.
+///
+/// Mutations: answering an observed wait without its own observation (the
+/// plain answer) leaks the reason through the stale probe; opening an
+/// observed answer by discarding its observations in `adopt_observed`
+/// loses the reason from the fresh probe.
+#[test]
+fn a_holders_read_answered_outside_its_probe_leaves_partiality_only_where_the_probe_is_adopted() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::HolderProbeForTests;
+    use verter_type_engine::semantic_query::PartialReasonSet;
+
+    let tuple = format!("[{}]", vec!["0"; 5_000].join(", "));
+    let source = format!("declare const bad: [...{tuple}, ...{tuple}];\n");
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        HOLDER_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(&source),
+        crate::FileLanguage::script_ts(),
+    );
+    host.ensure_indexed_ready(HOLDER_FILE)
+        .expect("the holder fixture has indexed input");
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let key = dispatch.typeof_key_for(
+        ValueRootKey {
+            scope: ScopeId::file(
+                HOLDER_FILE,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: verter_type_expr::OwnedStr::from("bad"),
+        },
+        ProjectionReductionContext::published(ProjectionMode::Navigate),
+    );
+    let read = |observed, probe| {
+        dispatch.flow_holder_probe_read_for_tests(HOLDER_FILE, key.clone(), observed, probe)
+    };
+
+    let (plain_stale_node, plain_stale) = read(false, HolderProbeForTests::Stale);
+    let (plain_fresh_node, plain_fresh) = read(false, HolderProbeForTests::Fresh);
+    let (stale_node, stale) = read(true, HolderProbeForTests::Stale);
+    let (fresh_node, fresh) = read(true, HolderProbeForTests::Fresh);
+    let (declined_node, declined) = read(true, HolderProbeForTests::DeclinedInFresh);
+
+    assert!(
+        plain_fresh.is_some_and(|reasons| reasons.contains(PartialReasonSet::OPERATION_BUDGET)),
+        "the fixture's answer is an operation-budget partial, got {plain_fresh:?} for {}",
+        plain_fresh_node
+            .map(|node| {
+                crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                    &dispatch, node, 0,
+                )
+                .chars()
+                .take(160)
+                .collect::<String>()
+            })
+            .unwrap_or_default()
+    );
+    assert!(
+        plain_stale.is_some_and(|reasons| reasons.contains(PartialReasonSet::OPERATION_BUDGET)),
+        "a plain read answered outside the probe folds its partiality before the probe opens, \
+         got {plain_stale:?}"
+    );
+    assert_eq!(
+        stale, None,
+        "a discarded stale probe leaves no partiality of the observed read it opened"
+    );
+    assert_eq!(
+        fresh, plain_fresh,
+        "an adopted fresh probe joins the observed read's partiality exactly as a plain read does"
+    );
+    assert_eq!(
+        declined, None,
+        "a holder that declines the observed read's observations leaves none in an adopted probe"
+    );
+    assert!(plain_fresh_node.is_some(), "the recovery answers a node");
+    assert!(
+        [plain_stale_node, stale_node, fresh_node, declined_node]
+            .iter()
+            .all(|node| *node == plain_fresh_node),
+        "observing a read changes where its partiality goes, never its answer"
+    );
 }

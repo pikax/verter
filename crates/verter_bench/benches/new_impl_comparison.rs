@@ -18,6 +18,7 @@ use verter_compiler::code_transform::CodeTransform;
 use verter_compiler::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use verter_compiler::parser::types::StyleLang;
 use verter_compiler::parser::Syntax as NewSyntax;
+use verter_compiler::script::bindings::script_lane_bindings;
 use verter_compiler::script::prepared::PreparedScript;
 use verter_compiler::script::{generate_script, ScriptCodeGenOptions};
 use verter_compiler::style_planner::{run_vue_style_cascade, AuthoredStyleInput};
@@ -89,6 +90,7 @@ fn compile_full(source: &str) -> String {
         ..Default::default()
     };
     let prepared = PreparedScript::build(source, syntax.script(), syntax.script_setup(), &alloc);
+    let lane_bindings = script_lane_bindings(syntax.script_setup(), &prepared, None, &alloc);
     let script_result = generate_script(
         syntax.script(),
         syntax.script_setup(),
@@ -97,7 +99,9 @@ fn compile_full(source: &str) -> String {
         &mut ct,
         &alloc,
         &script_opts,
-    );
+        lane_bindings,
+    )
+    .expect("recorded script edits apply");
 
     // Step 4: template OXC expression parsing + codegen
     let template_ast = syntax.take_template_ast();
@@ -111,7 +115,8 @@ fn compile_full(source: &str) -> String {
             &alloc,
             script_result.bindings,
             &TemplateCodeGenOptions::default(),
-        );
+        )
+        .expect("benchmark templates apply");
     }
 
     ct.build_string()
@@ -164,7 +169,8 @@ fn template_codegen(source: &str, mode: CodeGenMode) {
                 mode,
                 ..Default::default()
             },
-        );
+        )
+        .expect("benchmark templates apply");
         black_box(ct.build_string());
     }
 }

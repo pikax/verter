@@ -71,11 +71,16 @@ impl HostLanguageClassifier {
         capabilities: ProjectCapabilitySnapshot,
         options: &FrameworkOptions,
     ) -> Self {
-        Self::with_options(
-            Arc::new(LanguageRegistry::built_in()),
-            capabilities,
-            options.clone(),
-        )
+        let registry = options
+            .language_registry()
+            .expect("framework options validate their carrier extensions when built");
+        Self::with_options(Arc::new(registry), capabilities, options.clone())
+    }
+
+    /// The registry this classifier resolves extensions with.
+    #[must_use]
+    pub fn registry(&self) -> &LanguageRegistry {
+        &self.registry
     }
 
     /// Resolve a path to its [`FileLanguage`] row.
@@ -267,6 +272,8 @@ mod tests {
     use verter_language::{
         FrameworkAdapterId, GatedCandidate, LanguageRow, ProjectCapabilityId, ScriptSourceType,
     };
+
+    use crate::framework::FrameworkOptionsError;
 
     use super::*;
 
@@ -474,6 +481,66 @@ mod tests {
             classifier.classify("/src/page.html"),
             FileLanguage::script_ts(),
             "the gated candidate's unadmitted adapter degrades to the fallback routing"
+        );
+    }
+
+    /// A host built with `md` as a Vue carrier extension reads `.md` files
+    /// as Vue carriers; a host built without it, and every extension nobody
+    /// registered, keep the built-in classification.
+    #[test]
+    fn a_carrier_extension_classifies_as_its_framework_on_that_host_only() {
+        let options = FrameworkOptions::default()
+            .with_carrier_extensions([(".md", "vue")])
+            .expect("vue is a composed vertical");
+        let with_md = HostLanguageClassifier::with_built_in_registry_and_options(
+            ProjectCapabilitySnapshot::empty(),
+            &options,
+        );
+        let built_in = HostLanguageClassifier::with_built_in_registry_and_options(
+            ProjectCapabilitySnapshot::empty(),
+            &FrameworkOptions::default(),
+        );
+
+        assert_eq!(
+            with_md.classify_registered("/src/Guide.md"),
+            Some(FileLanguage::vue())
+        );
+        assert!(with_md.carrier_extensions().contains(&"md"));
+        assert_eq!(with_md.classify("/src/App.vue"), FileLanguage::vue());
+        assert_eq!(with_md.classify_registered("/src/Guide.mdx"), None);
+        assert_eq!(built_in.classify_registered("/src/Guide.md"), None);
+        assert!(!built_in.carrier_extensions().contains(&"md"));
+    }
+
+    #[test]
+    fn a_carrier_extension_that_is_taken_malformed_or_unknown_is_refused() {
+        for (extension, framework) in [
+            ("ts", "vue"),
+            (".vue", "svelte"),
+            ("..md", "vue"),
+            ("", "vue"),
+        ] {
+            let refused = FrameworkOptions::default()
+                .with_carrier_extensions([(extension, framework)])
+                .expect_err("the registry refuses the extension");
+            assert!(
+                matches!(refused, FrameworkOptionsError::CarrierExtension(_)),
+                "{extension:?}: {refused}"
+            );
+        }
+        let repeated = FrameworkOptions::default()
+            .with_carrier_extensions([(".md", "vue"), ("md", "svelte")])
+            .expect_err("one suffix belongs to one framework");
+        assert!(
+            matches!(repeated, FrameworkOptionsError::CarrierExtension(_)),
+            "{repeated}"
+        );
+        let unknown = FrameworkOptions::default()
+            .with_carrier_extensions([("md", "react")])
+            .expect_err("react is not a composed vertical");
+        assert!(
+            matches!(unknown, FrameworkOptionsError::UnknownFramework { .. }),
+            "{unknown}"
         );
     }
 }

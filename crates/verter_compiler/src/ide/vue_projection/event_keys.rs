@@ -16,7 +16,7 @@ use crate::framework_common::projection_plan::{
 use crate::ide::vue_projection::attribute_operations::{
     AttributeOperationsProjection, AttributeSyntax, RuntimeKey, WriteValue,
 };
-use crate::template::code_gen::vdom::props::camelize;
+use crate::template::vue_syntax::camelize;
 
 /// Name supplied to Vue's event transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,6 +576,15 @@ fn collect_type_literals(ty: &TSType<'_>, values: &mut Vec<String>) {
         }
     }
     walk(ty, values, 0);
+}
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct for EventTransportPlan {
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.event_transport(input.source, input.artifact, input.canonical_id)
+    }
 }
 
 #[cfg(test)]

@@ -1241,6 +1241,49 @@ import Comp from './Comp.vue'
         default_pos,
         code
     );
+    assert_parses(&code);
+}
+
+/// A default slot that precedes a named slot moves after it together with
+/// every closing insertion recorded where the named slot begins: its last
+/// child's closing tag, the open push literal and the fallback branch.
+#[test]
+fn ssr_default_slot_adjacent_to_named_slot_moves_with_its_closing_markup() {
+    let code = gen_ssr_template(
+        r#"<template><Comp><div/><template #header>H</template></Comp></template>
+<script setup>
+import Comp from './Comp.vue'
+</script>"#,
+    );
+    let header_pos = code.find("header: _withCtx(").expect("header slot");
+    let default_pos = code.find("default: _withCtx(").expect("default slot");
+    assert!(
+        header_pos < default_pos,
+        "the named slot comes first:\n{code}"
+    );
+    assert!(
+        code[default_pos..].contains("<div></div>"),
+        "the default slot keeps its child's closing tag:\n{code}"
+    );
+    assert_parses(&code);
+}
+
+/// The generated render module parses as JavaScript.
+fn assert_parses(code: &str) {
+    let alloc = Allocator::new();
+    let module = format!("import {{}} from \"vue\";\n{code}");
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &module, oxc_span::SourceType::mjs()).parse();
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "generated JS must parse: {:?}\n{}",
+        parsed
+            .diagnostics
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        code
+    );
 }
 
 /// @ai-generated — Hyphenated v-bind shorthand on slot props should resolve
@@ -1595,20 +1638,6 @@ fn ssr_slot_name_with_dot_notation() {
         "slot name should be \"header.id\" not just \"header\", got:\n{}",
         code
     );
-}
-
-#[test]
-fn reserved_slot_never_filled_renders_nothing() {
-    // `class`/`style` reserve a position before their merged value is known;
-    // an abandoned reservation must not leave a stray separator behind.
-    use super::super::props_object::PropsObject;
-
-    let mut props = PropsObject::new();
-    props.push("a", "1");
-    let _abandoned = props.reserve();
-    props.push("b", "2");
-
-    assert_eq!(props.render_body(), "a: 1, b: 2");
 }
 
 /// Dynamic `#[name]` slots must use a computed property key (`[_ctx.name]`),

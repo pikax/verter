@@ -147,7 +147,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                     result.push(chunk);
                 }
                 Chunk::Inserted { .. }
-                | Chunk::Moved { .. }
+                | Chunk::Relocated { .. }
                 | Chunk::InsertedMapped { .. }
                 | Chunk::InsertedAnchored { .. } => {
                     result.push(chunk);
@@ -243,7 +243,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                     result.push(chunk);
                 }
                 Chunk::Inserted { .. }
-                | Chunk::Moved { .. }
+                | Chunk::Relocated { .. }
                 | Chunk::InsertedMapped { .. }
                 | Chunk::InsertedAnchored { .. } => {
                     result.push(chunk);
@@ -370,7 +370,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                     result.push(chunk);
                 }
                 Chunk::Inserted { .. }
-                | Chunk::Moved { .. }
+                | Chunk::Relocated { .. }
                 | Chunk::InsertedMapped { .. }
                 | Chunk::InsertedAnchored { .. } => {
                     result.push(chunk);
@@ -389,51 +389,29 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         self
     }
 
-    /// Apply multiple overwrite operations in a single O(n+m) pass.
+    /// Apply a validated batch of replacements in one chunk rebuild.
     ///
-    /// `overwrites` must be sorted by start position (ascending) and non-overlapping.
-    /// Each entry is `(start, end, content)` — replaces source range `[start, end)`.
-    ///
-    /// Only affects `Original` chunks; existing `Edited` chunks pass through unchanged.
-    /// This avoids O(n*m) splice cost by rebuilding the chunks Vec once.
+    /// Precondition, established by
+    /// [`try_batch_overwrite`](Self::try_batch_overwrite): `overwrites` is
+    /// sorted by start, pairwise disjoint, and every range lies inside one
+    /// live `Original` chunk. A removed range stays a
+    /// positioned (empty) replacement chunk, so the range keeps its authored
+    /// position for later edits.
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
-    pub fn batch_overwrite(&mut self, overwrites: &[(u32, u32, &'a str)]) -> &mut Self {
+    pub(super) fn batch_overwrite(&mut self, overwrites: &[(u32, u32, &'a str)]) -> &mut Self {
         self.record_audit_op();
         if overwrites.is_empty() {
             return self;
         }
-
-        // Precondition: inputs must be sorted by start position.
-        // Overlapping ranges are tolerated — the chunk-processing loop already
-        // handles them gracefully, and output_delta accounts for skipped regions.
         verter_debug_assert!(
-            overwrites.windows(2).all(|w| w[0].0 <= w[1].0),
-            "batch_overwrite requires sorted ranges"
+            overwrites
+                .windows(2)
+                .all(|pair| pair[0].0 <= pair[0].1 && pair[0].1 <= pair[1].0),
+            "batch_overwrite requires sorted, disjoint ranges"
         );
 
-        // Track output delta, accounting for overlapping ranges.
-        //
-        // The chunk-processing loop handles overlaps gracefully: it tracks a
-        // `prev` cursor and uses `max()` to prevent it from moving backward.
-        // When a later range overlaps an earlier one:
-        //   - Fully contained (end <= max_end): skipped entirely, delta = 0.
-        //   - Extends past max_end: content is emitted, but only the extension
-        //     [max_end, end) is effectively removed from the original.
-        {
-            let mut max_end: u32 = 0;
-            for &(start, end, content) in overwrites {
-                if start >= max_end {
-                    // Non-overlapping: full delta
-                    self.output_delta += content.len() as i64 - (end - start) as i64;
-                    max_end = end;
-                } else if end > max_end {
-                    // Partially overlapping but extends past max_end:
-                    // content is fully emitted, only [max_end, end) is removed.
-                    self.output_delta += content.len() as i64 - (end - max_end) as i64;
-                    max_end = end;
-                }
-                // Fully contained (end <= max_end): delta = 0
-            }
+        for &(start, end, content) in overwrites {
+            self.output_delta += content.len() as i64 - i64::from(end - start);
         }
 
         // Use scratch buffer to avoid allocation on second+ batch call
@@ -447,51 +425,32 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
 
         for &chunk in &self.chunks {
             match chunk {
-                Chunk::Original { start: cs, end: ce } => {
-                    // Check if any overwrites fall within [cs, ce)
-                    if ow_idx < overwrites.len() && overwrites[ow_idx].0 < ce {
-                        let mut prev = cs;
-                        while ow_idx < overwrites.len() && overwrites[ow_idx].0 < ce {
-                            let (ow_start, ow_end, ow_content) = overwrites[ow_idx];
-
-                            // Skip overwrites that end before this chunk's start
-                            if ow_end <= cs {
-                                ow_idx += 1;
-                                continue;
-                            }
-
-                            // Emit original content before the overwrite
-                            let effective_start = ow_start.max(prev);
-                            if prev < effective_start {
-                                result.push(Chunk::from_source(prev, effective_start));
-                            }
-
-                            // Emit the overwritten chunk (skip empty-content deletions
-                            // to reduce chunk count — the source range is still removed
-                            // because prev advances past it)
-                            if !ow_content.is_empty() {
-                                result.push(Chunk::overwritten(ow_start, ow_end, ow_content));
-                            }
-                            // Use max() to prevent prev from moving backward when
-                            // a later overwrite is fully contained within an earlier
-                            // one's range (e.g., comment deletion inside a close-tag
-                            // overwrite).
-                            prev = prev.max(ow_end);
-                            ow_idx += 1;
+                Chunk::Original { start: cs, end: ce }
+                    if ow_idx < overwrites.len() && overwrites[ow_idx].0 < ce =>
+                {
+                    let mut prev = cs;
+                    while ow_idx < overwrites.len() && overwrites[ow_idx].0 < ce {
+                        let (ow_start, ow_end, ow_content) = overwrites[ow_idx];
+                        verter_debug_assert!(
+                            cs <= ow_start && ow_end <= ce,
+                            "batch_overwrite range [{ow_start}, {ow_end}) must lie in one live chunk"
+                        );
+                        if prev < ow_start {
+                            result.push(Chunk::from_source(prev, ow_start));
                         }
-
-                        // Emit remaining original content after last overwrite
-                        if prev < ce {
-                            result.push(Chunk::from_source(prev, ce));
-                        }
-                    } else {
-                        result.push(chunk);
+                        result.push(Chunk::overwritten(ow_start, ow_end, ow_content));
+                        prev = ow_end;
+                        ow_idx += 1;
+                    }
+                    if prev < ce {
+                        result.push(Chunk::from_source(prev, ce));
                     }
                 }
-                Chunk::Inserted { .. }
+                Chunk::Original { .. }
+                | Chunk::Inserted { .. }
                 | Chunk::Overwritten { .. }
                 | Chunk::OverwrittenSegmented { .. }
-                | Chunk::Moved { .. }
+                | Chunk::Relocated { .. }
                 | Chunk::InsertedMapped { .. }
                 | Chunk::InsertedAnchored { .. } => {
                     result.push(chunk);

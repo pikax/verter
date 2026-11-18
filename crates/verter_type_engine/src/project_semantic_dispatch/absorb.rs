@@ -44,8 +44,7 @@ use crate::semantic_query::{
 use super::ProjectSemanticDispatch;
 
 /// A lattice-extreme operand the §22 absorption table reacts to.
-/// `pub(super)` so the conditional branch selection
-/// (`conditional_decision.rs::conditional_branch_selection`) can route `any` / `error`
+/// `pub(super)` so the conditional selection operation can route `any` / `error`
 /// checks — which semantically use BOTH branches / dominate — to
 /// `Deferred` instead of letting the relation table select a branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +128,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// operand(s) the absorption read. The absorbed value is a function of
     /// the operands' file content, so the published memo entry must miss when
     /// any operand's file is edited.
-    fn absorbed_output(
+    pub(super) fn absorbed_output(
         &self,
         node: SemanticNodeId,
         roots_from: impl IntoIterator<Item = SemanticNodeId>,
@@ -277,6 +276,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         ///
         /// Rows (1) and (3) read neither branch, so they root only on the
         /// decision inputs; row (2) publishes both branches and roots on them.
+        #[cfg(any(test, feature = "test-support"))]
         fn absorb_conditional(
             &self,
             check: SemanticNodeId,
@@ -284,110 +284,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             distributive: bool,
             mut force_branch: impl FnMut(bool) -> SemanticNodeId,
         ) -> Option<QueryBuildOutput> {
-            let decision_roots = [check, extends];
-            let check_special = self.peek_special(check);
-            // Error operands precede the permissive wildcard, as in the
-            // checker's conditional construction.
-            if let Some((SpecialKind::Error, err)) = check_special {
-                return Some(self.absorbed_output(err, decision_roots));
-            }
-            // (0) An error EXTENDS type is the conditional's answer too: the
-            //     checker returns its error type when either operand is it.
-            if let Some((SpecialKind::Error, err)) = self.peek_special(extends) {
-                return Some(self.absorbed_output(err, decision_roots));
-            }
-            // Permissive instantiation of either operand makes the whole
-            // conditional the wildcard (`getConditionalType`), before a
-            // still-generic check can defer it. Neither branch is demanded.
-            for operand in decision_roots {
-                if let Some((SpecialKind::Wildcard, wildcard)) = self.peek_special(operand) {
-                    return Some(self.absorbed_output(wildcard, decision_roots));
-                }
-            }
-            match check_special? {
-                // (2) `any extends T ? X : Y` ⇒ `X | Y`, unless an infer binding
-                //     would be involved (then fall through to the infer path).
-                // A conditional the checker defers over a generic operand
-                // (`any extends T ? 1 : 2`) keeps its shell: `getConditionalType`
-                // reads an `any` check only once neither operand is generic.
-                (SpecialKind::Any, _)
-                    if !self.extends_is_infer_pattern(extends)
-                        && !self.conditional_is_deferred(check, extends) =>
-                {
-                    let true_branch = force_branch(true);
-                    // An `any` or `unknown` extends type admits every check
-                    // type, so the false branch never joins: `any extends
-                    // unknown ? X : Y` is `X` (the checker adds the false branch
-                    // only when the extends type is neither).
-                    if matches!(
-                        self.peek_special(self.declared_operand_where_written(extends)),
-                        Some((SpecialKind::Any | SpecialKind::Unknown, _))
-                    ) {
-                        return Some(self.absorbed_output(true_branch, [check, extends, true_branch]));
-                    }
-                    let false_branch = force_branch(false);
-                    let union = self.intern_normalized_union_or_intersection(
-                        &[
-                            self.indexed_access_where_written(true_branch),
-                            self.indexed_access_where_written(false_branch),
-                        ],
-                        true,
-                    );
-                    Some(self.absorbed_output(union, [check, extends, true_branch, false_branch]))
-                }
-                // (3) distributive naked-`never` ⇒ `never` (empty distribution).
-                (SpecialKind::Never, _) if distributive => Some(
-                    self.absorbed_output(self.primitive_node(PrimitiveKind::Never), decision_roots),
-                ),
-                _ => None,
-            }
-        }
-    }
-
-    /// The checker's error type a conditional's check or extends operand,
-    /// written as a name, stands for: the recovery from a diagnostic the
-    /// name's own instantiation raised is the conditional's answer, as the
-    /// checker returns its error type when either operand is it. Read after
-    /// the conditional is related, which has already read the name.
-    pub(super) fn absorb_named_error_operand(
-        &self,
-        check: SemanticNodeId,
-        extends: SemanticNodeId,
-    ) -> Option<QueryBuildOutput> {
-        self.probe_optional(|| self.probe_named_error_operand(check, extends))
-    }
-
-    fn probe_named_error_operand(
-        &self,
-        check: SemanticNodeId,
-        extends: SemanticNodeId,
-    ) -> Option<QueryBuildOutput> {
-        let named = |operand: SemanticNodeId| {
-            matches!(
-                self.graph().node_data(operand).as_deref(),
-                Some(
-                    SemanticNodeData::Alias(_)
-                        | SemanticNodeData::DeclRef { .. }
-                        | SemanticNodeData::InstantiationRef { .. }
-                        | SemanticNodeData::TypeOf(_)
-                        | SemanticNodeData::BareRef(_)
-                        | SemanticNodeData::ImportType(_)
-                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
-                )
+            self.conditional_absorption_from_steps(
+                check,
+                extends,
+                distributive,
+                &mut force_branch,
             )
-        };
-        [check, extends]
-            .into_iter()
-            .filter(|operand| named(*operand))
-            .find_map(|operand| {
-                let resolved = self.resolved_conditional_operand(operand)?;
-                matches!(
-                    self.peek_special(resolved),
-                    Some((SpecialKind::Error | SpecialKind::Wildcard, _))
-                )
-                .then_some(resolved)
-            })
-            .map(|error| self.absorbed_output(error, [check, extends]))
+        }
     }
 
     // ── Builtin-utility degenerate operands ──────────────────────────────
@@ -505,7 +408,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// `SCAN_BUDGET` for cycle safety. Budget exhaustion is conservative — it
     /// returns `true` ("infer may be present") so the caller falls through to
     /// the infer-binding path rather than risking a leak.
-    fn extends_is_infer_pattern(&self, extends: SemanticNodeId) -> bool {
+    pub(super) fn extends_is_infer_pattern(&self, extends: SemanticNodeId) -> bool {
         // bounded-loop: at most SCAN_BUDGET node_data peeks; budget exhaustion
         // is treated conservatively as "infer may be present".
         const SCAN_BUDGET: usize = 64;

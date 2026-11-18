@@ -2954,7 +2954,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
-      semantic_queries: ["IndexedAccess", "Instantiate", "ResolveDecl", "LowerLocator"],
+      semantic_queries: ["IndexedAccess", "Instantiate", "ProjectPath", "ResolveDecl", "LowerLocator"],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         "lifted by U2.INDEXED_ACCESS: `IndexedRules = KeySource['nested']['value']` " +
@@ -2967,7 +2967,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
-      semantic_queries: ["IndexedAccess", "Instantiate", "ResolveDecl", "LowerLocator"],
+      semantic_queries: ["IndexedAccess", "Instantiate", "ProjectPath", "ResolveDecl", "LowerLocator"],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         "lifted by U2.INDEXED_ACCESS: `DeepProjectedTarget` reduces a 16-hop " +
@@ -3023,7 +3023,14 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "KeyOf", "ProjectPath", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "KeyOf",
+        "ReduceIntersection",
+        "ProjectPath",
+        "LowerLocator",
+      ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         "lifted by U2.INDEXED_ACCESS: `WantedKeys = keyof WantedType` (with " +
@@ -3065,6 +3072,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "Instantiate",
         "IndexedAccess",
         "ReduceIntersection",
+        "ProjectPath",
         "LowerLocator",
       ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
@@ -3082,6 +3090,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "Instantiate",
         "IndexedAccess",
         "ReduceIntersection",
+        "ProjectPath",
         "LowerLocator",
       ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
@@ -3441,7 +3450,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::JsxResolution)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "IndexedAccess", "LowerLocator"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "IndexedAccess", "ProjectPath", "LowerLocator"],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         'lifted (JSX family; re-homed to U2.INDEXED_ACCESS per measured trace): `IntrinsicPropsFor<"div">` (alias for `JSX.IntrinsicElements[Tag]`) instantiates `Tag = "div"` and reduces the indexed access over the global-augmented `JSX.IntrinsicElements` to the declared `div` shape `{ id?: string; className?: string }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row',
@@ -3452,7 +3461,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::JsxResolution)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "IndexedAccess", "LowerLocator"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "IndexedAccess", "ProjectPath", "LowerLocator"],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         'lifted (JSX family; re-homed to U2.INDEXED_ACCESS per measured trace): `IntrinsicPropsFor<"span">` (alias for `JSX.IntrinsicElements[Tag]`) instantiates `Tag = "span"` and reduces the indexed access over the global-augmented `JSX.IntrinsicElements` to the declared `span` shape `{ title?: string }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row',

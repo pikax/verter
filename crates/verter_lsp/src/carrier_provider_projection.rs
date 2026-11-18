@@ -438,7 +438,7 @@ fn prepare_carrier_provider_imports_with_verter_types(
     // and its map come from the same chunk walk and cannot describe different
     // edits. (Editing the built string and maintaining a compensating mapper
     // alongside it is exactly the desync `CodeTransform` exists to prevent.)
-    let mut transform = CodeTransform::new(generated, &allocator);
+    let mut transform = CodeTransform::new_mapped(generated, &allocator);
     for (start, end, replacement) in &replacements {
         transform.overwrite(*start as u32, *end as u32, replacement);
     }

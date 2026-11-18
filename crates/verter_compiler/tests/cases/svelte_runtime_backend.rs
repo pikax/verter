@@ -16,8 +16,7 @@ use verter_compiler::compile_request::{
     RuntimeProductRequest, SvelteCompileRequest, SvelteOptionAttempt, VueCompileRequest,
 };
 use verter_compiler::framework_common::{
-    CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
-    ImmutableCapabilityCatalog, RuntimeCompilerBackend,
+    CatalogCapability, CatalogTable, FrameworkEpoch, FrameworkParseArtifact, RuntimeCompilerBackend,
 };
 use verter_compiler::standalone::{
     DirectCompileError, DirectCompileOutput, DirectExecutionInputs, StandaloneCompiler,
@@ -30,8 +29,7 @@ use verter_compiler::svelte::{
     SvelteRuntimeInputs, SvelteSfc5,
 };
 use verter_language::carrier_grammar::{
-    CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-    FrameworkAdapterSemanticVersion,
+    CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
 };
 use verter_language::registered_source_authority::{
     CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -85,9 +83,14 @@ fn registered_artifact(canonical: &str, source: &str, svelte: bool) -> Framework
         .expect("registered source");
     let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
     let config = if svelte {
-        CarrierGrammarConfig::Svelte
+        verter_compiler::svelte::svelte_grammar_config()
     } else {
-        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).expect("vue grammar")
+        verter_compiler::framework_common::vue_grammar_config(
+            "{{",
+            "}}",
+            std::iter::empty::<&str>(),
+        )
+        .expect("vue grammar")
     };
     grammar_authority
         .register_carrier_grammar(
@@ -282,14 +285,13 @@ fn svelte_runtime_catalog_row_binds_svelte_adapter_identity() {
     );
     assert_eq!(row.identity().capability(), CatalogCapability::Runtime);
     assert!(row.identity().host_epoch().is_none());
-    assert_eq!(row.identity().epoch().as_str(), SvelteSfc5::ID);
-    assert_eq!(row.identity().epoch().as_str(), "svelte");
+    assert_eq!(
+        row.identity().framework_family(),
+        SvelteSfc5::MANIFEST.family
+    );
+    assert_eq!(row.identity().framework_family(), "svelte");
     let _backend: &SvelteRuntimeBackend = row.runtime();
-    let catalog =
-        ImmutableCapabilityCatalog::<(), (), (), SvelteRuntimeBackend, ()>::try_from_rows([
-            CatalogRow::Runtime(row),
-        ])
-        .expect("single Svelte runtime row");
+    let catalog = CatalogTable::try_from_rows([row]).expect("single Svelte runtime row");
     assert_eq!(catalog.len(), 1);
 }
 

@@ -9,8 +9,9 @@
 //!
 //! 1. **Augmented bytes.** [`augment_tsconfig_bytes`] takes the user tsconfig
 //!    JSON and the companion paths and produces the virtual config: byte-wise it
-//!    is the user config with the companion paths added to `files`, and nothing
-//!    else changed. The augmented bytes are served through the
+//!    is the user config with companions added to `files`, preserving effective
+//!    authored roots (including implicit includes and inherited files).
+//!    The augmented bytes are served through the
 //!    `verter_tsgo_api` overlay's `read_file` for the tsconfig path; a
 //!    non-virtual project has no overlay entry and falls through to the real
 //!    config.
@@ -80,17 +81,46 @@ impl InjectedPathSet {
 
 /// Produce the virtual (augmented) tsconfig bytes for a project that must be
 /// virtualized: the user config with `companion_paths` injected into `files`,
-/// byte-identical otherwise.
+/// retaining authored options and effective roots.
 ///
 /// `companion_paths` are the companion surfaces (`Foo.vue.tsx`, …) to inject.
 /// `user_tsconfig_json` is the user's real tsconfig content. The companion
 /// entries are added to a `files` array (created if absent), de-duplicated
-/// against any existing entries; `include`/`exclude`/`compilerOptions`/`extends`
-/// and every other key are preserved untouched.
+/// against any existing entries. An implicit default include is made explicit
+/// before `files` is added. Inherited membership requires the extends-aware
+/// owner input accepted by [`augment_tsconfig_bytes_with`].
 pub fn augment_tsconfig_bytes(user_tsconfig_json: &str, companion_paths: &[String]) -> String {
+    augment_tsconfig_bytes_with(
+        user_tsconfig_json,
+        companion_paths,
+        &VirtualConfigOverrides::default(),
+    )
+}
+
+/// Options forced only for a checking program; authored options otherwise survive.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VirtualConfigOverrides<'a> {
+    pub no_emit: bool,
+    pub non_composite: bool,
+    pub allow_arbitrary_extensions: bool,
+    /// Effective authored roots from the extends-aware config owner. Required
+    /// when injecting roots into a config that inherits its membership.
+    pub effective_membership: Option<&'a crate::membership::ProjectMembership>,
+}
+
+/// Add checking roots at the authored config path with explicit checking options.
+pub fn augment_tsconfig_bytes_with(
+    user_tsconfig_json: &str,
+    companion_paths: &[String],
+    overrides: &VirtualConfigOverrides<'_>,
+) -> String {
     // No companions ⇒ a no-op (do not fabricate a `files` key). Return the user
     // bytes unchanged so a degenerate virtualization is byte-identical.
-    if companion_paths.is_empty() {
+    if companion_paths.is_empty()
+        && !overrides.no_emit
+        && !overrides.non_composite
+        && !overrides.allow_arbitrary_extensions
+    {
         return user_tsconfig_json.to_string();
     }
 
@@ -105,6 +135,34 @@ pub fn augment_tsconfig_bytes(user_tsconfig_json: &str, companion_paths: &[Strin
     };
     let obj = json.as_object_mut().expect("checked to be an object above");
 
+    // Adding `files` suppresses TypeScript's implicit include and replaces an
+    // inherited files array. Preserve both using the config owner's resolved
+    // membership, without resolving extends or walking files here.
+    if !companion_paths.is_empty() {
+        match overrides.effective_membership {
+            Some(crate::membership::ProjectMembership::MatchAll) => {
+                obj.insert("include".into(), serde_json::json!(["**/*"]));
+            }
+            Some(crate::membership::ProjectMembership::IncludeExclude {
+                files, include, ..
+            }) => {
+                if !obj.contains_key("files") && !files.is_empty() {
+                    obj.insert("files".into(), serde_json::json!(files));
+                }
+                if !obj.contains_key("include") && !include.is_empty() {
+                    obj.insert("include".into(), serde_json::json!(include));
+                }
+            }
+            None if !obj.contains_key("files")
+                && !obj.contains_key("include")
+                && !obj.contains_key("extends") =>
+            {
+                obj.insert("include".into(), serde_json::json!(["**/*"]));
+            }
+            None => {}
+        }
+    }
+
     // Collect the existing `files` entries, then union the companions in,
     // de-duplicating against what is already present.
     let mut files: Vec<serde_json::Value> = obj
@@ -118,7 +176,26 @@ pub fn augment_tsconfig_bytes(user_tsconfig_json: &str, companion_paths: &[Strin
             files.push(serde_json::Value::String(companion.clone()));
         }
     }
-    obj.insert("files".to_string(), serde_json::Value::Array(files));
+    if !companion_paths.is_empty() {
+        obj.insert("files".to_string(), serde_json::Value::Array(files));
+    }
+    if overrides.no_emit || overrides.non_composite || overrides.allow_arbitrary_extensions {
+        let options = obj
+            .entry("compilerOptions")
+            .or_insert_with(|| serde_json::json!({}));
+        // Preserve malformed options so the engine still diagnoses the user's config.
+        if let Some(options) = options.as_object_mut() {
+            if overrides.no_emit {
+                options.insert("noEmit".into(), true.into());
+            }
+            if overrides.non_composite {
+                options.insert("composite".into(), false.into());
+            }
+            if overrides.allow_arbitrary_extensions {
+                options.insert("allowArbitraryExtensions".into(), true.into());
+            }
+        }
+    }
 
     serde_json::to_string_pretty(&json).unwrap_or_else(|_| user_tsconfig_json.to_string())
 }

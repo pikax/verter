@@ -118,7 +118,7 @@ pub fn project_svelte_ide(
     verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let dialect = SvelteIdeDialect::for_component(parsed);
     let allocator = Allocator::default();
-    let mut ct = CodeTransform::<M>::new_in(source, &allocator);
+    let mut ct = CodeTransform::<M>::new_mapped_in(source, &allocator);
     let mut diagnostics = Vec::new();
 
     // The first template-markup byte: the render fragment opens here.

@@ -6,13 +6,14 @@ fn project(template: &str) -> super::event_keys::EventTransportPlan {
     let source = format!(
         "<script setup lang=\"ts\">\nconst h = () => {{}};\n</script>\n<template>\n{template}\n</template>\n"
     );
-    let parsed = crate::compile::parse_sfc(&source, None, None);
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(&source, None, None);
     let plan = build_projection_plan(PlanInput {
         canonical_id: "file:///events.vue",
         source: &source,
         parsed: &parsed,
         parse_key: None,
         syntax_profile: None,
+        custom_elements: None,
     });
     let attributes = project_attribute_operations(&plan, &parsed, &source);
     project_event_transport(&plan, &attributes)

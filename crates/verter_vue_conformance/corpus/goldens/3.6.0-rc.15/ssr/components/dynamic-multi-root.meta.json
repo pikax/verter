@@ -1,0 +1,68 @@
+{
+  "schema": 2,
+  "caseId": "components/dynamic-multi-root",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/components/dynamic-multi-root.vue",
+    "sha256": "65ca3f43f6eb6f7dd05ca7863fe98bb2adba7448eb44b386e6484bc0c8b2f5fb"
+  },
+  "options": {
+    "sha256": "34f10e9ca90c05ccc0d1da09ccb7c5f77039fdcbedcddee719bfe11e5ae39142",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/components/dynamic-multi-root.vue",
+      "id": "components/dynamic-multi-root",
+      "pipeline": "compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/components/dynamic-multi-root.js",
+      "sha256": "abc5adb09761974cfd1a6a9f25cd77dd8f16f1e2015bb840ee716be0c0fb784e",
+      "bytes": 855
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/components/dynamic-multi-root.map.json",
+      "sha256": "7a73d661d01741d2a41084767adc90903a5769509c2ab00fcacab9d8e8487777"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createVNode",
+      "alias": "_createVNode"
+    },
+    {
+      "imported": "renderSlot",
+      "alias": "_renderSlot"
+    },
+    {
+      "imported": "resolveDynamicComponent",
+      "alias": "_resolveDynamicComponent"
+    },
+    {
+      "imported": "withCtx",
+      "alias": "_withCtx"
+    }
+  ]
+}

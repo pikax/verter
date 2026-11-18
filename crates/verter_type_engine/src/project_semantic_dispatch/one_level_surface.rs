@@ -34,6 +34,8 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
+type SurfaceRead = crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>;
+
 /// A graph-only one-level surface: the resolver-owned ordered declaration
 /// stream plus the keyspace / index-signature facts of the surface it was
 /// read from.
@@ -435,6 +437,18 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
     context: ProjectionReductionContext,
     walker_diagnostics: Option<&mut Vec<super::walk::ShallowDiagnostic>>,
 ) -> SurfaceResolution<OneLevelSurface> {
+    project_one_level_surface_observed(ctx, dispatch, base, path, context, walker_diagnostics, None)
+}
+
+fn project_one_level_surface_observed<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    base: SemanticNodeId,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
+    context: ProjectionReductionContext,
+    walker_diagnostics: Option<&mut Vec<super::walk::ShallowDiagnostic>>,
+    mut observer: Option<&mut dyn FnMut(&SurfaceRead)>,
+) -> SurfaceResolution<OneLevelSurface> {
     verter_debug_assert_eq!(
         context.mode,
         ProjectionMode::Shallow,
@@ -480,7 +494,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
         {
             let constraint = *constraint;
             return match constraint {
-                Some(constraint) => project_one_level_surface(
+                Some(constraint) => project_one_level_surface_observed(
                     ctx,
                     dispatch,
                     constraint,
@@ -489,6 +503,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ),
                     context,
                     walker_diagnostics,
+                    observer,
                 )
                 .into_open_presence(),
                 None => SurfaceResolution::open_presence(OneLevelSurface::empty()),
@@ -514,6 +529,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
             };
             dispatch.record_dispatch_intent_counters(&key);
             let surface_read = dispatch.execute_read(key);
+            if let Some(observer) = observer.as_mut() {
+                observer(&surface_read);
+            }
             // Mirror `partial_reason_classes`: a partial read whose
             // producer captured no specific class is a downstream
             // PROPAGATED partial — stated here, at the one conversion
@@ -622,7 +640,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
         Some(SemanticNodeData::TypeParam { constraint, .. }) => {
             let constraint = *constraint;
             match constraint {
-                Some(constraint) => project_one_level_surface(
+                Some(constraint) => project_one_level_surface_observed(
                     ctx,
                     dispatch,
                     constraint,
@@ -631,6 +649,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ),
                     context,
                     None,
+                    observer,
                 )
                 .into_open_presence(),
                 None => SurfaceResolution::open_presence(OneLevelSurface::empty()),
@@ -968,6 +987,80 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
     macro_index: usize,
     macro_kind: AnalyzedMacroKind,
 ) -> SurfaceResolution<MacroArgumentSurface> {
+    project_macro_argument_surface_claim_with_diagnostics(
+        ctx,
+        dispatch,
+        owner_canonical,
+        macro_index,
+        macro_kind,
+        &mut |_| {},
+    )
+}
+
+/// A diagnostic borrowed while its producing read still owns its graph operands.
+pub enum MacroSurfaceDiagnostic<'a> {
+    /// Diagnostics emitted by the carrier or terminal surface walker.
+    Walker {
+        /// Borrowed while the owning semantic read is alive.
+        diagnostics: &'a [super::walk::ShallowDiagnostic],
+        /// Whether the read refused cache admission.
+        cache_suppress: bool,
+    },
+    /// The authored macro payload could not be lowered.
+    LoweringFailed,
+    /// The payload read stopped on a cycle.
+    CyclicPayload,
+    /// The payload read returned an operational error.
+    OpaquePayload(&'a crate::semantic_query::QueryError),
+    /// The payload still names an unresolved declaration.
+    UnresolvedPayload,
+    /// The surface read was incomplete without a walker diagnostic.
+    SurfaceIncomplete(crate::semantic_query::PartialReasonSet),
+}
+
+fn resolve_macro_surface_carrier<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    carrier: SemanticNodeId,
+    diagnostics: &mut dyn for<'a> FnMut(MacroSurfaceDiagnostic<'a>),
+) -> SurfaceRead {
+    let key = SemanticQueryKey::ProjectPath {
+        base: carrier,
+        path: Default::default(),
+        context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    };
+    dispatch.record_dispatch_intent_counters(&key);
+    let read = dispatch.execute_read(key);
+    crate::request_context::observe_component_meta_read_suppress(&read);
+    crate::meta_resolve::emit_dispatch_dep_signature_facts(dispatch, read.dep_signature());
+    if !read.walker_diagnostics().is_empty() {
+        diagnostics(MacroSurfaceDiagnostic::Walker {
+            diagnostics: read.walker_diagnostics(),
+            cache_suppress: read.cache_suppress(),
+        });
+    }
+    match read.value() {
+        QueryResult::Value(_) => {}
+        QueryResult::Recursive(_) => {
+            diagnostics(MacroSurfaceDiagnostic::CyclicPayload);
+        }
+        QueryResult::Error(error) => {
+            diagnostics(MacroSurfaceDiagnostic::OpaquePayload(error));
+        }
+    }
+    read
+}
+
+/// Produce the membership claim and retain its own diagnostics, including failed roots.
+pub fn project_macro_argument_surface_claim_with_diagnostics<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    owner_canonical: &Arc<str>,
+    macro_index: usize,
+    macro_kind: AnalyzedMacroKind,
+    diagnostics: &mut dyn for<'a> FnMut(MacroSurfaceDiagnostic<'a>),
+) -> SurfaceResolution<MacroArgumentSurface> {
     use crate::semantic_query::SurfaceProvenanceContext;
 
     // One dispatcher operation: what the projection interns is owned until
@@ -992,6 +1085,40 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
     // synthesized value and modifiers props (`AnalyzedMacro.prop_fields`), so the macro
     // surface is the EMPTY object surface.
     if macro_kind == AnalyzedMacroKind::DefineModel {
+        let reasons = if mac.parsed_type_argument.is_some() {
+            match dispatch.macro_type_arg_hot_ref(owner_canonical.as_ref(), macro_index) {
+                Some(product) => {
+                    let read =
+                        resolve_macro_surface_carrier(dispatch, product.hot.node(), diagnostics);
+                    let base = match read.value() {
+                        QueryResult::Value(node) | QueryResult::Recursive(node) => *node,
+                        QueryResult::Error(_) => product.hot.node(),
+                    };
+                    let reasons = unresolved_macro_root_partiality(
+                        super::node_data_for(dispatch.graph().store(), base).as_deref(),
+                    );
+                    if reasons.is_some() {
+                        diagnostics(MacroSurfaceDiagnostic::UnresolvedPayload);
+                    }
+                    reasons
+                }
+                None => {
+                    diagnostics(MacroSurfaceDiagnostic::LoweringFailed);
+                    Some(NonEmptyReasons::of(
+                        crate::semantic_query::PartialReason::MissingDependency,
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+        // A model's declared name is known independently of its value type.
+        // Preserve that membership claim while recording the value read's failure.
+        if let Some(reasons) = reasons {
+            crate::request_context::fold_result_completeness(
+                crate::semantic_query::ResultCompleteness::partial(reasons.get()),
+            );
+        }
         return SurfaceResolution::resolved(MacroArgumentSurface {
             surface: OneLevelSurface::empty(),
             macro_call_span: mac.span,
@@ -1064,6 +1191,7 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
     // argument decomposes to `(handle_node, [])`.
     let Some(product) = dispatch.macro_type_arg_hot_ref(owner_canonical.as_ref(), macro_index)
     else {
+        diagnostics(MacroSurfaceDiagnostic::LoweringFailed);
         return SurfaceResolution::incomplete(NonEmptyReasons::of(
             crate::semantic_query::PartialReason::MissingDependency,
         ));
@@ -1075,10 +1203,11 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
     // reproducing the eager structural-transit-Navigate base lowering. The
     // path-precise `Shallow` projection then synthesises the one-level
     // surface of the terminal hop.
-    let base = dispatch.resolve_hot_handle_with_context(
-        crate::semantic_query::HotTypeRef::new(base_carrier),
-        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-    );
+    let base_read = resolve_macro_surface_carrier(dispatch, base_carrier, diagnostics);
+    let base = match base_read.value() {
+        QueryResult::Value(node) | QueryResult::Recursive(node) => *node,
+        QueryResult::Error(_) => base_carrier,
+    };
     // Navigate preserves an authored reference as a carrier when its
     // declaration cannot currently be resolved. That carrier is the
     // resolver-owned proof that the root surface is unavailable, not an
@@ -1095,6 +1224,12 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
         super::node_data_for(dispatch.graph().store(), base).as_deref(),
     );
     if let Some(reasons) = unresolved_root {
+        match super::node_data_for(dispatch.graph().store(), base).as_deref() {
+            Some(SemanticNodeData::Opaque(error)) => {
+                diagnostics(MacroSurfaceDiagnostic::OpaquePayload(error))
+            }
+            _ => diagnostics(MacroSurfaceDiagnostic::UnresolvedPayload),
+        }
         return SurfaceResolution::incomplete(reasons);
     }
 
@@ -1102,23 +1237,51 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
     // SURFACE-COMPOSITION arms (heritage / intersection / union) the
     // shallow synthesis dropped ride the resolved surface to the
     // compile-facing collector.
-    let mut walker_diagnostics = Vec::new();
-    // The terminal-hop discharge: a projection that could not produce the
-    // demanded surface (a MISSED terminal hop on a deep indexed access, an
-    // unresolved carrier mid-path) records its typed partiality — the
-    // empty macro-DTO bundle the caller then publishes is PARTIAL, refused
-    // surface-store admission, and reaches the payload as a degraded
-    // surface instead of a wrong-complete silence. A genuinely non-object
-    // terminal stays the complete "no surface" miss.
-    let surface = project_one_level_surface(
-        ctx,
-        dispatch,
-        base,
-        path,
-        terminal_context,
-        Some(&mut walker_diagnostics),
-    );
-    let unresolved_surface_arms = unresolved_surface_arms_from_diags(&walker_diagnostics);
+    let mut unresolved_surface_arms = Vec::new();
+    let mut saw_diagnostics = false;
+    let surface = {
+        let mut observe_surface = |read: &SurfaceRead| {
+            let observed = read.walker_diagnostics();
+            if !observed.is_empty() {
+                saw_diagnostics = true;
+                unresolved_surface_arms.extend(unresolved_surface_arms_from_diags(observed));
+                diagnostics(MacroSurfaceDiagnostic::Walker {
+                    diagnostics: observed,
+                    cache_suppress: read.cache_suppress(),
+                });
+            }
+        };
+        // The terminal-hop discharge: a projection that could not produce the
+        // demanded surface (a MISSED terminal hop on a deep indexed access, an
+        // unresolved carrier mid-path) records its typed partiality — the
+        // empty macro-DTO bundle the caller then publishes is PARTIAL, refused
+        // surface-store admission, and reaches the payload as a degraded
+        // surface instead of a wrong-complete silence. A genuinely non-object
+        // terminal stays the complete "no surface" miss.
+        project_one_level_surface_observed(
+            ctx,
+            dispatch,
+            base,
+            path,
+            terminal_context,
+            None,
+            Some(&mut observe_surface),
+        )
+    };
+    unresolved_surface_arms.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.owner_canonical.cmp(&b.owner_canonical))
+            .then_with(|| a.owner.cmp(&b.owner))
+    });
+    unresolved_surface_arms.dedup();
+    if !saw_diagnostics {
+        if let SurfaceResolution::Incomplete(incomplete) = &surface {
+            diagnostics(MacroSurfaceDiagnostic::SurfaceIncomplete(
+                incomplete.non_empty_reasons().get(),
+            ));
+        }
+    }
     // An unresolvable SURFACE-COMPOSITION arm (a heritage / intersection /
     // union contributor the shallow synthesis dropped) makes the published
     // METADATA surface partial: the members behind that arm are missing,

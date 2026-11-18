@@ -25,7 +25,7 @@
     "test:endurance": "pnpm --filter @verter/dx-harness run test:endurance",
     "test:scripts": "node scripts/run-script-tests.mjs",
     "test:scripts:ci": "node scripts/run-script-tests.mjs --ci",
-    "test:sfc-projection": "node --test scripts/sfc-projection/verify-node.test.mjs && node --experimental-strip-types --test tests/sfc-projection/STP5/mapper.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP6/packed.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP7/framework-boundary.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP8/abi-ratify.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP9/plan.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP10/emission.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP11/script-setup.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP14/binder-capture.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STS0/svelte-lock.spec.ts",
+    "test:sfc-projection": "node --test scripts/sfc-projection/verify-node.test.mjs scripts/sfc-projection/parity/*.test.mjs && node --experimental-strip-types --test tests/sfc-projection/STP5/mapper.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP6/packed.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP7/framework-boundary.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP8/abi-ratify.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP9/plan.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP10/emission.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP11/script-setup.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP14/binder-capture.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STS0/svelte-lock.spec.ts",
     "affected-tests": "node scripts/affected-tests.mjs",
     "bump": "node scripts/bump.mjs",
     "bump:ide": "node scripts/bump-ide.mjs",
@@ -55,6 +55,7 @@
     "dev-extension": "pnpm run build:lsp && pnpm --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
     "update-all": "pnpm up -r -i -L",
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "gen:test-cases": "cargo run -p xtask --bin gen-test-case-modules",
     "gen:host-request-ts": "cargo run -p verter_napi --features generate-host-request-ts --bin generate_host_compile_request_ts",
     "gen:query-key-spec": "cargo run -p verter_type_engine --bin gen-query-key-spec",
     "gen:oracle-snapshots": "cargo run -p verter_session --features oracle-gen --bin oracle_gen",
@@ -86,8 +87,8 @@
     "test:generic-interface-identity-oracle": "node crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/generic_interface_identity.oracle.mjs"
   },
   "dependencies": {
-    "@vue/compiler-core": "3.6.0-rc.5",
-    "@vue/compiler-sfc": "3.6.0-rc.5",
+    "@vue/compiler-core": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
     "oxfmt": "0.52.0"
   },
   "devDependencies": {
@@ -106,7 +107,7 @@
     "svelte": "5.56.10",
     "typescript": "7.1.0-beta",
     "vitest": "^5.0.5",
-    "vue": "3.6.0-rc.5"
+    "vue": "3.6.0-rc.15"
   },
   "lint-staged": {
     "*.rs": "cargo fmt --check --",

@@ -135,26 +135,6 @@ pub(super) fn published_member_source_upgrade_for_node<
     }
 }
 
-/// The REQUIREMENT class of a published surface member's VALUE position —
-/// the classification a projector supplies so the member sink can type a
-/// no-faithful-source residue correctly. A single class remains: the shallow
-/// published member value, whose GENUINE-miss residue fails typed as the
-/// required-member-value failure (a fabricated `unknown` success is
-/// forbidden) — a KNOWN structural value publishes the projected
-/// member-path replay route instead (see
-/// [`structural_member_value_source`]). The former REQUIRED-payload class
-/// is gone: emit payload sources are owned by the normalized
-/// `ResolvedEmitOccurrence.payload_source` rows (closed tuple / member-path /
-/// callable-params replay), so the flat emit member rows classify as
-/// shallow members like every other surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MemberValuePosition {
-    /// A shallow published member value (props / emits-metadata / exposed /
-    /// options / slots members): a genuine no-faithful-source miss ⇒ the
-    /// typed member-value failure.
-    ShallowMember,
-}
-
 /// The faithful PRESENT structural source for a shallow published member
 /// value with NO authored slot, NO use-site slot, and NO closed/ref upgrade
 /// on its published node: retain a directly representable declaration identity

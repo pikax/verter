@@ -25,6 +25,11 @@ pub(crate) use verter_parser::utils;
 
 // ── Compiler-owned modules ─────────────────────────────────────────────────
 
+// The shared immutable emission representation: pieces that keep what their
+// bytes mean, fragments, and the one writer. Below `code_transform` and
+// `assembly`; its public types are reached through `assembly::emit_plan`.
+pub(crate) mod emission;
+
 // PUBLIC because `CodeTransform` is the single source of truth for every
 // modification to generated code — including the ones performed OUTSIDE this
 // crate (the LSP's provider-side carrier import-specifier projection). A
@@ -118,6 +123,11 @@ pub use ide::template::flow_check;
 pub use ide::vue_projection::public_constructor::project_public_constructor;
 #[cfg(any(test, feature = "test-support"))]
 pub use ide::vue_projection::script_setup::ScriptBlockInput;
+
+// Test-only re-export of the template topology for the conformance suite;
+// `template` stays `pub(crate)` in production builds.
+#[cfg(feature = "test-support")]
+pub use template::topology;
 
 #[cfg(test)]
 mod compile_ported_tests;

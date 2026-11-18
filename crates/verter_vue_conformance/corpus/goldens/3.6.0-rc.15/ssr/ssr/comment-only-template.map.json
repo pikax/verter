@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/ssr/comment-only-template.vue"
+  ],
+  "names": [],
+  "mappings": "",
+  "sourcesContent": [
+    "\n  <!-- a `b` c -->\n"
+  ]
+}

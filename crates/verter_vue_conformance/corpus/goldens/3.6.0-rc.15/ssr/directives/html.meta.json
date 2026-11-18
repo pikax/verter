@@ -1,0 +1,56 @@
+{
+  "schema": 2,
+  "caseId": "directives/html",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/directives/html.vue",
+    "sha256": "f7da832576e1c4663b0f84027547ae37f2af574757613d929a3ad43266f55046"
+  },
+  "options": {
+    "sha256": "7fd0e59553e69bf888e8e973e7228ff9e76821f56fe5cc2b5865d7f281709ef2",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/directives/html.vue",
+      "id": "directives/html",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/directives/html.js",
+      "sha256": "2d751387b699c0f7f768676e51cc448ce6ae6f4386c966dffb2ef8d5ad83a1e8",
+      "bytes": 605
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/directives/html.map.json",
+      "sha256": "ff78da2b23edd4030ad396798442fe4cc8da07169b4c212415c84a9a4c6551ad"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "ref",
+      "alias": "ref"
+    }
+  ]
+}

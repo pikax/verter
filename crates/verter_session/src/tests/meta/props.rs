@@ -780,22 +780,21 @@ defineProps<{
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let editor_field = resolved
         .evaluated_types
         .as_ref()
-        .and_then(|types| types.props.iter().find(|field| field.name == "editor"))
-        .expect("expanded evaluated types should keep the editor prop");
+        .into_iter()
+        .flat_map(|types| types.define_props.iter())
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "editor")
+        .expect("the defineProps shape should publish the `editor` prop");
 
     let editor_field_ty = shallow_published_type(
         project.host(),
         "/src/App.vue",
-        Some(
-            editor_field
-                .authority
-                .source_position()
-                .present()
-                .expect("present source"),
-        ),
+        Some(editor_field.ty.present().expect("present source")),
         "editor prop",
     );
     assert!(
@@ -855,22 +854,21 @@ defineProps<{
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let state_field = resolved
         .evaluated_types
         .as_ref()
-        .and_then(|types| types.props.iter().find(|field| field.name == "state"))
-        .expect("expanded evaluated types should keep the state prop");
+        .into_iter()
+        .flat_map(|types| types.define_props.iter())
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "state")
+        .expect("the defineProps shape should publish the `state` prop");
 
     let state_field_ty = shallow_published_type(
         project.host(),
         "/src/App.vue",
-        Some(
-            state_field
-                .authority
-                .source_position()
-                .present()
-                .expect("present source"),
-        ),
+        Some(state_field.ty.present().expect("present source")),
         "state prop",
     );
     assert!(

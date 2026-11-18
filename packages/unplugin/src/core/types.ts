@@ -20,8 +20,19 @@ export interface VerterPluginOptions {
   lang?: VerterFrameworkLanguage;
   /** Custom component ID generator */
   componentId?: (filename: string, source: string, isProd: boolean) => string;
+  /**
+   * Extra carrier suffixes and the framework that compiles them, for example
+   * `{ ".md": "vue" }`. They are registered with the native host when the
+   * session creates it. A bare `include` never assigns a framework: it only
+   * narrows which carriers compile.
+   */
+  carriers?: Readonly<Record<string, "vue" | "sveltejs">>;
   /** File patterns to include (default follows `lang`). Matches @vitejs/plugin-vue `include`. */
   include?: string | RegExp | (string | RegExp)[];
+  /**
+   * File patterns to leave out. Matches @vitejs/plugin-vue `exclude`.
+   */
+  exclude?: string | RegExp | (string | RegExp)[];
   /**
    * Pre-compile all selected carrier files during `buildStart` by scanning the project root.
    * Populates the host cache so that `transform()` calls get instant cache hits

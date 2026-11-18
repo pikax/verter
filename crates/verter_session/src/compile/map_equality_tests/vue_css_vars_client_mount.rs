@@ -19,13 +19,10 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use oxc_allocator::Allocator;
 use serde_json::Value;
-use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-use verter_compiler::framework_common::RuntimeCompileOptions;
 
 use super::bf2_seed_matrix::run_bounded;
-use super::{assemble_vue_main_module, CompileProfile, HmrStrategy};
+use super::{assemble_vue_main_module, render_runtime, CompileAxes, CompileProfile, HmrStrategy};
 
 /// The same surface the harness's own `vue-css-vars-runtime` spec mounts: a
 /// bare prop, a quoted member expression, and an unaffected literal
@@ -66,26 +63,18 @@ fn assemble_inline_client_module(source: &str, canonical_id: &str) -> String {
         &provenance,
     );
 
-    let allocator = Allocator::new();
-    let compiled = VueCarrierCompiler
-        .compile_bundle(
-            source,
-            &artifact,
-            &RuntimeCompileOptions {
-                filename: Some(canonical_id.to_string()),
-                source_map: false,
-                ssr: false,
-                is_production: false,
-                inline: Some(false),
-                force_js: true,
-                force_vapor: false,
-                ..RuntimeCompileOptions::default()
-            },
-            &allocator,
-        )
-        .expect("the Vue carrier produces a runtime bundle for this fixture")
-        .into_produced()
-        .expect("the Vue carrier produces a runtime surface; it never refuses one");
+    let rendered = render_runtime(
+        &artifact,
+        Some(canonical_id.to_string()),
+        CompileAxes {
+            ssr: false,
+            is_production: false,
+            source_map: false,
+            inline: Some(false),
+            force_vapor: false,
+        },
+    );
+    let compiled = rendered.runtime_bundle();
 
     let profile = CompileProfile {
         filename: Some(canonical_id.to_string()),
@@ -98,7 +87,7 @@ fn assemble_inline_client_module(source: &str, canonical_id: &str) -> String {
         ..CompileProfile::default()
     };
 
-    assemble_vue_main_module(canonical_id, &compiled, &snapshot.meta, &profile)
+    assemble_vue_main_module(canonical_id, compiled, &snapshot.meta, &profile)
         .unwrap_or_else(|failure| panic!("the assembler failed closed: {failure:?}"))
         .code
 }

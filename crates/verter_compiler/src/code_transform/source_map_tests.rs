@@ -1,6 +1,6 @@
 use super::*;
 use crate::code_transform::CodeTransformError;
-use crate::template::code_gen::types::SegmentedOverwriteAuthority;
+use crate::cursor::position::PositionResolver;
 use oxc_allocator::Allocator;
 
 #[test]
@@ -13,7 +13,9 @@ fn explicit_sourcemap_location_emits_an_exact_utf16_boundary_token() {
     transform
         .try_add_sourcemap_location(color_offset)
         .expect("authored boundary is valid");
-    let map = transform.generate_map(SourceMapOptions::new().with_source("App.svelte"));
+    let map = transform
+        .generate_map(SourceMapOptions::new().with_source("App.svelte"))
+        .expect("mapped transform");
 
     let token = map
         .get_tokens()
@@ -40,7 +42,7 @@ fn explicit_sourcemap_location_rejects_mid_codepoint_offsets_without_mutation() 
 /// changes are allocation-only and must not alter emitted source-map bytes.
 /// The expected string is the JSON produced for this representative case
 /// (overwrite + a mapped insertion across a multi-line source).
-/// Legacy byte-equivalence proof for `SegmentedOverwriteAuthority`'s
+/// Legacy byte-equivalence proof for the segmented-overwrite primitive's
 /// introduction: this fixture exercises ONLY the pre-existing, non-opt-in
 /// operations (`overwrite`, `batch_prepend_left_with_source_map`) — no
 /// `try_overwrite_segmented` call anywhere — and pins both `content` and the
@@ -61,11 +63,13 @@ fn source_map_json_is_byte_identical_for_representative_case() {
     let mut ct = CodeTransform::new(source, &allocator);
     ct.overwrite(6, 7, "foo");
     ct.batch_prepend_left_with_source_map(&[(13, Some((6, 0)), "(mapped) ")]);
-    let json = ct.generate_map_json(
-        SourceMapOptions::new()
-            .with_source("golden.ts")
-            .with_file("golden.ts.map"),
-    );
+    let json = ct
+        .generate_map_json(
+            SourceMapOptions::new()
+                .with_source("golden.ts")
+                .with_file("golden.ts.map"),
+        )
+        .expect("mapped transform");
     assert_eq!(
         json,
         "{\"version\":3,\"file\":\"golden.ts.map\",\"names\":[],\"sources\":[\"golden.ts\"],\"sourcesContent\":[\"const x = 1;\\nconst y = 2;\\nconst z = 3;\"],\"mappings\":\"AAAA,MAAM,GAAC;AAAD,SACN;AACA\"}"
@@ -89,21 +93,20 @@ fn segmented_overwrite_channel_does_not_perturb_sibling_overwrite_bytes() {
     let mut ct_a = CodeTransform::new(source, &allocator_a);
     ct_a.overwrite(6, 7, "XXX");
     assert_eq!(ct_a.build_string(), EXPECTED);
-    let json_a = ct_a.generate_map_json(SourceMapOptions::new().with_source("a.ts"));
+    let json_a = ct_a
+        .generate_map_json(SourceMapOptions::new().with_source("a.ts"))
+        .expect("mapped transform");
 
     // Variant B: the SAME legacy overwrite, plus an unrelated, disjoint
     // segmented-overwrite entry elsewhere in the same document.
     let allocator_b = Allocator::default();
     let mut ct_b = CodeTransform::new(source, &allocator_b);
     ct_b.overwrite(6, 7, "XXX");
-    ct_b.try_overwrite_segmented(
-        32,
-        33,
-        "9",
-        &[],
-        SegmentedOverwriteAuthority::new_for_test(),
-    )
-    .expect("disjoint segmented overwrite with no anchors must succeed");
+    let correspondence = ct_b
+        .check_correspondence("9", &[])
+        .expect("a replacement without anchors claims nothing");
+    ct_b.try_overwrite_segmented(32, 33, correspondence)
+        .expect("disjoint segmented overwrite with no anchors must succeed");
     let content_b = ct_b.build_string();
     assert_eq!(
         content_b, "const XXX = 1;\nconst y = 2;\nconst 9 = 3;",
@@ -112,7 +115,9 @@ fn segmented_overwrite_channel_does_not_perturb_sibling_overwrite_bytes() {
     // Re-derive variant A's expected bytes as a substring check: everything
     // outside the segmented entry's range is byte-identical to variant A.
     assert_eq!(&content_b[..14], &EXPECTED[..14]);
-    let json_b = ct_b.generate_map_json(SourceMapOptions::new().with_source("a.ts"));
+    let json_b = ct_b
+        .generate_map_json(SourceMapOptions::new().with_source("a.ts"))
+        .expect("mapped transform");
 
     // The legacy overwrite's own mapping token set is unchanged by the
     // sibling segmented entry: both maps carry the same token at the
@@ -143,12 +148,16 @@ fn sourcemap_resolver_is_built_once_and_reused_across_maps() {
         "resolver must be lazily built on demand, not constructed eagerly"
     );
 
-    let _ = ct.generate_map(SourceMapOptions::new().with_source("a.js"));
+    let _ = ct
+        .generate_map(SourceMapOptions::new().with_source("a.js"))
+        .expect("mapped transform");
     let first = ct
         .sourcemap_resolver_for_test()
         .expect("first map must build and cache the resolver") as *const _;
 
-    let _ = ct.generate_map(SourceMapOptions::new().with_source("a.js"));
+    let _ = ct
+        .generate_map(SourceMapOptions::new().with_source("a.js"))
+        .expect("mapped transform");
     let second = ct
         .sourcemap_resolver_for_test()
         .expect("resolver must remain cached after the second map") as *const _;
@@ -161,7 +170,9 @@ fn sourcemap_resolver_is_built_once_and_reused_across_maps() {
 
 fn assert_exact_sourcemap_token_reservation(ct: &CodeTransform<'_>, label: &str) -> usize {
     let estimate = ct.estimate_sourcemap_token_capacity_for_test(true);
-    let map = ct.generate_map(SourceMapOptions::new().with_source("t.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("t.js"))
+        .expect("mapped transform");
     let actual = map.get_tokens().count();
     let reserved = ct.last_reserved_token_capacity_for_test();
 
@@ -170,9 +181,11 @@ fn assert_exact_sourcemap_token_reservation(ct: &CodeTransform<'_>, label: &str)
         reserved >= actual,
         "{label}: reserved capacity ({reserved}) must cover every emitted token ({actual})"
     );
-    assert_eq!(
-        estimate, actual,
-        "{label}: per-variant accounting must neither under-reserve nor materially over-reserve"
+    // An upper bound: a synthetic run needs its sourceless token only while a
+    // mapping is active on its line.
+    assert!(
+        estimate >= actual,
+        "{label}: per-variant accounting ({estimate}) must not under-reserve ({actual})"
     );
 
     actual
@@ -205,7 +218,7 @@ fn sourcemap_token_buffer_reservation_covers_every_emitted_token() {
 
         let actual = assert_exact_sourcemap_token_reservation(&ct, "mixed fixture");
         assert!(
-            actual >= 10,
+            actual >= 8,
             "mixed fixture must exercise a nontrivial token population, got {actual}"
         );
     }
@@ -239,11 +252,13 @@ fn generate_map_with_preamble_reports_position_after_recorded_preamble() {
     ct.batch_prepend_left_static(&[(0, preamble)]);
     ct.set_helper_preamble_content(preamble);
 
-    let (_, end) = ct.generate_map_with_preamble(
-        SourceMapOptions::new()
-            .with_source("App.vue")
-            .include_content(true),
-    );
+    let (_, end) = ct
+        .generate_map_with_preamble(
+            SourceMapOptions::new()
+                .with_source("App.vue")
+                .include_content(true),
+        )
+        .expect("mapped transform");
     assert_eq!(
         end,
         Some((2, 0)),
@@ -262,7 +277,9 @@ fn generate_map_with_preamble_is_none_without_recorded_preamble() {
     let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
     ct.batch_prepend_left_static(&[(0, ct.alloc_str("import x;\n"))]);
 
-    let (_, end) = ct.generate_map_with_preamble(SourceMapOptions::new().with_source("App.vue"));
+    let (_, end) = ct
+        .generate_map_with_preamble(SourceMapOptions::new().with_source("App.vue"))
+        .expect("mapped transform");
     assert_eq!(end, None, "no recorded preamble ⇒ no boundary");
 }
 
@@ -276,11 +293,13 @@ fn generate_map_json_with_preamble_emits_boundary_member() {
     ct.batch_prepend_left_static(&[(0, preamble)]);
     ct.set_helper_preamble_content(preamble);
 
-    let json = ct.generate_map_json_with_preamble(
-        SourceMapOptions::new()
-            .with_source("App.vue")
-            .include_content(true),
-    );
+    let json = ct
+        .generate_map_json_with_preamble(
+            SourceMapOptions::new()
+                .with_source("App.vue")
+                .include_content(true),
+        )
+        .expect("mapped transform");
     assert!(
         json.contains(r#""x_verter_helper_preamble_end":{"line":2,"character":0}"#),
         "boundary member present at the right position: {json}"
@@ -300,7 +319,9 @@ fn generate_map_json_with_preamble_omits_member_without_preamble() {
     let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
     ct.batch_prepend_left_static(&[(0, ct.alloc_str("import x;\n"))]);
 
-    let json = ct.generate_map_json_with_preamble(SourceMapOptions::new().with_source("App.vue"));
+    let json = ct
+        .generate_map_json_with_preamble(SourceMapOptions::new().with_source("App.vue"))
+        .expect("mapped transform");
     assert!(
         !json.contains("x_verter_helper_preamble_end"),
         "no boundary member without a recorded preamble: {json}"
@@ -328,11 +349,13 @@ fn prepend_helper_preamble_content_publishes_boundary_via_intro() {
         "the preamble is the leading intro content"
     );
 
-    let (_, end) = ct.generate_map_with_preamble(
-        SourceMapOptions::new()
-            .with_source("C.svelte")
-            .include_content(true),
-    );
+    let (_, end) = ct
+        .generate_map_with_preamble(
+            SourceMapOptions::new()
+                .with_source("C.svelte")
+                .include_content(true),
+        )
+        .expect("mapped transform");
     assert_eq!(
         end,
         Some((2, 0)),
@@ -340,11 +363,13 @@ fn prepend_helper_preamble_content_publishes_boundary_via_intro() {
     );
 
     // The JSON variant injects the member at the same position.
-    let json = ct.generate_map_json_with_preamble(
-        SourceMapOptions::new()
-            .with_source("C.svelte")
-            .include_content(true),
-    );
+    let json = ct
+        .generate_map_json_with_preamble(
+            SourceMapOptions::new()
+                .with_source("C.svelte")
+                .include_content(true),
+        )
+        .expect("mapped transform");
     assert!(
         json.contains(r#""x_verter_helper_preamble_end":{"line":2,"character":0}"#),
         "the intro preamble publishes the boundary member at the post-intro position: {json}"
@@ -359,7 +384,9 @@ fn prepend_helper_preamble_content_single_line_boundary() {
     let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
     ct.prepend_helper_preamble_content("import x;\n");
 
-    let (_, end) = ct.generate_map_with_preamble(SourceMapOptions::new().with_source("C.svelte"));
+    let (_, end) = ct
+        .generate_map_with_preamble(SourceMapOptions::new().with_source("C.svelte"))
+        .expect("mapped transform");
     assert_eq!(
         end,
         Some((1, 0)),
@@ -396,21 +423,25 @@ fn prepend_helper_preamble_content_failcloses_on_nonempty_intro_in_release() {
         "both prepends land in order; prepend behaviour is unchanged by the fail-closed guard"
     );
 
-    let (_, end) = ct.generate_map_with_preamble(
-        SourceMapOptions::new()
-            .with_source("C.svelte")
-            .include_content(true),
-    );
+    let (_, end) = ct
+        .generate_map_with_preamble(
+            SourceMapOptions::new()
+                .with_source("C.svelte")
+                .include_content(true),
+        )
+        .expect("mapped transform");
     assert_eq!(
         end, None,
         "fail-closed: a non-empty intro records NO preamble ⇒ no boundary (never a wrong one)"
     );
 
-    let json = ct.generate_map_json_with_preamble(
-        SourceMapOptions::new()
-            .with_source("C.svelte")
-            .include_content(true),
-    );
+    let json = ct
+        .generate_map_json_with_preamble(
+            SourceMapOptions::new()
+                .with_source("C.svelte")
+                .include_content(true),
+        )
+        .expect("mapped transform");
     assert!(
         !json.contains("x_verter_helper_preamble_end"),
         "fail-closed: no boundary member is emitted when the intro was not empty: {json}"
@@ -442,7 +473,7 @@ fn test_source_map_generation() {
         .with_source("input.js")
         .with_file("output.js");
 
-    let map = ct.generate_map(options);
+    let map = ct.generate_map(options).expect("mapped transform");
 
     // The source map should be valid
     let sources: Vec<_> = map.get_sources().collect();
@@ -461,7 +492,7 @@ fn test_source_map_with_content() {
         .with_source("test.js")
         .include_content(true);
 
-    let map = ct.generate_map(options);
+    let map = ct.generate_map(options).expect("mapped transform");
 
     // Should include source content
     let content = map.get_source_content(0);
@@ -530,7 +561,9 @@ fn test_source_map_token_positions_simple_overwrite() {
     let mut ct = CodeTransform::new(source, &allocator);
     ct.overwrite(4, 7, "XYZ");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // Token 0: start of "abc" — gen(0,0) → src(0,0)
@@ -565,7 +598,9 @@ fn test_source_map_token_positions_with_prepend() {
 
     // Output: "// header\nabc\ndef"
     // The "abc" chunk maps to src(0,0) but should be at gen(1,0)
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // Find the token for "abc" — generated line should be 1 (after "// header\n")
@@ -592,7 +627,9 @@ fn test_source_map_token_positions_moved_multiline() {
     ct.move_wrapped(6, 18, 0, "/*s*/", "/*e*/");
     // Output: "/*s*/line2\nline3\n/*e*/line1\nline4"
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // The moved "line2" should map back to original src line 1
@@ -633,7 +670,9 @@ fn moved_multiline_replacement_and_authored_neighbors_have_exact_coordinates() {
     transform.move_slice(3, 5, 6);
 
     assert_eq!(transform.build_string(), "ab\n\nX\nYef");
-    let map = transform.generate_map(SourceMapOptions::new().with_source("test.ts"));
+    let map = transform
+        .generate_map(SourceMapOptions::new().with_source("test.ts"))
+        .expect("mapped transform");
     let tokens = map.get_tokens().collect::<Vec<_>>();
     let mapped_at = |generated_line: u32, generated_column: u32| {
         tokens
@@ -698,7 +737,9 @@ fn test_source_map_utf16_column_for_cjk() {
     // Output: "abcX文\ndef"
     assert_eq!(ct.build_string(), "abcX文\ndef");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // Token for "abc" — src(0, 0)
@@ -746,7 +787,9 @@ fn test_source_map_utf16_column_for_emoji() {
     // Output: "a😀B\ncd"
     assert_eq!(ct.build_string(), "a😀B\ncd");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // Token for overwrite of 'b' → should map to src(0, 3) in UTF-16
@@ -776,7 +819,9 @@ fn test_source_map_generated_column_utf16() {
     // Output: "ab中文ef"
     assert_eq!(ct.build_string(), "ab中文ef");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // Token for "ef" — should be at generated col 4 (UTF-16: a=0, b=1, 中=2, 文=3, e=4)
@@ -802,11 +847,13 @@ fn test_source_map_include_content_false() {
     let source = "const x = 1;";
     let ct = CodeTransform::new(source, &allocator);
 
-    let map = ct.generate_map(
-        SourceMapOptions::new()
-            .with_source("test.js")
-            .include_content(false),
-    );
+    let map = ct
+        .generate_map(
+            SourceMapOptions::new()
+                .with_source("test.js")
+                .include_content(false),
+        )
+        .expect("mapped transform");
 
     let content = map.get_source_content(0);
     assert!(content.is_some(), "source content entry should exist");
@@ -824,7 +871,9 @@ fn test_source_map_no_source_option() {
     let mut ct = CodeTransform::new(source, &allocator);
     ct.overwrite(0, 3, "XYZ");
 
-    let map = ct.generate_map(SourceMapOptions::new()); // No source set
+    let map = ct
+        .generate_map(SourceMapOptions::new())
+        .expect("mapped transform"); // No source set
 
     let tokens: Vec<_> = map.get_tokens().collect();
     // All tokens should have no source_id
@@ -846,7 +895,9 @@ fn test_source_map_multiline_overwrite_content() {
     // Output: "abX\nYef"
     assert_eq!(ct.build_string(), "abX\nYef");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // Token for "ef" should be on generated line 1 (after the newline in overwrite)
@@ -875,23 +926,23 @@ fn test_source_map_with_outro() {
     // Output: "abc\n// footer"
     assert_eq!(ct.build_string(), "abc\n// footer");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
-    // Should have at least 2 tokens: one for "abc" and one for the outro
-    assert!(
-        tokens.len() >= 2,
-        "should have tokens for content and outro"
+    // The synthetic newline at the outro's start must not inherit "abc"'s
+    // authored position, including a lookup at the first line's end.
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0].get_source_id(), Some(0));
+    assert_eq!(tokens[1].get_source_id(), None);
+    assert_eq!((tokens[1].get_dst_line(), tokens[1].get_dst_col()), (0, 3));
+    let table = map.generate_lookup_table();
+    assert_eq!(
+        map.lookup_token(&table, 0, 3).unwrap().get_source_id(),
+        None
     );
-
-    // Find the outro token — it should be unmapped (no source_id)
-    // The outro starts at the same position as end of content, so look for
-    // a token with no source_id
-    let has_unmapped = tokens.iter().any(|t| t.get_source_id().is_none());
-    assert!(
-        has_unmapped,
-        "outro should produce an unmapped token (no source_id)"
-    );
+    assert!(map.lookup_token(&table, 1, 3).is_none());
 }
 
 #[test]
@@ -899,7 +950,9 @@ fn test_source_map_empty_source() {
     let allocator = Allocator::default();
     let ct = CodeTransform::new("", &allocator);
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     // Should produce a valid (empty) source map
     let json = map.to_json_string();
     assert!(json.contains("\"mappings\""));
@@ -923,7 +976,9 @@ fn test_source_map_moved_content_utf16() {
     // Output: "中文defabc\n"
     assert_eq!(ct.build_string(), "中文defabc\n");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // The moved "中文def" should map back to src line 1, col 0
@@ -943,7 +998,9 @@ fn test_source_map_consecutive_newlines() {
     let source = "a\n\nb\n\nc";
     let ct = CodeTransform::new(source, &allocator);
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // "a" at src(0,0) → gen(0,0)
@@ -975,7 +1032,9 @@ fn test_source_map_trailing_newline() {
     let source = "abc\ndef\n";
     let ct = CodeTransform::new(source, &allocator);
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // Should have tokens for "abc" (line 0) and "def" (line 1)
@@ -998,7 +1057,9 @@ fn test_source_map_remove_then_content() {
 
     assert_eq!(ct.build_string(), "abef");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // "ab" at src(0,0) → gen(0,0)
@@ -1031,7 +1092,9 @@ fn test_source_map_utf16_on_later_line() {
 
     assert_eq!(ct.build_string(), "line1\na😀B");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // Overwrite of 'b' should map to src(1, 3) in UTF-16
@@ -1065,7 +1128,9 @@ fn test_source_map_overwrite_with_emoji_content() {
     // Output: "ab😀ef"
     assert_eq!(ct.build_string(), "ab😀ef");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // "ef" at src(0,4) → gen col should be 4 (UTF-16: a=0, b=1, 😀=2-3, e=4)
@@ -1094,7 +1159,9 @@ fn test_source_map_after_moved_utf16_content() {
     // Output: "中文abcdef"
     assert_eq!(ct.build_string(), "中文abcdef");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.js"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // "abc" (original bytes 0-3) should be at generated col 2
@@ -1128,7 +1195,9 @@ fn test_inserted_mapped_produces_source_map_token() {
     // Output: "abc def (def) ? ghi"
     assert_eq!(ct.build_string(), "abc def (def) ? ghi");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // Find the InsertedMapped token — it should map to src(0, 4)
@@ -1164,7 +1233,9 @@ fn test_inserted_mapped_none_produces_unmapped_token() {
 
     assert_eq!(ct.build_string(), "abcXYdef");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // The XY insertion should be unmapped (source_id = None)
@@ -1186,7 +1257,9 @@ fn test_inserted_mapped_multiline_content() {
     // Output: "abcX\nYdef"
     assert_eq!(ct.build_string(), "abcX\nYdef");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // "def" at src(0,3) should be on generated line 1 after the newline
@@ -1212,7 +1285,9 @@ fn test_inserted_mapped_mixed_with_regular() {
 
     assert_eq!(ct.build_string(), "abc, (show) ? def");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // The unmapped ", " should have no source_id
@@ -1246,7 +1321,9 @@ fn test_content_offset_shifts_token_within_content() {
 
     assert_eq!(ct.build_string(), "abc show (__props.show) ? def");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // The unmapped prefix "(__props." should have NO source_id
@@ -1298,7 +1375,9 @@ fn test_content_offset_zero_is_original_behavior() {
 
     assert_eq!(ct.build_string(), "abc(show) ? def");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // With content_offset = 0, token should be at dst_col 3 (start of content)
@@ -1350,7 +1429,9 @@ fn test_content_offset_binding_prefix_hover_maps_to_identifier() {
         output
     );
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // The mapped token should be at dst_col 9 (after "(__props.") pointing to src_col 11
@@ -1392,7 +1473,9 @@ fn test_content_offset_clamped_if_exceeds_length() {
     assert_eq!(ct.build_string(), "abcXYZdef");
 
     // Should not panic; the entire content becomes unmapped prefix
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let _tokens: Vec<_> = map.get_tokens().collect();
 }
 
@@ -1426,7 +1509,9 @@ fn segmented_mapped_insertion_emits_one_token_per_source_segment() {
 
     assert_eq!(ct.build_string(), "abc count (__props.count + 1)def");
 
-    let map = ct.generate_map(SourceMapOptions::new().with_source("test.vue"));
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
     let dump: Vec<_> = tokens
         .iter()

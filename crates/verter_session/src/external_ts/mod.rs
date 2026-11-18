@@ -36,8 +36,9 @@
 //! coordinator resolves a `.vue`/`.svelte` source to its configured project,
 //! mints the witness via `ensure_project`, and publishes the carrier companions
 //! into the on-disk store the `@verter/typescript-plugin` reads — making the
-//! carrier a configured-project member. The tsgo engine is migrated onto this
-//! contract separately.
+//! carrier a configured-project member. The shared [`TsgoEngineBackend`] mints
+//! the tsgo project witness; the engine session that owns the transport handles
+//! its live operations.
 
 mod carrier;
 mod eligibility;
@@ -46,6 +47,7 @@ mod identity_resolver;
 mod live_decision;
 mod mode;
 mod resolver;
+mod tsgo_backend;
 mod warm_cache;
 
 // Explicit re-exports only. The ownership-resolver trait is exported under its
@@ -78,9 +80,10 @@ pub use mode::{
 };
 pub use resolver::{
     AmbiguityCause, CarrierOwnershipResolution, ExternalTsProjectResolver,
-    GenerationStampedEditorWitness, ProjectBinding, ProjectEnvDimsSource, ScratchBinding,
-    ScratchResolution, WorkspaceProjectResolver,
+    GenerationStampedEditorWitness, ProjectBinding, ProjectEnvDimsSource, PublishedEnvDims,
+    ScratchBinding, ScratchResolution, WorkspaceProjectResolver,
 };
+pub use tsgo_backend::TsgoEngineBackend;
 pub use warm_cache::{
     EngineWarmCache, EvictionScope, EvictionTrigger, ReconnectGeneration, WarmAdmissionError,
     WarmCacheKey, WarmSharedState,

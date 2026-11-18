@@ -74,6 +74,22 @@ impl StaticMembershipSpec {
         !self.exclude.iter().any(|glob| glob.matches(path))
     }
 
+    /// Whether a walk for members descends into directory `dir`: false when
+    /// no include glob can match below it (the package and dot-prefixed
+    /// folders TypeScript's include wildcards never enter) or when an exclude
+    /// glob covers it (`dist/`, …).
+    pub fn descends_into(&self, dir: &CanonicalPath) -> bool {
+        if !self.include.iter().any(|glob| glob.may_match_below(dir)) {
+            return false;
+        }
+        // An exclude glob covers the directory when it matches a file
+        // directly inside it.
+        !self
+            .exclude
+            .iter()
+            .any(|glob| glob.matches(&CanonicalPath::new(&format!("{}/x", dir.as_str()))))
+    }
+
     /// The program's ROOT files in TypeScript's order
     /// (`getFileNamesFromConfigSpecs`): the `files` entries as listed, then
     /// the `include` matches among `candidates`, grouped by the first

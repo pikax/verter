@@ -898,6 +898,42 @@ pub(crate) fn stack_unavailable_diagnostics(
     }])
 }
 
+/// A compile that needs inputs the host has not supplied, mapped onto the
+/// refused failure a style block the compiler cannot process already
+/// reports (`HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE`), one diagnostic per
+/// needed input, each naming the block and the stage it must arrive at.
+/// No dependency-gap outcome describes a style stage, so none is used.
+pub(crate) fn needed_inputs_diagnostics(
+    canonical_id: &str,
+    source_len: u32,
+    needed: &[verter_compiler::compile_request::demand::InputDemand],
+) -> DiagnosticsSnapshot {
+    use verter_compiler::compile_request::demand::InputDemand;
+    use verter_compiler::style_planner::StyleStage;
+    DiagnosticsSnapshot::from_vec(
+        needed
+            .iter()
+            .map(|demand| {
+                let InputDemand::ExternalStyleStage { style_index, stage } = *demand;
+                let stage = match stage {
+                    StyleStage::Authored => "authored",
+                    StyleStage::Preprocessed => "preprocessed",
+                    StyleStage::FrameworkRewritten => "framework-rewritten",
+                };
+                HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE".to_string(),
+                    message: format!(
+                        "style block {style_index} of '{canonical_id}' must be supplied at the {stage} stage before it can compile"
+                    ),
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, source_len),
+                }
+            })
+            .collect(),
+    )
+}
+
 /// `HOST_NO_CARRIER_ARTIFACT`: the input has no framework parse artifact,
 /// so no registered identity exists — no binding, no registry dispatch,
 /// and no runtime compile route.
@@ -998,6 +1034,9 @@ pub(crate) fn vue_render_execution_refusal(
         | VueHostCompileRefusal::WrongDemand { .. }) => RenderExecutionRefusal::Fatal(
             admission_refused_diagnostics(canonical_id, source_len, &format!("{refusal:?}")),
         ),
+        VueHostCompileRefusal::NeedInputs(needed) => RenderExecutionRefusal::Fatal(
+            needed_inputs_diagnostics(canonical_id, source_len, &needed),
+        ),
     }
 }
 
@@ -1036,6 +1075,10 @@ pub(crate) fn render_execution_error(
 /// surface: both arms come from the same bound execution, and the sum
 /// mirrors the sealed binding sum.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Both variants are large render handoffs; inline storage avoids a heap allocation for every compile."
+)]
 pub(crate) enum BoundRenderedMain {
     /// The Vue backend's render-only handoff.
     Vue(verter_compiler::framework_common::VueHostRenderedMain),
@@ -1099,6 +1142,10 @@ pub(crate) fn svelte_render_execution_refusal(
 /// the sum mirrors the sealed binding sum. Every accessor delegates to
 /// the backend's own admitted-set gate, so a prerequisite that was
 /// produced but not admitted is never published.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Both variants are large publication handoffs; inline storage avoids a heap allocation for every compile."
+)]
 pub(crate) enum BoundCompiledProducts {
     /// The Vue backend's multi-product publication payloads.
     Vue(verter_compiler::framework_common::VueHostCompiledProducts),
@@ -1149,6 +1196,40 @@ impl BoundCompiledProducts {
             Self::Vue(products) => products.diagnostics(),
             Self::Svelte(products) => products.diagnostics(),
         }
+    }
+
+    /// The complete Vue artifact set, when the compile published one.
+    pub(crate) fn artifact_set(
+        &self,
+    ) -> Option<&verter_compiler::framework::vue::assembly::VueArtifactSet> {
+        match self {
+            Self::Vue(products) => products.artifact_set(),
+            Self::Svelte(_) => None,
+        }
+    }
+
+    /// The wire form of [`Self::artifact_set`] the compile response
+    /// carries. A set that cannot serialize refuses the compile rather than
+    /// publishing the response without it.
+    pub(crate) fn artifact_set_json(
+        &self,
+        canonical_id: &str,
+        source_len: u32,
+    ) -> Result<Option<String>, DiagnosticsSnapshot> {
+        self.artifact_set()
+            .map(|set| set.set().to_json())
+            .transpose()
+            .map_err(|error| {
+                DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_MAIN_MODULE_ASSEMBLY_FAILED".to_string(),
+                    message: format!(
+                        "the artifact set of '{canonical_id}' cannot be serialized: {error}"
+                    ),
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, source_len),
+                }])
+            })
     }
 }
 
@@ -1215,6 +1296,9 @@ fn vue_products_execution_failure(
         | VueHostCompileRefusal::WrongDemand { .. }) => HostProductsFailure::Fatal(
             admission_refused_diagnostics(canonical_id, source_len, &format!("{refusal:?}")),
         ),
+        VueHostCompileRefusal::NeedInputs(needed) => {
+            HostProductsFailure::Fatal(needed_inputs_diagnostics(canonical_id, source_len, &needed))
+        }
     }
 }
 
@@ -1288,358 +1372,5 @@ pub(crate) fn compile_unsupported_code(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use verter_compiler::assembly::ContentId;
-    use verter_compiler::framework_common::RuntimeBlockContentInput;
-    use verter_compiler::style_planner::{ExternalStyleProducer, PreprocessorIdentity};
-
-    #[test]
-    fn vue_main_assembly_failure_keeps_the_stable_host_code() {
-        let unsupported =
-            verter_compiler::framework_common::CompileUnsupported::VueMainAssemblyFailed(
-                "the script fragment is authored and present but carries no source map".to_string(),
-            );
-        assert_eq!(
-            compile_unsupported_code(&unsupported),
-            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
-        );
-        let artifact = verter_compiler::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
-            verter_language::FileLanguage::vue(),
-            verter_language::carrier_grammar::CarrierGrammarConfig::vue(
-                "{{",
-                "}}",
-                std::iter::empty::<&str>(),
-            )
-            .unwrap(),
-            "<script setup>const n = 1</script><template><div/></template>",
-        );
-        let snapshot =
-            runtime_bundle_unsupported_diagnostics(&artifact, "Comp.vue", 12, &unsupported);
-        assert_eq!(
-            snapshot.diagnostics[0].code,
-            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
-        );
-        assert!(
-            snapshot.diagnostics[0]
-                .message
-                .contains("carries no source map"),
-            "typed assembly reason must reach the host diagnostic, got {}",
-            snapshot.diagnostics[0].message
-        );
-    }
-
-    #[test]
-    fn compile_host_products_assembly_refusal_maps_to_the_stable_host_code() {
-        use verter_compiler::compile_request::{CompileProduct, RuntimeProductRequest};
-        use verter_compiler::framework_common::FrameworkHostIntegrationBackend as _;
-        use verter_compiler::framework_common::{
-            VueHostCompileRefusal, VueHostExecutionInputs, VueHostIntegrationBackend,
-            VueHostMultiProductDemand,
-        };
-
-        let artifact = verter_compiler::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
-            verter_language::FileLanguage::vue(),
-            verter_language::carrier_grammar::CarrierGrammarConfig::vue(
-                "{{",
-                "}}",
-                std::iter::empty::<&str>(),
-            )
-            .unwrap(),
-            "<script setup>const n = 1</script><template><div>{{ n }}</div></template>",
-        );
-        let alloc = oxc_allocator::Allocator::new();
-        let backend = VueHostIntegrationBackend::registered();
-        let admission = backend
-            .admit_host_products(
-                artifact.as_ref(),
-                VueHostMultiProductDemand {
-                    products: vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
-                        runtime_source_map: true,
-                        ..Default::default()
-                    })],
-                    ..Default::default()
-                },
-            )
-            .expect("admits maps-on Main");
-        let refusal = backend
-            .compile_host_products(
-                admission,
-                artifact.as_ref(),
-                &VueHostExecutionInputs {
-                    want_main: true,
-                    has_script: true,
-                    has_template: true,
-                    canonical_id: "/src/Maps.vue".to_string(),
-                    drop_required_script_map: true,
-                    ..Default::default()
-                },
-                &alloc,
-            )
-            .expect_err("host products lane must refuse missing required script map");
-        let VueHostCompileRefusal::Unsupported(unsupported) = refusal else {
-            panic!("expected CompileUnsupported assembly refusal, got {refusal:?}");
-        };
-        let snapshot = runtime_bundle_unsupported_diagnostics(
-            artifact.as_ref(),
-            "/src/Maps.vue",
-            12,
-            &unsupported,
-        );
-        assert_eq!(
-            snapshot.diagnostics[0].code,
-            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
-        );
-        assert!(
-            !snapshot.diagnostics[0].message.is_empty(),
-            "typed assembly reason must reach the host diagnostic"
-        );
-    }
-
-    const AUTHORED: &str = "$tone: red;\n.card { color: $tone; }";
-    const PRODUCED: &str = ".card { color: red; }";
-
-    fn selected_style(producer: Option<PreprocessorIdentity>) -> RuntimeBlockContentInput {
-        RuntimeBlockContentInput {
-            code: std::sync::Arc::from(PRODUCED),
-            source_map: None,
-            lang: "css".to_string(),
-            content_artifact_token: "host-artifact:produced".to_string(),
-            source_space_token: "host-space:produced".to_string(),
-            parsed: None,
-            producer,
-            authored_basis: Some(ContentId::from_content_bytes(AUTHORED.as_bytes())),
-            diagnostics: Vec::new(),
-        }
-    }
-
-    /// A selected style slot reaches the compiler with the basis the
-    /// PROJECTION states — the authored bytes this selection was validated
-    /// against, not the produced bytes it carries and not a value re-derived
-    /// from whatever the carrier holds later.
-    #[test]
-    fn a_selected_style_carries_its_projections_authored_basis() {
-        const HOST_MAP: &str =
-            r#"{"version":3,"sources":["Card.scss"],"names":[],"mappings":"AACA"}"#;
-        let reported = vec![verter_css_syntax::StyleDiagnostic::with_severity(
-            verter_css_syntax::StyleStage::Authored,
-            verter_css_syntax::StyleDiagnosticSeverity::Warning,
-            "deprecated division",
-            None,
-        )];
-        let supplied = svelte_supplied_style(RuntimeBlockContentInput {
-            source_map: Some(std::sync::Arc::from(HOST_MAP)),
-            diagnostics: reported.clone(),
-            ..selected_style(Some(PreprocessorIdentity::Named(
-                ExternalStyleProducer::new("sass", Some("1.77.0"), None).expect("named producer"),
-            )))
-        });
-        assert_eq!(
-            supplied.source_map.as_deref(),
-            Some(HOST_MAP),
-            "the host's produced-to-authored map reaches the compiler with its bytes"
-        );
-        assert_eq!(
-            supplied.diagnostics, reported,
-            "the tool's diagnostics reach the compiler with its bytes"
-        );
-        assert_eq!(supplied.code.as_ref(), PRODUCED);
-        assert_eq!(
-            supplied.consumed_basis,
-            Some(ContentId::from_content_bytes(AUTHORED.as_bytes())),
-            "the basis names the authored bytes the selection was validated against"
-        );
-        assert_ne!(
-            supplied.consumed_basis,
-            Some(ContentId::from_content_bytes(PRODUCED.as_bytes())),
-            "the produced bytes are not their own basis"
-        );
-        assert_eq!(supplied.source_space_token, "host-space:produced");
-        assert_eq!(supplied.content_artifact_token, "host-artifact:produced");
-    }
-
-    /// A slot the host names no external producer for still continues its
-    /// block, anonymously. Dropping it would hand the compiler no result for
-    /// a block that has one, and the authored bytes would be compiled in its
-    /// place with no diagnostic.
-    #[test]
-    fn a_producerless_selected_style_continues_its_block_anonymously() {
-        let supplied = svelte_supplied_style(selected_style(None));
-        assert_eq!(supplied.producer, PreprocessorIdentity::Anonymous);
-        assert_eq!(supplied.code.as_ref(), PRODUCED);
-        assert_eq!(
-            supplied.consumed_basis,
-            Some(ContentId::from_content_bytes(AUTHORED.as_bytes())),
-        );
-    }
-
-    /// The profile-borne Svelte option axes (`css`, the custom-element
-    /// `tag`/`shadow` descriptor axis, `compatibility`) survive
-    /// [`svelte_host_products_demand`] onto the bound demand's typed
-    /// option attempt — they must REACH the backend's issuance (where the
-    /// unroutable ones refuse typed) rather than being silently dropped
-    /// by the demand builder.
-    #[test]
-    fn svelte_option_axes_survive_onto_the_bound_demand_attempt() {
-        let profile = CompileProfile {
-            target: CompileTarget::BUNDLER,
-            svelte_css: Some("injected".to_string()),
-            svelte_custom_element_tag: Some("my-widget".to_string()),
-            svelte_custom_element_shadow: Some(false),
-            svelte_compatibility: Some(true),
-            ..CompileProfile::default()
-        };
-        let demand = svelte_host_products_demand(&profile, "/w.svelte", true, false, false)
-            .expect("every axis decodes; refusal is the backend issuance's, not the decoder's");
-        let attempt = &demand.svelte_options;
-        assert_eq!(
-            attempt.css,
-            Some(verter_compiler::compile_request::svelte::SvelteCssRequest::Injected)
-        );
-        let descriptor = attempt
-            .custom_element_descriptor
-            .as_ref()
-            .expect("tag/shadow set => descriptor constructed");
-        assert_eq!(descriptor.tag.as_deref(), Some("my-widget"));
-        assert_eq!(descriptor.shadow, Some(false));
-        assert!(descriptor.props.is_empty());
-        assert!(attempt.compatibility.is_some());
-    }
-
-    /// Negative control: leaving every descriptor field unset must NOT
-    /// construct a descriptor at all (an all-`None` descriptor is a
-    /// different demand from no descriptor — see
-    /// `resolve_custom_element`'s `compile_option_descriptor` fallback
-    /// precedence).
-    #[test]
-    fn unset_custom_element_fields_construct_no_descriptor() {
-        let profile = CompileProfile {
-            target: CompileTarget::BUNDLER,
-            ..CompileProfile::default()
-        };
-        let demand = svelte_host_products_demand(&profile, "/w.svelte", true, false, false)
-            .expect("default profile decodes");
-        assert!(demand.svelte_options.custom_element_descriptor.is_none());
-        assert_eq!(demand.svelte_options.css, None);
-    }
-
-    /// `svelte_generate_module` set on the session `CompileProfile` must
-    /// refuse canonical request construction — `ModuleCompileOptions.generate`
-    /// is gated by the `SVELTE-MODULE` capability, `unsupported
-    /// fail-closed` per `capability-matrix.tsv`. The bound demand decodes
-    /// (the axis is a valid attempt), and the refusal fires at the SAME
-    /// option-admission boundary the backend's issuance composes the
-    /// canonical request through (`SvelteOptionAttempt::into_request`).
-    #[test]
-    fn svelte_generate_module_refuses_the_svelte_module_capability() {
-        let profile = CompileProfile {
-            target: CompileTarget::BUNDLER,
-            svelte_generate_module: Some(true),
-            ..CompileProfile::default()
-        };
-        let demand = svelte_host_products_demand(&profile, "/w.svelte", true, false, false)
-            .expect("the axis decodes; the refusal is admission's");
-        let err = demand
-            .svelte_options
-            .into_request()
-            .expect_err("generate_module must refuse — SVELTE-MODULE is unsupported fail-closed");
-        match err {
-            verter_compiler::compile_request::CompileRequestError::UnsupportedOption {
-                capability,
-                ..
-            } => assert_eq!(
-                capability,
-                Some(verter_compiler::compile_request::CapabilityCell::SvelteModule)
-            ),
-            other => panic!("expected UnsupportedOption naming SvelteModule, got {other:?}"),
-        }
-    }
-
-    /// Same refusal for `svelte_experimental_async` — the SAME capability
-    /// cell gates `ModuleCompileOptions.experimental.async`.
-    #[test]
-    fn svelte_experimental_async_refuses_the_svelte_module_capability() {
-        let profile = CompileProfile {
-            target: CompileTarget::BUNDLER,
-            svelte_experimental_async: Some(true),
-            ..CompileProfile::default()
-        };
-        let demand = svelte_host_products_demand(&profile, "/w.svelte", true, false, false)
-            .expect("the axis decodes; the refusal is admission's");
-        let err = demand.svelte_options.into_request().expect_err(
-            "experimental_async must refuse — SVELTE-MODULE is unsupported fail-closed",
-        );
-        match err {
-            verter_compiler::compile_request::CompileRequestError::UnsupportedOption {
-                capability,
-                ..
-            } => assert_eq!(
-                capability,
-                Some(verter_compiler::compile_request::CapabilityCell::SvelteModule)
-            ),
-            other => panic!("expected UnsupportedOption naming SvelteModule, got {other:?}"),
-        }
-    }
-
-    /// A malformed `svelte_css` value refuses at the demand's decode
-    /// boundary, matching `svelte_namespace`/`svelte_fragments`'s
-    /// decode-boundary refusal — never a silent default.
-    #[test]
-    fn malformed_svelte_css_value_refuses() {
-        let profile = CompileProfile {
-            target: CompileTarget::BUNDLER,
-            svelte_css: Some("not-a-real-mode".to_string()),
-            ..CompileProfile::default()
-        };
-        let err = svelte_host_products_demand(&profile, "/w.svelte", true, false, false)
-            .expect_err("an unrecognized css mode string must refuse");
-        assert!(matches!(
-            err,
-            verter_compiler::compile_request::CompileRequestError::MalformedOptionValue { .. }
-        ));
-    }
-
-    /// The runtime product's KIND follows the profile's `ssr` axis at
-    /// EVERY construction site, including the placeholder synthesized when
-    /// the call demands no product at all. A placeholder that hard-coded
-    /// the client kind would hand the backend a runtime product
-    /// contradicting the profile's own ssr axis — the one demand shape the
-    /// backend refuses as unproducible, turning a zero-demand call into an
-    /// admission refusal.
-    #[test]
-    fn the_synthesized_placeholder_product_follows_the_profiles_ssr_axis() {
-        use verter_compiler::compile_request::{CompileProduct, ProductKind};
-
-        for (ssr, expected) in [
-            (false, ProductKind::RuntimeClient),
-            (true, ProductKind::RuntimeServer),
-        ] {
-            let profile = CompileProfile {
-                target: CompileTarget::empty(),
-                ssr,
-                ..CompileProfile::default()
-            };
-            // Nothing demanded: the builder must still yield exactly one
-            // product, because canonical request construction refuses an
-            // empty product set outright.
-            let placeholder = demanded_products(&profile, false, false, false);
-            assert_eq!(
-                placeholder
-                    .iter()
-                    .map(CompileProduct::kind)
-                    .collect::<Vec<_>>(),
-                vec![expected],
-                "the synthesized placeholder must carry the profile's own runtime kind"
-            );
-            // The demanded branch agrees by construction — same builder.
-            let demanded = demanded_products(&profile, true, false, false);
-            assert_eq!(
-                demanded
-                    .iter()
-                    .map(CompileProduct::kind)
-                    .collect::<Vec<_>>(),
-                vec![expected],
-            );
-        }
-    }
-}
+#[path = "compile_request_build_tests.rs"]
+mod tests;

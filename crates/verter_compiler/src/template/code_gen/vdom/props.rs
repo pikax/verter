@@ -3,8 +3,6 @@
 //! Provides pure helper functions for transforming HTML attributes and Vue
 //! directives into JavaScript object properties in the VNode call.
 //!
-//! - `camelize` — hyphenated → camelCase conversion
-//! - `format_event_handler_key` — event arg name → `onClick` style handler key
 //! - `needs_quoted_key` — check if a JS object key needs quoting in a JS object literal
 //! - `compute_patch_flags` — derive patch flag from pre-computed metadata
 //!
@@ -13,40 +11,13 @@
 
 use crate::ast::types::{ChildrenMode, PropFlag, PropFlags};
 use crate::template::oxc::types::{ExpressionFlag, ExpressionFlags};
+#[cfg(test)]
+use crate::template::vue_syntax::{camelize, format_event_handler_key_into};
 
 use super::super::shared::helpers;
 use super::super::shared::inline_style::parse_style_declarations;
 
 // ======================== String transformation ========================
-
-/// Convert a hyphenated string to camelCase.
-///
-/// - `"my-event"` → `"myEvent"`
-/// - `"foo-bar-baz"` → `"fooBarBaz"`
-/// - `"click"` → `"click"` (unchanged)
-/// - `"-leading"` → `"Leading"` (leading dash capitalizes)
-pub fn camelize(s: &str) -> std::borrow::Cow<'_, str> {
-    if !s.contains('-') {
-        return std::borrow::Cow::Borrowed(s);
-    }
-    let mut result = String::with_capacity(s.len());
-    let mut capitalize_next = false;
-    for ch in s.chars() {
-        if ch == '-' {
-            capitalize_next = true;
-            continue;
-        }
-        if capitalize_next {
-            for upper in ch.to_uppercase() {
-                result.push(upper);
-            }
-            capitalize_next = false;
-        } else {
-            result.push(ch);
-        }
-    }
-    std::borrow::Cow::Owned(result)
-}
 
 /// Convert an event argument name to a JS handler property key.
 ///
@@ -61,36 +32,6 @@ pub fn format_event_handler_key(event_name: &str) -> String {
     let mut result = String::with_capacity(event_name.len() + 2);
     format_event_handler_key_into(&mut result, event_name);
     result
-}
-
-/// Append a formatted event handler key to an existing buffer.
-///
-/// Same transformation as [`format_event_handler_key`] but avoids allocation.
-pub fn format_event_handler_key_into(buf: &mut String, event_name: &str) {
-    buf.push_str("on");
-    // Vue lifecycle hooks: @vue:mounted → onVnodeMounted
-    // Convert "vue:" prefix to "vnode-" so the camelCase logic produces the correct result.
-    let chars: Box<dyn Iterator<Item = char>> = if let Some(rest) = event_name.strip_prefix("vue:")
-    {
-        Box::new("vnode-".chars().chain(rest.chars()))
-    } else {
-        Box::new(event_name.chars())
-    };
-    let mut capitalize_next = true;
-    for ch in chars {
-        if ch == '-' {
-            capitalize_next = true;
-            continue;
-        }
-        if capitalize_next {
-            for upper in ch.to_uppercase() {
-                buf.push(upper);
-            }
-            capitalize_next = false;
-        } else {
-            buf.push(ch);
-        }
-    }
 }
 
 // ======================== JS key validation ========================
@@ -159,10 +100,10 @@ pub fn emit_static_style_object(buf: &mut String, style: &str) {
         // valid-identifier CSS properties like `color` — unlike a general
         // props object, where only keys that need it are quoted.
         buf.push('"');
-        helpers::escape_js_string_into(buf, prop);
+        crate::template::vue_syntax::escape_js_string_into(buf, prop);
         buf.push('"');
         buf.push_str(": \"");
-        helpers::escape_js_string_into(buf, val);
+        crate::template::vue_syntax::escape_js_string_into(buf, val);
         buf.push('"');
     }
     buf.push_str(" }");

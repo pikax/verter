@@ -583,18 +583,34 @@ fn position_within_utf16_content(content: &str, line: u32, column: u32) -> bool 
         .is_some_and(|value| column as usize <= value.encode_utf16().count())
 }
 
-fn valid_source_map_v3(map: &str, input_content: &str, output_content: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(map) else {
-        return false;
-    };
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    let Some(sources) = object.get("sources").and_then(serde_json::Value::as_array) else {
-        return false;
-    };
+/// A source a supplied map names besides the block itself: a file the
+/// block's tool read, such as a stylesheet the block imports.
+#[derive(Debug, PartialEq, Eq)]
+struct ImportedMapSource {
+    name: String,
+    content: String,
+}
+
+/// Accept a supplied source map for a block, returning the sources it names
+/// besides the block.
+///
+/// The map is a flat V3 map with exactly one source row whose content is the
+/// block's input; a map with a single source may leave that content out.
+/// Every other row must carry its content. Every token lands inside the
+/// output, and every token of the block's row inside the input. Returns
+/// `None` for any other map.
+fn supplied_map_sources(
+    map: &str,
+    input_content: &str,
+    output_content: &str,
+) -> Option<Vec<ImportedMapSource>> {
+    let value = serde_json::from_str::<serde_json::Value>(map).ok()?;
+    let object = value.as_object()?;
+    let sources = object
+        .get("sources")
+        .and_then(serde_json::Value::as_array)?;
     if object.get("version").and_then(serde_json::Value::as_u64) != Some(3)
-        || sources.len() != 1
+        || sources.is_empty()
         || !sources.iter().all(serde_json::Value::is_string)
         || !object
             .get("names")
@@ -625,39 +641,79 @@ fn valid_source_map_v3(map: &str, input_content: &str, output_content: &str) -> 
         // content it does not itself validate.
         || object.contains_key("rangeMappings")
     {
-        return false;
+        return None;
     }
-    if let Some(contents) = object.get("sourcesContent") {
-        let Some(contents) = contents.as_array() else {
-            return false;
-        };
-        if contents.len() != 1
-            || !contents
-                .iter()
-                .all(|entry| entry.is_null() || entry.is_string())
-            || contents[0]
-                .as_str()
-                .is_some_and(|declared| declared != input_content)
-        {
-            return false;
+    let contents: Vec<Option<&str>> = match object.get("sourcesContent") {
+        None => vec![None; sources.len()],
+        Some(contents) => {
+            let contents = contents.as_array()?;
+            if contents.len() != sources.len()
+                || !contents
+                    .iter()
+                    .all(|entry| entry.is_null() || entry.is_string())
+            {
+                return None;
+            }
+            contents.iter().map(serde_json::Value::as_str).collect()
         }
-    }
+    };
+    let block_row = if let [content] = contents.as_slice() {
+        if content.is_some_and(|declared| declared != input_content) {
+            return None;
+        }
+        0
+    } else {
+        let is_block = |content: &&Option<&str>| **content == Some(input_content);
+        if contents.iter().any(Option::is_none) || contents.iter().filter(is_block).count() != 1 {
+            return None;
+        }
+        contents
+            .iter()
+            .position(|content| *content == Some(input_content))?
+    };
     // JSON shape alone is insufficient: decoding also validates the VLQ
     // mapping stream and rejects structurally shaped but unusable maps.
-    let Ok(decoded) = oxc_sourcemap::SourceMap::from_json_string(map) else {
-        return false;
-    };
-    decoded.get_sources().count() == 1
-        && decoded.get_tokens().all(|token| {
-            position_within_utf16_content(output_content, token.get_dst_line(), token.get_dst_col())
-                && (token.get_source_id().is_none()
-                    || (token.get_source_id() == Some(0)
-                        && position_within_utf16_content(
-                            input_content,
-                            token.get_src_line(),
-                            token.get_src_col(),
-                        )))
+    let decoded = oxc_sourcemap::SourceMap::from_json_string(map).ok()?;
+    if decoded.get_sources().count() != sources.len() {
+        return None;
+    }
+    let tokens_in_bounds = decoded.get_tokens().all(|token| {
+        let source_in_bounds = match token.get_source_id() {
+            None => true,
+            Some(row) if row as usize == block_row => {
+                let (line, column) = (token.get_src_line(), token.get_src_col());
+                position_within_utf16_content(input_content, line, column)
+            }
+            Some(row) => (row as usize) < sources.len(),
+        };
+        let (line, column) = (token.get_dst_line(), token.get_dst_col());
+        source_in_bounds && position_within_utf16_content(output_content, line, column)
+    });
+    if !tokens_in_bounds {
+        return None;
+    }
+    let imported = sources
+        .iter()
+        .zip(contents)
+        .enumerate()
+        .filter(|(row, _)| *row != block_row)
+        .map(|(_, (name, content))| ImportedMapSource {
+            name: name.as_str().unwrap_or_default().to_owned(),
+            content: content.unwrap_or_default().to_owned(),
         })
+        .collect();
+    Some(imported)
+}
+
+/// The source space of a file a supplied map names besides its block,
+/// identified by the name and the content the map carries for it.
+fn imported_source_space_token(source: &ImportedMapSource) -> BlockContentSourceSpaceToken {
+    BlockContentSourceSpaceToken::mint(hash_parts(&[
+        b"verter.block-content.source-space.imported.v1\0",
+        source.name.as_bytes(),
+        b"\0",
+        source.content.as_bytes(),
+    ]))
 }
 
 fn identity_qualified_map(
@@ -1955,16 +2011,19 @@ impl VerterHost {
             if hash_block_content(&entry.code) != entry.code_hash {
                 return Err(terminal_on_error(BlockContentRefusal::CodeHashMismatch));
             }
-            match (&entry.source_map, &entry.source_map_hash) {
-                (None, None) => {}
+            let imported_sources = match (&entry.source_map, &entry.source_map_hash) {
+                (None, None) => Vec::new(),
                 (Some(map), Some(expected)) => {
                     if hash_block_content(map) != *expected {
                         return Err(terminal_on_error(
                             BlockContentRefusal::SourceMapHashMismatch,
                         ));
                     }
-                    if !valid_source_map_v3(map, &pending.input_content, &entry.code) {
-                        return Err(terminal_on_error(BlockContentRefusal::InvalidSourceMap));
+                    match supplied_map_sources(map, &pending.input_content, &entry.code) {
+                        Some(imported) => imported,
+                        None => {
+                            return Err(terminal_on_error(BlockContentRefusal::InvalidSourceMap));
+                        }
                     }
                 }
                 _ => {
@@ -1972,7 +2031,7 @@ impl VerterHost {
                         BlockContentRefusal::SourceMapHashMismatch,
                     ));
                 }
-            }
+            };
             let output_source_space_token = BlockContentSourceSpaceToken::mint(hash_parts(&[
                 b"verter.block-content.source-space.supplied.v1\0",
                 entry.source_space_token.as_bytes(),
@@ -1992,7 +2051,9 @@ impl VerterHost {
                         .as_bytes(),
                 ])),
                 destination_space_token: output_source_space_token.clone(),
-                declared_space_tokens: vec![entry.source_space_token.clone()],
+                declared_space_tokens: std::iter::once(entry.source_space_token.clone())
+                    .chain(imported_sources.iter().map(imported_source_space_token))
+                    .collect(),
                 raw_map: entry.source_map.clone(),
             };
             let content_artifact_token = BlockContentArtifactToken::mint(hash_parts(&[
@@ -2661,7 +2722,7 @@ mod tests {
         );
     }
 
-    /// `valid_source_map_v3` decodes through `oxc_sourcemap`, which validates
+    /// `supplied_map_sources` decodes through `oxc_sourcemap`, which validates
     /// VLQ-stream well-formedness but NOT that a decoded token's position
     /// actually falls inside the content it claims to point into — that is
     /// the `position_within_utf16_content` bounds check this function layers
@@ -2676,7 +2737,7 @@ mod tests {
     /// (compile-enforced); the rejection this test proves is not a
     /// consolidation discriminator.
     #[test]
-    fn valid_source_map_v3_rejects_a_decodable_map_with_an_out_of_bounds_token() {
+    fn supplied_map_sources_rejects_a_decodable_map_with_an_out_of_bounds_token() {
         let input_content = "let x = 1;";
         let output_content = "const x = 1;";
 
@@ -2704,7 +2765,7 @@ mod tests {
              bounds check, not VLQ well-formedness"
         );
         assert!(
-            valid_source_map_v3(&in_bounds, input_content, output_content),
+            supplied_map_sources(&in_bounds, input_content, output_content).is_some(),
             "a token at the exact end-of-content column is in bounds and must be accepted"
         );
 
@@ -2715,7 +2776,7 @@ mod tests {
              come from the bounds check"
         );
         assert!(
-            !valid_source_map_v3(&out_of_bounds, input_content, output_content),
+            supplied_map_sources(&out_of_bounds, input_content, output_content).is_none(),
             "a token one UTF-16 unit past the destination content's end must be rejected"
         );
     }
@@ -2726,7 +2787,7 @@ mod tests {
     /// `sourcemap` crate's `SourceMap::from_slice`/`from_reader` did (that
     /// crate detects `sections.is_some()` and returns
     /// `Error::IncompatibleSourceMap` for anything but a `Regular` map).
-    /// Without an explicit `sections` check in `valid_source_map_v3`, a
+    /// Without an explicit `sections` check in `supplied_map_sources`, a
     /// syntactically-valid-looking map carrying a `sections` array — the
     /// hallmark of an indexed map this validator is not equipped to
     /// interpret — would be silently accepted using only its top-level
@@ -2735,7 +2796,7 @@ mod tests {
     /// just decodability, drives the rejection: an identical map with the
     /// `sections` key removed must be accepted.
     #[test]
-    fn valid_source_map_v3_rejects_a_map_carrying_a_sections_member() {
+    fn supplied_map_sources_rejects_a_map_carrying_a_sections_member() {
         let input_content = "let x = 1;";
         let output_content = "const x = 1;";
 
@@ -2754,7 +2815,7 @@ mod tests {
              only come from the explicit sections check, not from decode failure"
         );
         assert!(
-            !valid_source_map_v3(&with_sections, input_content, output_content),
+            supplied_map_sources(&with_sections, input_content, output_content).is_none(),
             "a map carrying a `sections` member is an indexed map and must be rejected, \
              matching the old sourcemap crate's IncompatibleSourceMap behavior"
         );
@@ -2768,7 +2829,7 @@ mod tests {
         })
         .to_string();
         assert!(
-            valid_source_map_v3(&without_sections, input_content, output_content),
+            supplied_map_sources(&without_sections, input_content, output_content).is_some(),
             "the identical map with the `sections` key removed must be accepted — proving \
              the rejection above is driven by `sections` presence, not some other field"
         );
@@ -2793,7 +2854,7 @@ mod tests {
     /// with it — the fixture must actually exercise the old decoder's
     /// `rangeMappings` validation path, not bypass it.
     #[test]
-    fn valid_source_map_v3_rejects_a_map_carrying_a_range_mappings_member() {
+    fn supplied_map_sources_rejects_a_map_carrying_a_range_mappings_member() {
         let input_content = "let x = 1;";
         let output_content = "const x = 1;";
 
@@ -2816,7 +2877,7 @@ mod tests {
              only come from the explicit rangeMappings check, not from decode failure"
         );
         assert!(
-            !valid_source_map_v3(&with_range_mappings, input_content, output_content),
+            supplied_map_sources(&with_range_mappings, input_content, output_content).is_none(),
             "a map carrying a `rangeMappings` member is rejected, matching the old \
              sourcemap crate's malformed-VLQ decode-error behavior"
         );
@@ -2830,10 +2891,73 @@ mod tests {
         })
         .to_string();
         assert!(
-            valid_source_map_v3(&without_range_mappings, input_content, output_content),
+            supplied_map_sources(&without_range_mappings, input_content, output_content).is_some(),
             "the identical map with the `rangeMappings` key removed must be accepted — \
              proving the rejection above is driven by `rangeMappings` presence, not some \
              other field"
+        );
+    }
+
+    fn two_source_map(contents: [&str; 2]) -> String {
+        serde_json::json!({
+            "version": 3,
+            "sources": ["base.css", "block.css"],
+            "sourcesContent": contents,
+            "names": [],
+            "mappings": "AAAA;ACAA",
+        })
+        .to_string()
+    }
+
+    /// A tool that inlines an imported stylesheet maps the output to both
+    /// files. The block's row is the one whose content is the block's input,
+    /// wherever it sits; every other row is an imported file the host keeps.
+    #[test]
+    fn supplied_map_sources_accepts_a_map_naming_an_imported_file() {
+        let input_content = ".a { color: red; }";
+        let output_content = ".base { margin: 0; }\n.a { color: red; }";
+        let imported = supplied_map_sources(
+            &two_source_map([".base { margin: 0; }", input_content]),
+            input_content,
+            output_content,
+        );
+        assert_eq!(
+            imported,
+            Some(vec![ImportedMapSource {
+                name: "base.css".to_owned(),
+                content: ".base { margin: 0; }".to_owned(),
+            }])
+        );
+    }
+
+    /// The block's row is found by its content, so a map with no row for
+    /// the block, two rows that both claim it, or an imported row without
+    /// its content is refused.
+    #[test]
+    fn supplied_map_sources_refuses_a_map_without_exactly_one_block_row() {
+        let input_content = ".a { color: red; }";
+        let output_content = ".base { margin: 0; }\n.a { color: red; }";
+        for contents in [
+            [".base { margin: 0; }", ".b { color: blue; }"],
+            [input_content, input_content],
+        ] {
+            assert_eq!(
+                supplied_map_sources(&two_source_map(contents), input_content, output_content),
+                None,
+                "{contents:?}"
+            );
+        }
+        let without_imported_content = serde_json::json!({
+            "version": 3,
+            "sources": ["base.css", "block.css"],
+            "sourcesContent": [null, input_content],
+            "names": [],
+            "mappings": "AAAA;ACAA",
+        })
+        .to_string();
+        assert_eq!(
+            supplied_map_sources(&without_imported_content, input_content, output_content),
+            None
         );
     }
 

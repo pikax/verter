@@ -26,6 +26,263 @@ use verter_workspace::workspace_snapshot::{
 
 use super::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod published_project_bindings {
+    use super::*;
+    use verter_workspace::filesystem::{FilesystemOptions, FilesystemWorkspace};
+    use verter_workspace::snapshot_builder::configured_project;
+    use verter_workspace::PublishedRoot;
+
+    fn published_projects(
+        occupied: bool,
+    ) -> (
+        tempfile::TempDir,
+        FilesystemWorkspace,
+        Arc<PublishedRoot>,
+        String,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = CanonicalPath::new(&dir.path().to_string_lossy()).to_string();
+        for (name, content) in [
+            (
+                "a.json",
+                r#"{"compilerOptions":{"paths":{"@/*":["a/*"]}},"files":["Panel.vue"]}"#,
+            ),
+            (
+                "b.json",
+                r#"{"compilerOptions":{"paths":{"@/*":["b/*"]}},"files":["Panel.vue"]}"#,
+            ),
+            ("other.json", r#"{"files":["Other.vue"]}"#),
+            ("Panel.vue", "<template/>"),
+            ("Other.vue", "<template/>"),
+            (
+                "empty.json",
+                r#"{"compilerOptions":{"target":"invalid"},"include":["missing/**/*.ts"]}"#,
+            ),
+        ] {
+            std::fs::write(dir.path().join(name), content).unwrap();
+        }
+        if occupied {
+            std::fs::write(dir.path().join("Panel.vue.ts"), "export {};").unwrap();
+        }
+        let ws = FilesystemWorkspace::new(FilesystemOptions {
+            roots: vec![root.clone()],
+            ..FilesystemOptions::default()
+        });
+        let projects = ["a.json", "b.json", "other.json", "empty.json"]
+            .iter()
+            .enumerate()
+            .map(|(i, config)| {
+                configured_project(
+                    &ws,
+                    &format!("{root}/{config}"),
+                    &root,
+                    &CanonicalPath::new(&root),
+                    ProjectId(i as u32),
+                )
+            })
+            .collect();
+        let snapshot = build_workspace_snapshot_simple(projects, SnapshotGeneration(1));
+        let mut published = PublishedRoot::new_vfs_only(Arc::new(snapshot));
+        published.ownership_ready = true;
+        ws.publish_snapshot(published);
+        let published = ws.load_published().unwrap();
+        (dir, ws, published, root)
+    }
+
+    #[test]
+    fn empty_configured_project_binds_only_with_published_project_dimensions() {
+        let (_dir, ws, published, root) = published_projects(false);
+        let config = CanonicalPath::new(&format!("{root}/empty.json"));
+        let id = published
+            .snapshot
+            .projects
+            .iter()
+            .find_map(|project| match &project.payload {
+                ProjectPayload::Configured { tsconfig_path, .. } if tsconfig_path == &config => {
+                    Some(project.id)
+                }
+                _ => None,
+            })
+            .expect("empty configured project is in the sorted snapshot");
+        let ProjectPayload::Configured { membership, .. } = &published.snapshot.project(id).payload
+        else {
+            panic!("configured project required")
+        };
+        assert!(membership.materialized_files.is_empty());
+        let dims = PublishedEnvDims::new(&published, &ws);
+        let resolver =
+            WorkspaceProjectResolver::new(&published.snapshot, &ws, "7.1.1", &dims, true);
+        let CarrierOwnershipResolution::Bound(binding) = resolver.resolve_configured_project(id)
+        else {
+            panic!("empty configured project must bind")
+        };
+        assert_eq!(binding.project_id(), id);
+        assert!(binding.tsconfig_uri().ends_with("empty.json"));
+        assert_eq!(
+            binding.env_dims().parse_env_hash,
+            published.env_hashes_by_project[&id][0]
+        );
+        assert_eq!(
+            binding.env_dims().project_identity.0,
+            published.project_identity_hashes[&id]
+        );
+        assert_eq!(
+            resolver.resolve_configured_project(ProjectId(u32::MAX)),
+            CarrierOwnershipResolution::NoProject
+        );
+        let bootstrap =
+            WorkspaceProjectResolver::new(&published.snapshot, &ws, "7.1.1", &dims, false);
+        assert_eq!(
+            bootstrap.resolve_configured_project(id),
+            CarrierOwnershipResolution::NotReady
+        );
+        let member_only = |_: &str| panic!("must not use a fabricated source member");
+        let resolver =
+            WorkspaceProjectResolver::new(&published.snapshot, &ws, "7.1.1", &member_only, true);
+        assert_eq!(
+            resolver.resolve_configured_project(id),
+            CarrierOwnershipResolution::NoProject
+        );
+        for missing_env in [true, false] {
+            let mut incomplete = PublishedRoot::new_vfs_only(Arc::clone(&published.snapshot));
+            incomplete.env_hashes_by_project = published.env_hashes_by_project.clone();
+            incomplete.project_identity_hashes = published.project_identity_hashes.clone();
+            if missing_env {
+                incomplete.env_hashes_by_project.remove(&id);
+            } else {
+                incomplete.project_identity_hashes.remove(&id);
+            }
+            let dims = PublishedEnvDims::new(&incomplete, &ws);
+            let resolver =
+                WorkspaceProjectResolver::new(&incomplete.snapshot, &ws, "7.1.1", &dims, true);
+            assert_eq!(
+                resolver.resolve_configured_project(id),
+                CarrierOwnershipResolution::NoProject
+            );
+        }
+    }
+
+    #[test]
+    fn a_carrier_claimed_by_two_projects_binds_in_each_with_that_projects_dims() {
+        let (_dir, ws, published, root) = published_projects(false);
+        let source = format!("{root}/Panel.vue");
+        let dims = PublishedEnvDims::new(&published, &ws);
+        let resolver = WorkspaceProjectResolver::new(
+            &published.snapshot,
+            &ws,
+            "7.1.1",
+            &dims,
+            published.ownership_ready,
+        );
+        let owners = published.snapshot.owners_for_file(&source);
+        assert_eq!(owners.len(), 2);
+        let bindings: Vec<_> = owners
+            .iter()
+            .map(|&id| {
+                let CarrierOwnershipResolution::Bound(binding) =
+                    resolver.resolve_in_project(id, &source)
+                else {
+                    panic!("each claiming project must bind")
+                };
+                let row = published.env_hashes_by_project[&id];
+                assert_eq!(binding.env_dims().parse_env_hash, row[0]);
+                assert_eq!(binding.env_dims().resolve_env_hash, row[1]);
+                assert_eq!(binding.env_dims().lib_env_hash, row[3]);
+                assert_eq!(
+                    binding.env_dims().project_identity.0,
+                    published.project_identity_hashes[&id]
+                );
+                assert_eq!(binding.project_id(), id);
+                binding
+            })
+            .collect();
+        assert_ne!(bindings[0].env_dims(), bindings[1].env_dims());
+        assert_ne!(bindings[0].tsconfig_uri(), bindings[1].tsconfig_uri());
+        assert_eq!(dims.env_dims_for(&source), *bindings[0].env_dims());
+        let unowned = dims.env_dims_for(&format!("{root}/unowned.ts"));
+        use verter_workspace::traits::WorkspaceAccess;
+        assert_eq!(
+            unowned.resolve_env_hash,
+            ws.workspace_default_env_hash_array()[1]
+        );
+        assert_eq!(
+            unowned.project_identity.0,
+            ws.workspace_default_project_identity_hash()
+        );
+    }
+
+    #[test]
+    fn binding_a_project_that_does_not_claim_the_file_is_refused() {
+        let (_dir, ws, published, root) = published_projects(false);
+        let dims = PublishedEnvDims::new(&published, &ws);
+        let resolver =
+            WorkspaceProjectResolver::new(&published.snapshot, &ws, "7.1.1", &dims, true);
+        let other = published
+            .snapshot
+            .owners_for_file(&format!("{root}/Other.vue"))[0];
+        assert_eq!(
+            resolver.resolve_in_project(other, &format!("{root}/Panel.vue")),
+            CarrierOwnershipResolution::NoProject
+        );
+        assert_eq!(
+            resolver.resolve_in_project(ProjectId(u32::MAX), &format!("{root}/Panel.vue")),
+            CarrierOwnershipResolution::NoProject
+        );
+    }
+
+    #[test]
+    fn a_real_file_at_the_checking_path_refuses_the_carrier_in_every_project() {
+        let (_dir, ws, published, root) = published_projects(true);
+        let dims = PublishedEnvDims::new(&published, &ws);
+        let resolver =
+            WorkspaceProjectResolver::new(&published.snapshot, &ws, "7.1.1", &dims, true);
+        for project in &published.snapshot.projects {
+            assert!(matches!(
+                resolver.resolve_in_project(project.id, &format!("{root}/Panel.vue")),
+                CarrierOwnershipResolution::Ambiguous {
+                    cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
+                    ..
+                }
+            ));
+        }
+        let bootstrap =
+            WorkspaceProjectResolver::new(&published.snapshot, &ws, "7.1.1", &dims, false);
+        assert_eq!(
+            bootstrap.resolve_in_project(ProjectId(0), &format!("{root}/Panel.vue")),
+            CarrierOwnershipResolution::NotReady
+        );
+    }
+
+    #[test]
+    fn a_project_missing_from_the_published_tables_is_not_bound() {
+        let (_dir, ws, published, root) = published_projects(false);
+        let source = format!("{root}/Panel.vue");
+        let id = published.snapshot.owners_for_file(&source)[0];
+        for missing_env in [true, false] {
+            let mut incomplete = PublishedRoot::new_vfs_only(Arc::clone(&published.snapshot));
+            incomplete.env_hashes_by_project = published.env_hashes_by_project.clone();
+            incomplete.project_identity_hashes = published.project_identity_hashes.clone();
+            if missing_env {
+                incomplete.env_hashes_by_project.remove(&id);
+            } else {
+                incomplete.project_identity_hashes.remove(&id);
+            }
+            let dims = PublishedEnvDims::new(&incomplete, &ws);
+            let resolver =
+                WorkspaceProjectResolver::new(&incomplete.snapshot, &ws, "7.1.1", &dims, true);
+            assert_eq!(
+                resolver.resolve_in_project(id, &source),
+                CarrierOwnershipResolution::NoProject
+            );
+            assert_eq!(
+                resolver.resolve(&source, None),
+                CarrierOwnershipResolution::NoProject
+            );
+        }
+    }
+}
+
 /// The directory containing a tsconfig path (its project root).
 fn tsconfig_dir(tsconfig: &str) -> String {
     tsconfig

@@ -181,6 +181,9 @@ export const PATH_FILTERS = Object.freeze({
     // Rust source outside the workspace that a workspace crate compiles (see
     // OUT_OF_WORKSPACE_SOURCES): the Rust tests build it.
     "vendor/libmimalloc-sys2/**",
+    // The integration-test module discovery that the `pnpm gen:test-cases`
+    // generator and each crate's freshness test include.
+    "tools/rust/**",
     // Read by Rust tests (`verter_source_policy_gate` validates the schemas;
     // the style-IR corpora are read and `include_str!`-ed), so this lane owns
     // them; nothing else does.
@@ -350,7 +353,7 @@ export const PATH_FILTERS = Object.freeze({
     "netlify.toml",
     ".gitignore",
   ],
-  // Gates the `architecture-health` lane (ARH0/ARH1/ARH2/ARH4/ARH5/ARH7
+  // Gates the `architecture-health` lane (ARH0/ARH1/ARH2/ARH4/ARH7
   // verifiers). Their products join the live Rust tree — hotspot sources,
   // crate Cargo manifests and the cross-crate consumer population derived
   // from EVERY crate — so a product/verifier-only edit under
@@ -362,9 +365,8 @@ export const PATH_FILTERS = Object.freeze({
   // migration notes to the audit API reference.
   arch: [
     "tests/architecture-health/**",
-    // ARH5's public-example guard scans examples/reference for the displaced
-    // VueCarrierCompiler compile_ide/compile_bundle routes, so example-only
-    // edits must still schedule this lane.
+    // The architecture-health products record obligations on
+    // examples/reference, so example-only edits still schedule this lane.
     "examples/reference/**",
     "packages/vue-vscode/**",
     "docs/audit-footprint/api-reference.md",

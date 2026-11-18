@@ -61,7 +61,9 @@ claims. A runtime macro without a bundle claim uses the analyzer certificate
 under the same rule. The framework-surface operation preserves a bundle's
 approximate membership as a partial surface status.
 `ExpandedObjectShape.domain_guarantee` remains an output-only mirror for the
-public `evaluateTypes` JSON response; it does not authorize component facts.
+Rust `evaluate_types` response; it does not authorize component facts.
+Declared prop and type-argument expose expansion metadata comes from the normalized member's own authority and authored evidence. Shape-level props metadata folds those rows. Macro expansion diagnostics ride the same producer bundle and survive warm bundle reuse; no flat-lane name join or second publication macro resolution supplies them. Model update events use their own normalized occurrence publication and evidence.
+
 Output-only numeric mirrors travel with shallow metadata and never drive
 semantic evaluation. Missing evidence refuses a guarantee. Materialization
 failure of a published member produces a failed publication with no type value;

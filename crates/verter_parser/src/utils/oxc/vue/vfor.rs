@@ -398,8 +398,20 @@ pub fn parse_vfor_sliced<'a>(
     let (left, left_errors) = match left_result {
         Ok(mut expr) => {
             // Adjust left expression spans to be input-relative
-            adjust_expression_spans(&mut expr, span.start);
-            (Some(expr), vec![])
+            match crate::oxc_parse::with_walk_stack_lease(
+                crate::oxc_parse::syntax_nesting(left_str, source_type),
+                || {
+                    crate::oxc_parse::with_ast_stack(left_str, source_type, || {
+                        adjust_expression_spans(&mut expr, span.start);
+                    });
+                },
+            ) {
+                Ok(()) => (Some(expr), vec![]),
+                Err(unavailable) => (
+                    None,
+                    vec![crate::oxc_parse::stack_unavailable_diagnostic(unavailable)],
+                ),
+            }
         }
         Err(mut errors) => {
             adjust_diagnostics_spans(&mut errors, span.start);
@@ -411,8 +423,20 @@ pub fn parse_vfor_sliced<'a>(
     let (right, right_errors) = match right_result {
         Ok(mut expr) => {
             // Adjust by right_offset_in_substring + span.start to get file-relative
-            adjust_expression_spans(&mut expr, right_offset_in_substring + span.start);
-            (Some(expr), vec![])
+            match crate::oxc_parse::with_walk_stack_lease(
+                crate::oxc_parse::syntax_nesting(right_str, source_type),
+                || {
+                    crate::oxc_parse::with_ast_stack(right_str, source_type, || {
+                        adjust_expression_spans(&mut expr, right_offset_in_substring + span.start);
+                    });
+                },
+            ) {
+                Ok(()) => (Some(expr), vec![]),
+                Err(unavailable) => (
+                    None,
+                    vec![crate::oxc_parse::stack_unavailable_diagnostic(unavailable)],
+                ),
+            }
         }
         Err(mut errors) => {
             adjust_diagnostics_spans(&mut errors, right_offset_in_substring + span.start);

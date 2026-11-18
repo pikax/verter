@@ -28,9 +28,14 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use verter_session::external_ts::{EngineIdentity, ServeMode};
+use verter_session::sfc_projection_diagnostics::{DiagnosticCategory, EngineDiagnostic};
 pub use verter_tsgo_api::client::PreparedEngine;
 use verter_tsgo_api::client::SpawnedEngine;
-use verter_tsgo_api::proto::types::{Diagnostic as ApiDiagnostic, SnapshotChanges};
+use verter_tsgo_api::proto::types::{
+    Diagnostic as ApiDiagnostic, DocumentIdentifier, EnsurePrograms, FileNotifications,
+    OpaqueHandle, SnapshotChanges,
+};
 use verter_tsgo_api::snapshot::{AccessibleEntries, RealDirSource};
 use verter_tsgo_api::TsgoClient;
 use verter_workspace::native_fs::NativeFs;
@@ -138,7 +143,7 @@ impl DiagnosticContentSource for NativeFsSource {
 /// Which whole-program getter produced a diagnostic — the diagnostic's COLLECTION
 /// ORIGIN. The wire [`ApiDiagnostic`] does not carry this (only `code`, `category`,
 /// `text`, `pos`, `end`, `file_name`), so it is tagged at the collection boundary
-/// where the three getters are called and threaded to mapping.
+/// where the getters are called and threaded to mapping.
 ///
 /// The origin gates the fail-closed injected-root map-boundary guard: ONLY a
 /// `Config`-origin diagnostic pointing at an injected companion is suppressed;
@@ -151,9 +156,10 @@ pub enum DiagOrigin {
     Semantic,
     /// `getSyntacticDiagnosticsForProgram` — whole-program syntactic errors.
     Syntactic,
-    /// `getConfigFileParsingDiagnostics` — config-file-parse / compiler-options
-    /// diagnostics. The ONLY origin whose injected-companion diagnostics are a
-    /// virtualization artifact to be suppressed.
+    /// `getConfigFileParsingDiagnostics` and `getProgramDiagnostics` — config
+    /// parsing and program-wide compiler-options validation. The ONLY origin
+    /// whose injected-companion diagnostics are a virtualization artifact to be
+    /// suppressed.
     Config,
 }
 
@@ -176,6 +182,10 @@ pub enum RemapKind {
     /// the user-visible position: keep the engine's file + the converted
     /// `(line, col)` (the stub `.vue.ts` carriers are pinned this way).
     Passthrough,
+    /// A surface another lane's program owns and checks under its project's
+    /// own config. That program reports a diagnostic located in it; this
+    /// lane does not.
+    ForeignSurface,
 }
 
 /// One in-memory overlay carrier fed to the engine.
@@ -203,6 +213,242 @@ pub struct TypecheckInputs<'a> {
     pub tsconfig_bytes: String,
     /// Every generated carrier (TSX + stubs + ambient shims).
     pub files: Vec<OverlayFile>,
+}
+
+/// One live program at its configured project's own config path.
+pub(crate) struct EngineSession {
+    runtime: tokio::runtime::Runtime,
+    client: TsgoClient,
+    snapshot: OpaqueHandle,
+    project: String,
+    config: String,
+    injected: InjectedPathSet,
+    /// The overlay paths the current snapshot serves.
+    served: Vec<String>,
+}
+
+impl EngineSession {
+    pub(crate) fn open(inputs: TypecheckInputs<'_>) -> Result<Self, TypecheckError> {
+        let runtime = session_runtime()?;
+        let config = inputs.tsconfig_path;
+        let companions = inputs
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), f.content.clone()))
+            .collect::<Vec<_>>();
+        let overlay = build_virtual_overlay_snapshot(
+            &config,
+            &inputs.tsconfig_bytes,
+            &companions,
+            Arc::new(FsRealDirSource::new()),
+        );
+        let client = runtime.block_on(connect_session(
+            SessionEngine::Spawn {
+                engine: inputs.engine,
+                cwd: inputs.cwd,
+            },
+            overlay,
+        ))?;
+        let opened = runtime.block_on(open_program(&client, &config));
+        let (snapshot, project) = match opened {
+            Ok(program) => program,
+            Err(error) => {
+                let _ = runtime.block_on(client.close());
+                return Err(error);
+            }
+        };
+        // The authored config is not an injected root: its genuine errors survive.
+        let served = inputs
+            .files
+            .iter()
+            .map(|f| f.path.clone())
+            .collect::<Vec<_>>();
+        let injected = InjectedPathSet::from_paths(&served);
+        Ok(Self {
+            runtime,
+            client,
+            snapshot,
+            project,
+            config,
+            injected,
+            served,
+        })
+    }
+
+    /// Advance this program in its running engine. The new overlay is
+    /// published first; one snapshot update then notifies `changed` (overlay
+    /// files, or sources the engine reads from disk, which are reported as
+    /// present or deleted) and every overlay file that appeared or
+    /// disappeared, and brings the program up to date. The superseded
+    /// snapshot is released.
+    pub(crate) fn update(
+        &mut self,
+        tsconfig_bytes: &str,
+        files: &[OverlayFile],
+        changed: &[String],
+    ) -> Result<(), TypecheckError> {
+        let companions = files
+            .iter()
+            .map(|f| (f.path.clone(), f.content.clone()))
+            .collect::<Vec<_>>();
+        self.client.publish_snapshot(build_virtual_overlay_snapshot(
+            &self.config,
+            tsconfig_bytes,
+            &companions,
+            Arc::new(FsRealDirSource::new()),
+        ));
+        let served = files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+        let before = InjectedPathSet::from_paths(&self.served);
+        let after = InjectedPathSet::from_paths(&served);
+        // A disk source is reported by its state now. One that exists is also
+        // reported as created: the engine cannot be told whether it is new, and
+        // only a creation makes it match includes and failed lookups again.
+        let disk = NativeFs::new();
+        let (present, absent): (Vec<&String>, Vec<&String>) = changed
+            .iter()
+            .filter(|path| !after.contains(path))
+            .partition(|path| disk.file_exists(path));
+        let mut created = present.clone();
+        created.extend(served.iter().filter(|p| !before.contains(p)));
+        let mut deleted = absent;
+        deleted.extend(self.served.iter().filter(|p| !after.contains(p)));
+        let mut modified = present;
+        modified.extend(changed.iter().filter(|path| after.contains(path)));
+        let documents = |paths: Vec<&String>| {
+            (!paths.is_empty()).then(|| {
+                paths
+                    .into_iter()
+                    .map(|path| DocumentIdentifier::file_name(path.clone()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let changes = SnapshotChanges {
+            file_notifications: Some(FileNotifications {
+                invalidate_all: None,
+                changed: documents(modified),
+                created: documents(created),
+                deleted: documents(deleted),
+            }),
+            ensure_programs: Some(EnsurePrograms::All),
+            ..Default::default()
+        };
+        let next = self
+            .runtime
+            .block_on(self.client.update_snapshot(&self.snapshot, &changes))
+            .map_err(|e| {
+                TypecheckError::new(format!("verter-tsc: tsgo --api updateSnapshot failed: {e}"))
+            })?;
+        let base = std::mem::replace(&mut self.snapshot, next.snapshot);
+        if let Some(project) = next
+            .projects
+            .iter()
+            .find(|p| p.config_matches(|config| fs_paths_equal(config, &self.config)))
+        {
+            self.project = project.id.clone();
+        }
+        self.injected = after;
+        self.served = served;
+        // An unchanged answer is the base itself, whose extra reference the
+        // client already released.
+        if base != self.snapshot {
+            self.runtime
+                .block_on(self.client.release(&base))
+                .map_err(|e| {
+                    TypecheckError::new(format!("verter-tsc: tsgo --api release failed: {e}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn serving(&self, session_ordinal: u64) -> EngineIdentity {
+        EngineIdentity {
+            mode: ServeMode::Owned,
+            observed_version: Arc::from(self.client.observed_version()),
+            wire_pin: self.client.clearance().manifest.wire_fingerprint(),
+            editor_session_generation: session_ordinal,
+        }
+    }
+
+    pub(crate) fn diagnostics(
+        &self,
+        files: &[OverlayFile],
+    ) -> Result<Vec<EngineDiagnostic>, TypecheckError> {
+        let wire = self.runtime.block_on(collect_wire_diagnostics(
+            &self.client,
+            &self.snapshot,
+            &self.project,
+            &self.injected,
+        ))?;
+        let lookup = files
+            .iter()
+            .map(|f| (InjectedPathKey::new(&f.path), f))
+            .collect();
+        let cache = build_source_cache(&lookup);
+        let mut out = Vec::new();
+        for (origin, diagnostics) in wire {
+            for d in diagnostics {
+                if let Some(diagnostic) = raw_diagnostic(&d, origin, &self.config, &cache)? {
+                    out.push(diagnostic);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The host paths this session's engine read itself since it opened: the
+    /// sources, failed-lookup probes and directories its program took from
+    /// disk rather than from the overlay.
+    pub(crate) fn host_reads(&self) -> Vec<String> {
+        self.client.host_reads()
+    }
+
+    pub(crate) fn close(self) {
+        let _ = self.runtime.block_on(self.client.close());
+    }
+}
+
+fn raw_diagnostic(
+    d: &ApiDiagnostic,
+    origin: DiagOrigin,
+    config: &str,
+    cache: &DiagnosticSourceCache<OverlayThenFallback<NativeFsSource>>,
+) -> Result<Option<EngineDiagnostic>, TypecheckError> {
+    let category = match d.category {
+        1 => DiagnosticCategory::Error,
+        0 => DiagnosticCategory::Warning,
+        _ => return Ok(None),
+    };
+    let (file, start, end) = if let Some(file) = &d.file_name {
+        let source = cache.source_file(file).ok_or_else(|| {
+            TypecheckError::new(
+                MappingError::SourceUnavailable {
+                    file_name: file.clone(),
+                    diagnostic_code: d.code,
+                    origin,
+                }
+                .to_string(),
+            )
+        })?;
+        let index = source.line_index();
+        let start = index
+            .byte_for_utf16(d.pos)
+            .expect("indexed source has line starts") as u32;
+        let end = index
+            .byte_for_utf16(d.end)
+            .expect("indexed source has line starts") as u32;
+        (slashed(file), start, end)
+    } else {
+        (config.to_string(), 0, 0)
+    };
+    Ok(Some(EngineDiagnostic {
+        file: Arc::from(file),
+        start,
+        length: end.saturating_sub(start),
+        code: d.code,
+        category,
+        message: d.text.clone(),
+        related: Vec::new(),
+    }))
 }
 
 /// Run the in-memory `--api` typecheck and return the remapped diagnostics.
@@ -287,9 +533,17 @@ async fn session(
     let snapshot =
         build_virtual_overlay_snapshot(&tsconfig_path, &tsconfig_bytes, &companions, real);
 
-    // The wire gate runs before the actor starts (fail-closed on a diverged
-    // engine). Every request carries a hard deadline: a hung engine fails
-    // bounded and is torn down (never a blocked one-shot CLI).
+    let client = connect_session(engine, snapshot).await?;
+    // Always close the client, then surface the collected result (Ok or Err).
+    let result = collect_diagnostics(&client, &tsconfig_path, &lookup, &injected_paths).await;
+    let _ = client.close().await;
+    result
+}
+
+async fn connect_session(
+    engine: SessionEngine<'_>,
+    snapshot: verter_tsgo_api::snapshot::OverlaySnapshot,
+) -> Result<TsgoClient, TypecheckError> {
     let connected = match engine {
         SessionEngine::Spawn { engine, cwd } => {
             TsgoClient::connect(engine, cwd, snapshot, 16).await
@@ -308,10 +562,8 @@ async fn session(
             )));
         }
     };
-    // Always close the client, then surface the collected result (Ok or Err).
-    let result = collect_diagnostics(&client, &tsconfig_path, &lookup, &injected_paths).await;
-    let _ = client.close().await;
-    result
+
+    Ok(client)
 }
 
 /// Check the overlay carriers on `prepared`'s engine. `None` when the
@@ -364,12 +616,10 @@ fn build_source_cache(
 /// Fail-closed: any protocol failure on any call is a HARD error (never an
 /// eprintln-and-continue) — silently dropping diagnostics is exactly the
 /// quiet-failure this path bans.
-async fn collect_diagnostics(
+async fn open_program(
     client: &TsgoClient,
     tsconfig_path: &str,
-    lookup: &HashMap<InjectedPathKey, &OverlayFile>,
-    injected_paths: &[String],
-) -> Result<Vec<Diagnostic>, TypecheckError> {
+) -> Result<(OpaqueHandle, String), TypecheckError> {
     if let Err(e) = client.initialize().await {
         return Err(TypecheckError::new(format!(
             "verter-tsc: tsgo --api initialize failed: {e}"
@@ -398,17 +648,41 @@ async fn collect_diagnostics(
     {
         Some(p) => p,
         None => {
+            // Name what the engine did open, so a path-identity or config-parse
+            // mismatch is visible from the message alone.
+            let opened: Vec<String> = snap
+                .projects
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{} (roots {}, errors {})",
+                        p.config_file_name.as_deref().unwrap_or("<inferred>"),
+                        p.root_files().len(),
+                        p.parsed_command_line.errors.len()
+                    )
+                })
+                .collect();
             return Err(TypecheckError::new(format!(
-                "verter-tsc: tsgo --api did not open the configured project ({tsconfig_path})"
+                "verter-tsc: tsgo --api did not open the configured project ({tsconfig_path}); engine opened: [{}]",
+                opened.join("; ")
             )));
         }
     };
 
+    Ok((snap.snapshot, project.id.clone()))
+}
+
+async fn collect_wire_diagnostics(
+    client: &TsgoClient,
+    snapshot: &OpaqueHandle,
+    project: &str,
+    injected: &InjectedPathSet,
+) -> Result<Vec<(DiagOrigin, Vec<ApiDiagnostic>)>, TypecheckError> {
     // ONE whole-program semantic call + ONE whole-program syntactic call: the
     // `files` argument is omitted, so the engine returns diagnostics for EVERY file
     // in the program (root carriers AND non-root imported sources).
     let semantic = client
-        .get_semantic_diagnostics_for_program(&snap.snapshot, &project.id)
+        .get_semantic_diagnostics_for_program(snapshot, project)
         .await
         .map_err(|e| {
             TypecheckError::new(format!(
@@ -416,7 +690,7 @@ async fn collect_diagnostics(
             ))
         })?;
     let syntactic = client
-        .get_syntactic_diagnostics_for_program(&snap.snapshot, &project.id)
+        .get_syntactic_diagnostics_for_program(snapshot, project)
         .await
         .map_err(|e| {
             TypecheckError::new(format!(
@@ -424,13 +698,13 @@ async fn collect_diagnostics(
             ))
         })?;
 
-    // Config-file parse / compiler-options diagnostics (options/global — NOT
-    // covered by the two per-file getters). Strip only the diagnostics that point
+    // Config parsing and program-wide validation are not covered by the two
+    // per-file getters. Strip only the diagnostics that point
     // at an injected companion (a virtualization artifact); real user-config
     // errors and global (fileName:None) diagnostics survive (fail-closed: only
     // KNOWN injected companions are discarded).
-    let config = client
-        .get_config_file_parsing_diagnostics(&snap.snapshot, &project.id)
+    let mut config = client
+        .get_config_file_parsing_diagnostics(snapshot, project)
         .await
         .map_err(|e| {
             TypecheckError::new(format!(
@@ -438,42 +712,40 @@ async fn collect_diagnostics(
             ))
         })?;
 
-    // ONE injected-companion set, shared by the upstream config strip AND the
-    // fail-closed map-boundary guard, so the strip decision and the diagnostic-
-    // homing decision share a single filesystem-identity notion (never a second
-    // ad-hoc path key that could diverge on separator / drive-letter case).
-    let injected_set = InjectedPathSet::from_paths(injected_paths);
-    let config = strip_injected_root_diagnostics(config, &injected_set);
+    // Program validation is distinct from config parsing: a parsed option can
+    // still be unsupported (for example, a removed baseUrl). Use the same
+    // config-origin filtering and mapping for both diagnostic streams.
+    config.extend(
+        client
+            .get_program_diagnostics(snapshot, project)
+            .await
+            .map_err(|e| {
+                TypecheckError::new(format!("verter-tsc: tsgo --api getProgramDiagnostics: {e}"))
+            })?,
+    );
 
-    // The per-collection source cache: OVERLAY carriers first, then the real FS.
-    // Every offset is positioned through it, so each file resolves + indexes ONCE.
+    let config = strip_injected_root_diagnostics(config, injected);
+    Ok(vec![
+        (DiagOrigin::Semantic, semantic),
+        (DiagOrigin::Syntactic, syntactic),
+        (DiagOrigin::Config, config),
+    ])
+}
+
+async fn collect_diagnostics(
+    client: &TsgoClient,
+    tsconfig_path: &str,
+    lookup: &HashMap<InjectedPathKey, &OverlayFile>,
+    injected_paths: &[String],
+) -> Result<Vec<Diagnostic>, TypecheckError> {
+    let (snapshot, project) = open_program(client, tsconfig_path).await?;
+    let injected = InjectedPathSet::from_paths(injected_paths);
+    let wire = collect_wire_diagnostics(client, &snapshot, &project, &injected).await?;
     let cache = build_source_cache(lookup);
-
     let mut out = Vec::new();
-    push_mapped(
-        &mut out,
-        &semantic,
-        DiagOrigin::Semantic,
-        lookup,
-        &cache,
-        &injected_set,
-    )?;
-    push_mapped(
-        &mut out,
-        &syntactic,
-        DiagOrigin::Syntactic,
-        lookup,
-        &cache,
-        &injected_set,
-    )?;
-    push_mapped(
-        &mut out,
-        &config,
-        DiagOrigin::Config,
-        lookup,
-        &cache,
-        &injected_set,
-    )?;
+    for (origin, diagnostics) in wire {
+        push_mapped(&mut out, &diagnostics, origin, lookup, &cache, &injected)?;
+    }
     Ok(out)
 }
 
@@ -595,6 +867,7 @@ fn map_one(
             Some(file) => {
                 let (gen_line, gen_col) = line_col_via_cache(cache, &file.path, od)?;
                 match &file.remap {
+                    RemapKind::ForeignSurface => return Ok(None),
                     RemapKind::Passthrough => (slashed(file_name), gen_line, gen_col),
                     RemapKind::SourceMapped { vue_path } => {
                         match map_tsc_position(&file.content, gen_line, gen_col) {
@@ -727,3 +1000,7 @@ impl RealDirSource for FsRealDirSource {
 #[cfg(test)]
 #[path = "api_check_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "api_check_projection_tests.rs"]
+mod projection_tests;

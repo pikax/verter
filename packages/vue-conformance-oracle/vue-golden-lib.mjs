@@ -16,7 +16,7 @@
  *   5. commit everything together.
  */
 
-export const VUE_ORACLE_VERSION = "3.6.0-rc.5";
+export const VUE_ORACLE_VERSION = "3.6.0-rc.15";
 
 /** The four packages that must ALL resolve to exactly VUE_ORACLE_VERSION. */
 export const ORACLE_PACKAGES = [
@@ -39,10 +39,10 @@ export const ORACLE_PACKAGES = [
 export const ESBUILD_VERSION = "0.28.0";
 
 /** Bump when the generator's emission/metadata shape changes. */
-export const GENERATOR_VERSION = 3;
+export const GENERATOR_VERSION = 4;
 
 /** Metadata schema version stamped into every `.meta.json`. */
 export const META_SCHEMA_VERSION = 2;
 
 /** Manifest schema version stamped into `corpus/manifest.json`. */
-export const MANIFEST_SCHEMA_VERSION = 2;
+export const MANIFEST_SCHEMA_VERSION = 3;

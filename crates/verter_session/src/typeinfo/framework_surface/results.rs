@@ -214,8 +214,7 @@ pub(crate) fn resolved_emit_payload_publication(
 
 /// One session-resolved prop row: the prop analysis field plus the member
 /// VALUE's published SOURCE POSITION — the prop-type AUTHORITY
-/// (`define_props_shape` publishes it directly; the flat evaluated fields
-/// contribute metadata only). A PROVEN local authored member carries its
+/// (`define_props_shape` publishes it directly, including its own expansion metadata). A PROVEN local authored member carries its
 /// exact authored macro-payload position (`Authored(MacroPayload(..))`, the
 /// analyzer-stamped locator — proven by the shared raised-shape equality);
 /// a member value that decides a complete closed leaf / leaf-union / tuple
@@ -292,8 +291,10 @@ impl ResolvedPropField {
 pub struct ResolvedExposeField {
     /// The expose analysis row (name, JSDoc).
     pub analysis: AnalyzedExposeField,
-    /// The member value's published source position.
-    pub type_source: verter_type_expr::facts::SourcePosition,
+    /// Authority of this exact resolved member, independent of another expansion lane.
+    pub authority: verter_type_expr::ResolvedTypeAuthority,
+    /// Authored value evidence when the producer can address the exact value.
+    pub authored_evidence: Option<verter_type_expr::AuthoredTypeEvidence>,
 }
 
 /// The resolved `defineOptions<T>()` object surface.
@@ -733,6 +734,8 @@ pub struct NamedTypeMember {
 /// the same six-surface shapes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MacroSurfaceDtos {
+    /// Diagnostics of the resolution that produced these rows, retained on warm reads.
+    pub diagnostics: Vec<verter_session_query::analysis::component_meta::MacroExpansionDiagnostics>,
     /// Output projection of this macro membership demand, independent of its fields.
     pub domain_guarantee:
         Option<verter_session_query::analysis::component_meta::MetadataFactGuarantee>,
@@ -1107,6 +1110,7 @@ mod tests {
         let dtos = MacroSurfaceDtos::default();
         let MacroSurfaceDtos {
             domain_guarantee: _,
+            diagnostics: _,
             props,
             emits,
             slots,

@@ -1,0 +1,90 @@
+{
+  "schema": 2,
+  "caseId": "ssr/scoped-slot-branches",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/scoped-slot-branches.vue",
+    "sha256": "e58468ed5605826894dfa6bd13af9735cc2059631111530a32eadcbe12f57b91"
+  },
+  "options": {
+    "sha256": "d136d5af5b38751dbe89b6e181c99d507436226933ffef1fdad59e1440acb8d9",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/ssr/scoped-slot-branches.vue",
+      "id": "ssr/scoped-slot-branches",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/scoped-slot-branches.js",
+      "sha256": "4273084d980194e369777b7ea47dc5df4453545b1fb46f3c1a02f5309ed1eb49",
+      "bytes": 1314
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/scoped-slot-branches.map.json",
+      "sha256": "8a26730ec8f125f3f63f5bc230520e82d7d78baad2b76a847a9684c6e7af48ca"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createComponent",
+      "alias": "_createComponent"
+    },
+    {
+      "imported": "createIf",
+      "alias": "_createIf"
+    },
+    {
+      "imported": "defineVaporComponent",
+      "alias": "_defineVaporComponent"
+    },
+    {
+      "imported": "extend",
+      "alias": "_extend"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

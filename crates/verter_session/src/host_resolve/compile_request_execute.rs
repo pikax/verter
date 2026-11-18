@@ -491,10 +491,14 @@ impl VerterHost {
             rows.push(row);
         }
 
+        let artifact_set = products
+            .artifact_set_json(&canonical, snapshot.source.len() as u32)
+            .map_err(|payload| refused(compile_diags.clone().merge(payload)))?;
         Ok(CompileRequestResponse {
             canonical_id: canonical,
             diagnostics: compile_diags,
             products: rows,
+            artifact_set,
         })
     }
 }

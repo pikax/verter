@@ -31,6 +31,8 @@ The byte-coordinate domain newtypes live in `crates/verter_span/src/coord/` (re-
 
 ## Typed Span Rules
 
+Retained Vue directive expressions use `utils/oxc/vue/span.rs` to normalize value and type-argument spans through the OXC span visitor. Wrapped slot parameters use the same visitor with their synthetic prefix removed. Slot annotation nodes preserve their published wrapper-prefix convention, so the shared TypeScript-removal collector receives that annotation offset explicitly; value ranges and type-argument ranges do not subtract it. The unrelated `adjust_program_spans` path retains its existing expression-coordinate policy for script extraction consumers that apply their own type offsets. Nonzero-offset parser tests cover both contracts.
+
 1. **All data crossing a serialization boundary (serde, MCP, LSP custom protocol, FFI) MUST use `Span` (SFC-absolute).** `RelativeSpan`, `PartialGeneratedSpan`, `GeneratedSpan` don't implement `Serialize`/`Deserialize` — putting them in a serializable struct is a compile error. Convert with `to_absolute(base)` before serialization.
 2. **Inter-crate stored types prefer `Span`.** Analysis snapshots, host results, diagnostic structs crossing crate boundaries use `Span`. `RelativeSpan` is intra-crate only (CSS scanner, OXC binding extraction).
 3. **`RelativeSpan` is 8 bytes, same as `Span`.** Base offset lives in context (field on parent struct, function parameter). Value is compile-time type safety, not runtime data.

@@ -155,6 +155,85 @@ pub struct ExpansionMetadata {
     pub diagnostics: Vec<ExpansionDiagnostic>,
 }
 
+impl ExpansionMetadata {
+    /// Project the metadata of the resolution that supplied this member.
+    pub fn from_authority(authority: &ResolvedTypeAuthority) -> Self {
+        use verter_type_expr::{ResolutionExactness, ResolvedTypeOutcome};
+        let exactness = match authority.outcome() {
+            ResolvedTypeOutcome::Present { exactness, .. } => match exactness {
+                ResolutionExactness::ExactConcrete => SolverExactness::ExactConcrete,
+                ResolutionExactness::ExactSymbolic => SolverExactness::ExactSymbolic,
+                ResolutionExactness::Incomplete => SolverExactness::Incomplete,
+            },
+            ResolvedTypeOutcome::Absent { .. } => SolverExactness::ExactConcrete,
+            ResolvedTypeOutcome::Failed { .. } => SolverExactness::Incomplete,
+        };
+        Self {
+            exactness,
+            execution_status: if matches!(authority.outcome(), ResolvedTypeOutcome::Failed { .. }) {
+                ExecutionStatus::HardStop
+            } else {
+                ExecutionStatus::Completed
+            },
+            diagnostics: authority
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| ExpansionDiagnostic {
+                    reason: match diagnostic.kind {
+                        ResolutionDiagnosticKind::BudgetExceeded => {
+                            ExpansionStopReason::BudgetExceeded
+                        }
+                        ResolutionDiagnosticKind::ProjectionWorkLimit => {
+                            ExpansionStopReason::ProjectionWorkLimit
+                        }
+                        ResolutionDiagnosticKind::ConnectedQueryDepthLimit => {
+                            ExpansionStopReason::ConnectedQueryDepthLimit
+                        }
+                        ResolutionDiagnosticKind::ConnectedMemoryLimit => {
+                            ExpansionStopReason::ConnectedMemoryLimit
+                        }
+                        ResolutionDiagnosticKind::MappedDepthExceeded => {
+                            ExpansionStopReason::MappedDepthExceeded
+                        }
+                        ResolutionDiagnosticKind::UnresolvedReference => {
+                            ExpansionStopReason::UnresolvedReference
+                        }
+                        ResolutionDiagnosticKind::IndeterminateConditional => {
+                            ExpansionStopReason::IndeterminateConditional
+                        }
+                        ResolutionDiagnosticKind::InfiniteKeySpace => {
+                            ExpansionStopReason::InfiniteKeySpace
+                        }
+                        ResolutionDiagnosticKind::UnsupportedOperator => {
+                            ExpansionStopReason::UnsupportedOperator
+                        }
+                        ResolutionDiagnosticKind::ConditionalContextTruncated => {
+                            ExpansionStopReason::ConditionalContextTruncated
+                        }
+                        ResolutionDiagnosticKind::IdempotentArm => {
+                            ExpansionStopReason::IdempotentArm
+                        }
+                        ResolutionDiagnosticKind::CyclicReference => {
+                            ExpansionStopReason::CyclicReference
+                        }
+                        ResolutionDiagnosticKind::CyclicInstantiation => {
+                            ExpansionStopReason::CyclicInstantiation
+                        }
+                        ResolutionDiagnosticKind::InstantiationError => {
+                            ExpansionStopReason::InstantiationError
+                        }
+                        ResolutionDiagnosticKind::EmptyUnionArm => {
+                            ExpansionStopReason::EmptyUnionArm
+                        }
+                    },
+                    context: diagnostic.context.to_string(),
+                    property_name: diagnostic.property_name.as_ref().map(ToString::to_string),
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
 )]
@@ -307,28 +386,6 @@ pub struct ExpandedComponentTypes {
     pub slot_bindings: Vec<ExpandedField>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<ExpandedField>,
-    /// Per-macro `defineExpose` projected surface lane: the projector's
-    /// published surface members for each type-based `defineExpose` macro.
-    /// The exposed-analysis join pairs entries by the stable
-    /// `(macro_index, member name)` identity to set
-    /// `ExposedAnalysis.type_source` from the projected field's `r#type`;
-    /// an authored object-literal exposure of the same name keeps its own
-    /// (binding-derived) source — the lane only fills what the literal form
-    /// does not provide.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exposed: Vec<ExpandedMacroExposed>,
-}
-
-/// One `defineExpose` macro's projected surface members. `macro_index` is
-/// the macro's position in the analyzer's macro list — the same ordinal
-/// every other per-macro lane (`ExpandedMacroProps` /
-/// `ExpandedMacroObjectShape`) keys on.
-#[derive(Debug, Clone, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
-#[serde(rename_all = "camelCase")]
-pub struct ExpandedMacroExposed {
-    pub macro_index: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fields: Vec<ExpandedField>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
@@ -339,7 +396,7 @@ pub struct ExpandedField {
     /// value binding is scoped to — populated from the SAME owner-aware
     /// source that produced the request (`BindingExpansionEntry::owner` for
     /// `.bindings`; the enclosing macro's `AnalyzedMacro.owner` for
-    /// `.props`/`.emits`/`.slot_bindings`/`.exposed`). Lets a `.bindings`-lane
+    /// `.props`/`.emits`/`.slot_bindings`). Lets a `.bindings`-lane
     /// consumer (constructor-binding shadow resolution) discriminate a
     /// same-name/different-owner collision by owner instead of matching by
     /// name text alone. Every producer supplies the REAL authored owner —
@@ -366,7 +423,7 @@ pub struct ExpandedField {
     /// the macro-root `declared_in_macro_type_arg` provenance bit
     /// for the structural definition. Propagated by
     /// `expand_macro_types_impl_with_expander` and
-    /// `surface_member_to_expanded_field` from the upstream `SurfaceMember`
+    /// the normalized surface producer from the upstream `SurfaceMember`
     /// / `AnalyzedPropField` source. Consumed by component-meta's
     /// `extract_props_from_macro` to disambiguate cross-file imported
     /// macro provenance.
@@ -466,7 +523,6 @@ impl ExpandedComponentTypes {
             && self.define_slots.is_empty()
             && self.slot_bindings.is_empty()
             && self.bindings.is_empty()
-            && self.exposed.is_empty()
     }
 }
 

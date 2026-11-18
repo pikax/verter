@@ -9,23 +9,26 @@
 //! `VdomCodeGen::leave_element` after all children have been visited.
 
 use crate::ast::types::{ChildrenMode, ElementNode, TemplateAst};
-use crate::code_transform::SegmentAnchor;
-use crate::template::code_gen::binding::BindingResolver;
-use crate::template::code_gen::vapor::find_prop_oxc_exp;
-use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
+use crate::code_transform::{AnchorKind, SegmentAnchor};
+use crate::template::binding::prefixed_expr::build_prefixed_expr;
+use crate::template::binding::prefixed_expr::find_prop_oxc_exp;
+use crate::template::binding::BindingResolver;
 use crate::template::oxc::types::{
     Dynamism, ExpressionFlag, OxcParsedElement, OxcParsedExpression,
 };
+use crate::template::vue_syntax::{classify_event_modifier, EventModifierKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::super::shared::helpers::{
-    self, is_member_expression, is_multi_statement_handler, trim_handler_body, VdomHelper,
-};
+use super::super::shared::helpers::{self, VdomHelper};
+
 use super::super::types::{ChildKind, ChildRecord, CodeGenOutput};
 use super::super::TemplateCodeGenOptions;
 use super::children::add_children_separators;
 use super::component::{resolve_component_tag, resolve_dynamic_component, vnode_helper};
 use super::props;
+use crate::template::vue_syntax::{
+    is_member_expression, is_multi_statement_handler, trim_handler_body,
+};
 
 // Re-export moved function so external callers (e.g., compile.rs)
 // can continue to use `vdom::element::to_pascal_case`.
@@ -237,7 +240,7 @@ fn emit_merged_event_handler_value(
                     buf.push_str(", ");
                 }
                 buf.push('"');
-                helpers::escape_js_string_into(buf, km);
+                crate::template::vue_syntax::escape_js_string_into(buf, km);
                 buf.push('"');
             }
             buf.push_str("])");
@@ -255,7 +258,7 @@ fn emit_merged_event_handler_value(
                     buf.push_str(", ");
                 }
                 buf.push('"');
-                helpers::escape_js_string_into(buf, rm);
+                crate::template::vue_syntax::escape_js_string_into(buf, rm);
                 buf.push('"');
             }
             buf.push_str("])");
@@ -263,64 +266,6 @@ fn emit_merged_event_handler_value(
     }
 
     (uses_wm, uses_wk)
-}
-
-/// Classification of a Vue event-handler modifier (mirrors `@vue/compiler-dom`).
-enum EventModifierKind {
-    /// `capture` / `once` / `passive` — folded into the prop key name.
-    Option,
-    /// Event/system guards → `_withModifiers` (`stop`, `prevent`, `ctrl`, …).
-    Runtime,
-    /// Keyboard key filter → `_withKeys` (`enter`, `backspace`, `home`, …).
-    Key,
-}
-
-/// Classify one `@event.mod` token the way Vue's compiler does.
-///
-/// On keyboard events (`keydown` / `keyup` / `keypress`), any modifier that is
-/// not an event option or a known non-key guard is a **key** filter — including
-/// aliases like `backspace`, `home`, `end`, and arbitrary key names. Putting
-/// those in `_withModifiers` is wrong: unknown runtime guards are no-ops, so
-/// the handler runs for every key (and may `preventDefault` everything).
-fn classify_event_modifier(mod_name: &str, event_arg: &str) -> EventModifierKind {
-    match mod_name {
-        "capture" | "once" | "passive" => EventModifierKind::Option,
-        // Event propagation + system modifiers + exact + middle mouse button.
-        "stop" | "prevent" | "self" | "ctrl" | "shift" | "alt" | "meta" | "exact" | "middle" => {
-            EventModifierKind::Runtime
-        }
-        // `left` / `right` are mouse-button modifiers on pointer events and key
-        // aliases on keyboard events (ArrowLeft / ArrowRight).
-        "left" | "right" => {
-            if is_keyboard_event_arg(event_arg) {
-                EventModifierKind::Key
-            } else {
-                EventModifierKind::Runtime
-            }
-        }
-        // Everything else on a keyboard event is a key filter (enter, tab,
-        // delete, backspace, esc, space, up, down, home, end, page-up, …).
-        // On non-keyboard events, treat unknown mods as runtime (Vue does the
-        // same via isNonKeyModifier / maybeKeyModifier split).
-        _ => {
-            if is_keyboard_event_arg(event_arg) {
-                EventModifierKind::Key
-            } else {
-                EventModifierKind::Runtime
-            }
-        }
-    }
-}
-
-#[inline]
-fn is_keyboard_event_arg(arg_name: &str) -> bool {
-    // Strip optional Vue event prefixes; arg is usually `keydown` / `keyup` /
-    // `keypress` (or `Keydown` after camelize — we see the raw template arg).
-    let lower = arg_name.as_bytes();
-    lower.eq_ignore_ascii_case(b"keydown")
-        || lower.eq_ignore_ascii_case(b"keyup")
-        || lower.eq_ignore_ascii_case(b"keypress")
-        || arg_name.starts_with("key")
 }
 
 /// True when `value` is already a function expression (arrow or `function`)
@@ -781,7 +726,7 @@ fn pre_scan_vmodel_handler_merge(element: &ElementNode, source: &str) -> Vec<(us
         }
         let event_key = if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
             let arg = &source[as_ as usize..ae as usize];
-            format!("update:{}", props::camelize(arg))
+            format!("update:{}", crate::template::vue_syntax::camelize(arg))
         } else {
             "update:modelValue".to_string()
         };
@@ -807,7 +752,7 @@ fn pre_scan_vmodel_handler_merge(element: &ElementNode, source: &str) -> Vec<(us
             let arg = &source[as_ as usize..ae as usize];
             let normalized = format!(
                 "update:{}",
-                props::camelize(arg.strip_prefix("update:").unwrap_or(arg))
+                crate::template::vue_syntax::camelize(arg.strip_prefix("update:").unwrap_or(arg))
             );
             for &(vmodel_idx, ref vmodel_key) in &vmodel_keys {
                 if normalized == *vmodel_key {
@@ -941,7 +886,7 @@ fn pre_scan_event_handler_merge(
         let arg_name = &source[arg_start as usize..arg_end as usize];
         let key = if is_on {
             let mut k = String::with_capacity(arg_name.len() + 10);
-            props::format_event_handler_key_into(&mut k, arg_name);
+            crate::template::vue_syntax::format_event_handler_key_into(&mut k, arg_name);
             for modifier in &prop.modifiers {
                 let m = &source[modifier.start as usize..modifier.end as usize];
                 if matches!(m, "capture" | "once" | "passive") {
@@ -952,7 +897,7 @@ fn pre_scan_event_handler_merge(
             }
             k
         } else {
-            let camelized = props::camelize(arg_name);
+            let camelized = crate::template::vue_syntax::camelize(arg_name);
             if camelized.len() > 2
                 && camelized.starts_with("on")
                 && camelized.as_bytes()[2].is_ascii_uppercase()
@@ -1217,25 +1162,25 @@ pub(crate) fn build_props_object_into(
                     matches!(
                         resolver.get(ref_value),
                         Some(
-                            super::super::binding::BindingType::SetupLet
-                                | super::super::binding::BindingType::SetupRef
-                                | super::super::binding::BindingType::SetupMaybeRef
+                            crate::template::binding::BindingType::SetupLet
+                                | crate::template::binding::BindingType::SetupRef
+                                | crate::template::binding::BindingType::SetupMaybeRef
                         )
                     ) || (matches!(
                         resolver.get(ref_value),
-                        Some(super::super::binding::BindingType::SetupImport)
+                        Some(crate::template::binding::BindingType::SetupImport)
                     ) && resolver.is_ref_bindable_import(ref_value))
                 };
                 if inline_binding {
                     buf.push_str("ref_key: \"");
-                    helpers::escape_js_string_into(buf, ref_value);
+                    crate::template::vue_syntax::escape_js_string_into(buf, ref_value);
                     buf.push_str("\", ref: ");
                     buf.push_str(ref_value);
                     has_dynamic_ref = true;
                 } else {
                     buf.push_str("ref: ");
                     buf.push('"');
-                    helpers::escape_js_string_into(buf, ref_value);
+                    crate::template::vue_syntax::escape_js_string_into(buf, ref_value);
                     buf.push('"');
                 }
             } else {
@@ -1326,7 +1271,7 @@ pub(crate) fn build_props_object_into(
 
                     // v-model:arg on a component: expand to named model prop + update handler
                     if directive_name == "v-model" && element.tag_type.is_component() {
-                        let model_name = props::camelize(arg_name);
+                        let model_name = crate::template::vue_syntax::camelize(arg_name);
                         let needs_quote = props::needs_quoted_key(&model_name);
                         if needs_quote {
                             buf.push('"');
@@ -1424,7 +1369,7 @@ pub(crate) fn build_props_object_into(
                         // Event directive: @click → onClick, @update:modelValue → "onUpdate:modelValue"
                         // Build key in temp position, then check if quoting is needed
                         let key_start = buf.len();
-                        props::format_event_handler_key_into(buf, arg_name);
+                        crate::template::vue_syntax::format_event_handler_key_into(buf, arg_name);
 
                         // Classify modifiers into option (key suffix), runtime, and key categories
                         // matching @vue/compiler-dom: keyboard-event unknown mods are
@@ -1521,7 +1466,7 @@ pub(crate) fn build_props_object_into(
                         } else if skip_camelize {
                             std::borrow::Cow::Borrowed(arg_name)
                         } else {
-                            props::camelize(arg_name)
+                            crate::template::vue_syntax::camelize(arg_name)
                         };
                         // For plain elements, :class and :style have dedicated
                         // patch flags (PATCH_CLASS / PATCH_STYLE) and must NOT
@@ -1589,7 +1534,7 @@ pub(crate) fn build_props_object_into(
                         }
                         if props::needs_quoted_key(&key) {
                             buf.push('"');
-                            helpers::escape_js_string_into(buf, &key);
+                            crate::template::vue_syntax::escape_js_string_into(buf, &key);
                             buf.push('"');
                         } else {
                             buf.push_str(&key);
@@ -1871,6 +1816,7 @@ pub(crate) fn build_props_object_into(
                         content_offset: key_offset,
                         length: name.len() as u32,
                         source_pos: prop.start,
+                        kind: AnchorKind::Exact,
                     });
                 }
             }
@@ -1949,7 +1895,7 @@ pub(crate) fn build_props_object_into(
                             if let Some(static_cls) = merge_class {
                                 // Merge static + dynamic: _normalizeClass(["static", dynamic])
                                 buf.push_str("[\"");
-                                helpers::escape_js_string_into(buf, static_cls);
+                                crate::template::vue_syntax::escape_js_string_into(buf, static_cls);
                                 buf.push_str("\", ");
                                 buf.push_str(&resolved);
                                 buf.push(']');
@@ -1991,9 +1937,9 @@ pub(crate) fn build_props_object_into(
                     if helpers::has_html_entities(value) {
                         let mut decoded = String::with_capacity(value.len());
                         helpers::decode_html_entities_into(&mut decoded, value);
-                        helpers::escape_js_string_into(buf, &decoded);
+                        crate::template::vue_syntax::escape_js_string_into(buf, &decoded);
                     } else {
-                        helpers::escape_js_string_into(buf, value);
+                        crate::template::vue_syntax::escape_js_string_into(buf, value);
                     }
                     buf.push('"');
                 }
@@ -2003,14 +1949,14 @@ pub(crate) fn build_props_object_into(
             } else if let Some(arg_name) = bind_shorthand_arg {
                 // Vue 3.4+ same-name shorthand: `:disabled` → `disabled: resolvedBinding`
                 // The arg name is used as the expression — resolve it through bindings.
-                let camelized = props::camelize(arg_name);
+                let camelized = crate::template::vue_syntax::camelize(arg_name);
                 let resolved = resolver.resolve_simple_expr(&camelized);
                 if prop_is_class {
                     buf.push_str("_normalizeClass(");
                     uses_normalize_class = true;
                     if let Some(static_cls) = merge_class {
                         buf.push_str("[\"");
-                        helpers::escape_js_string_into(buf, static_cls);
+                        crate::template::vue_syntax::escape_js_string_into(buf, static_cls);
                         buf.push_str("\", ");
                         buf.push_str(&resolved);
                         buf.push(']');
@@ -2055,7 +2001,7 @@ pub(crate) fn build_props_object_into(
                             buf.push_str(", ");
                         }
                         buf.push('"');
-                        helpers::escape_js_string_into(buf, km);
+                        crate::template::vue_syntax::escape_js_string_into(buf, km);
                         buf.push('"');
                     }
                     buf.push_str("])");
@@ -2076,7 +2022,7 @@ pub(crate) fn build_props_object_into(
                             buf.push_str(", ");
                         }
                         buf.push('"');
-                        helpers::escape_js_string_into(buf, rm);
+                        crate::template::vue_syntax::escape_js_string_into(buf, rm);
                         buf.push('"');
                     }
                     buf.push_str("])");
@@ -2215,7 +2161,7 @@ pub(super) fn format_dynamic_props_ref(
             arr.push_str(", ");
         }
         arr.push('"');
-        helpers::escape_js_string_into(&mut arr, key);
+        crate::template::vue_syntax::escape_js_string_into(&mut arr, key);
         arr.push('"');
     }
     arr.push(']');
@@ -2545,7 +2491,7 @@ pub fn process_element_leave<'alloc>(
     } else {
         // Plain element: string literal
         buf.push('"');
-        helpers::escape_js_string_into(buf, tag_name);
+        crate::template::vue_syntax::escape_js_string_into(buf, tag_name);
         buf.push('"');
     }
 
@@ -2633,8 +2579,7 @@ pub fn process_element_leave<'alloc>(
                             .iter()
                             .map(|a| SegmentAnchor {
                                 content_offset: a.content_offset - props_start as u32,
-                                length: a.length,
-                                source_pos: a.source_pos,
+                                ..*a
                             })
                             .collect();
                         hoisted.push((props_str, shifted_anchors));

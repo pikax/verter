@@ -59,7 +59,10 @@ impl VueFrameworkAdapter {
     /// [`MacroSurfaceDtos`] bundle carrying only the requested surface — the
     /// pure normalization transform.
     fn project_kind(kind: FrameworkSurfaceKind, dtos: &MacroSurfaceDtos) -> MacroSurfaceDtos {
-        let mut out = MacroSurfaceDtos::default();
+        let mut out = MacroSurfaceDtos {
+            diagnostics: dtos.diagnostics.clone(),
+            ..Default::default()
+        };
         match kind {
             FrameworkSurfaceKind::Props => out.props = dtos.props.clone(),
             FrameworkSurfaceKind::Emits => out.emits = dtos.emits.clone(),

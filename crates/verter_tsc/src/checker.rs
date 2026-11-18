@@ -37,13 +37,14 @@ use verter_compiler::compile_request::{
 use verter_compiler::standalone::{DirectExecutionInputs, StandaloneCompiler};
 use verter_parser::oxc_parse::StackUnavailable;
 use verter_session::{
-    CompileProfile, CompileTarget, FileLanguage, HostConfig, LanguageRegistry,
+    CompileProfile, CompileTarget, FileLanguage, HostConfig, LanguageRegistry, PublicApiMode,
     PublicApiProjectionError, PublicApiProjectionSubject, UpsertRequest, VerterHost,
 };
 
 use crate::api_check;
 use crate::error_map::map_tsc_position;
 use crate::reporter::{self, Diagnostic, TscDiagnostic};
+use crate::sfc_driver::{ForeignSurface, ForeignSurfaceSource};
 use crate::tsconfig::{simplify_verbatim_path, TsConfig};
 
 /// Options controlling what the checker emits.
@@ -148,9 +149,9 @@ struct PublicApiBatch<T> {
     failures: Vec<PublicApiFailure>,
 }
 
-struct CheckerInvocation {
-    output: String,
-    success: bool,
+pub(crate) struct CheckerInvocation {
+    pub(crate) output: String,
+    pub(crate) success: bool,
 }
 
 /// The `(virtual stub path, stub source)` rows plus the canonical `.vue` path
@@ -180,7 +181,7 @@ fn carrier_language(path: &Path) -> FileLanguage {
         .static_resolution()
 }
 
-fn is_svelte_carrier(path: &Path) -> bool {
+pub(crate) fn is_svelte_carrier(path: &Path) -> bool {
     carrier_language(path).is_svelte()
 }
 
@@ -571,7 +572,7 @@ fn generate_all_tsx(
 /// Column counts UTF-16 code units, matching what the TypeScript engine reports
 /// for every other diagnostic on this rail, so a Verter-native diagnostic and an
 /// engine one point at the same place in an editor.
-fn one_indexed_position(source: &str, offset: usize) -> (u32, u32) {
+pub(crate) fn one_indexed_position(source: &str, offset: usize) -> (u32, u32) {
     let offset = offset.min(source.len());
     let before = &source[..offset];
     let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
@@ -647,14 +648,7 @@ fn generate_all_tsc(
             }
         };
 
-        let raw_name = vue_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Component");
-        let component_name = sanitize_component_name(raw_name);
-        let hash = simple_hash(vue_path.to_string_lossy().as_bytes());
-        let tsc_tsx_name = format!("{component_name}_{hash:016x}.tsc.tsx");
-        let tsc_tsx_path = temp_dir.join(&tsc_tsx_name);
+        let tsc_tsx_path = temp_dir.join(staged_declaration_name(vue_path));
 
         fs::write(&tsc_tsx_path, &code).map_err(|error| {
             api_check::TypecheckError::new(format!(
@@ -673,6 +667,18 @@ fn generate_all_tsc(
         outcomes,
         failures,
     })
+}
+
+/// The stage file name of a carrier's declaration source: unique per carrier
+/// path, with the `.tsc.tsx` suffix post-processing renames.
+fn staged_declaration_name(vue_path: &Path) -> String {
+    let raw_name = vue_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Component");
+    let component_name = sanitize_component_name(raw_name);
+    let hash = simple_hash(vue_path.to_string_lossy().as_bytes());
+    format!("{component_name}_{hash:016x}.tsc.tsx")
 }
 
 /// Give the shared host the project's REAL workspace, so module resolution is
@@ -757,6 +763,103 @@ fn install_project_workspace(host: &VerterHost, root_dir: &Path, tsconfig_path: 
 /// flips both the production host and the discriminating unit test together.
 fn build_host_config() -> HostConfig {
     HostConfig::batch_typecheck()
+}
+
+/// The lane's one host for a selected config, built on first use. It serves
+/// the declaration surfaces another lane's program asks for, and the lane's
+/// own check later reuses it. The host's upsert decides whether a source
+/// changed, so an unchanged carrier is not ingested again.
+pub struct SvelteSurfaces {
+    root_dir: PathBuf,
+    tsconfig_path: PathBuf,
+    host: std::sync::OnceLock<VerterHost>,
+}
+
+impl SvelteSurfaces {
+    #[must_use]
+    pub fn new(root_dir: &Path, tsconfig_path: &Path) -> Self {
+        Self {
+            root_dir: root_dir.to_path_buf(),
+            tsconfig_path: tsconfig_path.to_path_buf(),
+            host: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn host(&self) -> &VerterHost {
+        self.host.get_or_init(|| {
+            let host = VerterHost::new_standalone(build_host_config());
+            install_project_workspace(&host, &self.root_dir, &self.tsconfig_path);
+            host
+        })
+    }
+
+    /// Upsert every carrier of `sources` into the host.
+    fn ingest(&self, sources: &[(&Path, &str)]) -> Result<(), api_check::TypecheckError> {
+        let inputs = sources
+            .iter()
+            .map(|(path, source)| {
+                let canonical_id = canonical_path_id(path);
+                UpsertRequest {
+                    canonical_id: Some(canonical_id.clone()),
+                    input_id: canonical_id,
+                    source: std::sync::Arc::<str>::from(*source),
+                    file_language: carrier_language(path),
+                    aliases: Vec::new(),
+                }
+            })
+            .collect();
+        let outcomes = self
+            .host()
+            .upsert_many_for_compile(inputs, verter_session::Priority::Background);
+        for (outcome, (path, _)) in outcomes.into_iter().zip(sources) {
+            outcome.result.map_err(|error| {
+                api_check::TypecheckError::new(format!(
+                    "verter-tsc: failed to ingest carrier source {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl ForeignSurfaceSource for SvelteSurfaces {
+    /// Each carrier's declaration surface at its descriptor-owned path. A
+    /// carrier the lane cannot render gets no text; its own check reports why.
+    fn surfaces(&self, carriers: &[PathBuf]) -> Vec<ForeignSurface> {
+        let sources = carriers
+            .iter()
+            .filter_map(|carrier| Some((carrier.as_path(), fs::read_to_string(carrier).ok()?)))
+            .collect::<Vec<_>>();
+        let read = sources
+            .iter()
+            .map(|(path, source)| (*path, source.as_str()))
+            .collect::<Vec<_>>();
+        let ingested = self.ingest(&read).is_ok();
+        let host = self.host();
+        carriers
+            .iter()
+            .filter_map(|carrier| {
+                let canonical_id = canonical_path_id(carrier);
+                let path = host.declaration_carrier_path(&canonical_id)?;
+                let text = ingested
+                    .then(|| {
+                        host.get_public_api_with_mode(
+                            &canonical_id,
+                            PublicApiMode::Declaration,
+                            None,
+                        )
+                    })
+                    .and_then(|response| response.ok().flatten())
+                    .map(|response| response.code_for_companion_path(&path).clone());
+                Some(ForeignSurface {
+                    carrier: carrier.clone(),
+                    path,
+                    text,
+                })
+            })
+            .collect()
+    }
 }
 
 /// Which carrier sources this run will generate companions for, and why the
@@ -851,6 +954,21 @@ pub fn run(
     opts: &EmitOptions,
     tsgo_bin: Option<&Path>,
 ) -> Result<CheckResult, api_check::TypecheckError> {
+    let lane = SvelteSurfaces::new(&config.root_dir, tsconfig_path);
+    run_with(&lane, config, tsconfig_path, opts, tsgo_bin, &[])
+}
+
+/// [`run`] on `lane`'s host, which may already hold carriers, with the
+/// `foreign` surfaces another lane's program owns served at their paths. A
+/// carrier import of one of them resolves to it.
+pub fn run_with(
+    lane: &SvelteSurfaces,
+    config: &TsConfig,
+    tsconfig_path: &Path,
+    opts: &EmitOptions,
+    tsgo_bin: Option<&Path>,
+    foreign: &[ForeignSurface],
+) -> Result<CheckResult, api_check::TypecheckError> {
     if config.vue_files.is_empty() {
         return Ok(CheckResult {
             diagnostics: Vec::new(),
@@ -877,10 +995,8 @@ pub fn run(
 
     // ONE shared VerterHost (Batch preset): upsert every `.vue` once. Both stages
     // build from it — the typecheck overlay carriers and the declaration `.tsc.tsx`.
-    let host = VerterHost::new_standalone(build_host_config());
-    install_project_workspace(&host, &config.root_dir, tsconfig_path);
     let mut admission = CarrierAdmission::default();
-    let mut inputs = Vec::with_capacity(config.vue_files.len());
+    let mut sources = Vec::with_capacity(config.vue_files.len());
     for vue_path in &config.vue_files {
         let source = fs::read_to_string(vue_path).map_err(|error| {
             api_check::TypecheckError::new(format!(
@@ -889,24 +1005,16 @@ pub fn run(
             ))
         })?;
         admission.admit(vue_path, &source);
-        let canonical_id = canonical_path_id(vue_path);
-        inputs.push(UpsertRequest {
-            canonical_id: Some(canonical_id.clone()),
-            input_id: canonical_id,
-            source: std::sync::Arc::<str>::from(source),
-            file_language: carrier_language(vue_path),
-            aliases: Vec::new(),
-        });
+        sources.push((vue_path.as_path(), source));
     }
-    let outcomes = host.upsert_many_for_compile(inputs, verter_session::Priority::Background);
-    for (outcome, vue_path) in outcomes.into_iter().zip(&config.vue_files) {
-        outcome.result.map_err(|error| {
-            api_check::TypecheckError::new(format!(
-                "verter-tsc: failed to ingest carrier source {}: {error}",
-                vue_path.display()
-            ))
-        })?;
-    }
+    lane.ingest(
+        &sources
+            .iter()
+            .map(|(path, source)| (*path, source.as_str()))
+            .collect::<Vec<_>>(),
+    )?;
+    drop(sources);
+    let host = lane.host();
 
     // ── Typecheck stage: in-memory tsgo `--api` (the `--noEmit` diagnostic set). ──
     // A hard failure here (engine absent / connect / protocol) aborts the whole run
@@ -916,12 +1024,13 @@ pub fn run(
     // all, so nothing of it is ever handed to the engine; its refusal
     // diagnostic leads the report.
     let in_memory = run_inmemory_typecheck(
-        &host,
+        host,
         config,
         &admission.admitted,
         tsconfig_path,
         tsgo_bin,
         prepared,
+        foreign,
     )?;
     let mut diagnostics = admission.refusals.clone();
     diagnostics.extend(in_memory.batch.value);
@@ -951,7 +1060,7 @@ pub fn run(
             Vec::new()
         } else {
             let (decl_diagnostics, emitted, declaration_failures) = run_declaration_stage(
-                &host,
+                host,
                 config,
                 &vue_declaration,
                 tsconfig_path,
@@ -1273,18 +1382,16 @@ fn engine_request(
     Ok(request)
 }
 
-fn resolve_tsgo_engine(
+pub(crate) fn resolve_tsgo_engine(
     root: &Path,
     requirement: verter_tsgo_api::toolchain::validation::Capability,
     explicit: Option<&Path>,
-) -> Result<PathBuf, String> {
+) -> Result<verter_tsgo_api::toolchain::discovery::Resolution, String> {
     if let Some(flag_path) = explicit {
         return resolve_explicit_engine(root, flag_path, requirement);
     }
     let request = engine_request(root, requirement, None)?;
-    resolve_tsgo_engine_for(&request)
-        .map(|resolution| resolution.path)
-        .map_err(|e| render_resolve_failure(&e))
+    resolve_tsgo_engine_for(&request).map_err(|e| render_resolve_failure(&e))
 }
 
 /// Validate an explicitly-named `--tsgo-bin` engine and return it — or a hard
@@ -1296,13 +1403,13 @@ fn resolve_explicit_engine(
     root: &Path,
     flag_path: &Path,
     requirement: verter_tsgo_api::toolchain::validation::Capability,
-) -> Result<PathBuf, String> {
+) -> Result<verter_tsgo_api::toolchain::discovery::Resolution, String> {
     use verter_tsgo_api::toolchain::discovery::ResolveError;
     use verter_tsgo_api::toolchain::policy::SUPPORTED_TSGO_RANGE_LABEL;
 
     let request = engine_request(root, requirement, Some(flag_path))?;
     match resolve_tsgo_engine_for(&request) {
-        Ok(resolution) => Ok(resolution.path),
+        Ok(resolution) => Ok(resolution),
         Err(ResolveError::NoUsableCandidate {
             rejections, notes, ..
         }) => {
@@ -1371,7 +1478,7 @@ fn render_resolve_failure(error: &verter_tsgo_api::toolchain::discovery::Resolve
 /// The injectable seam of [`resolve_tsgo_engine`]: the full capability-validated
 /// resolution over an EXPLICIT request (tests drive it without touching the
 /// process environment).
-fn resolve_tsgo_engine_for(
+pub(crate) fn resolve_tsgo_engine_for(
     request: &verter_tsgo_api::toolchain::discovery::ResolutionRequest,
 ) -> Result<
     verter_tsgo_api::toolchain::discovery::Resolution,
@@ -1414,6 +1521,7 @@ fn run_inmemory_typecheck(
     tsconfig_path: &Path,
     tsgo_bin: Option<&Path>,
     prepared: api_check::PreparedEngine,
+    foreign: &[ForeignSurface],
 ) -> Result<InMemoryTypecheck, api_check::TypecheckError> {
     let root = simplify_verbatim_path(&config.root_dir).into_owned();
 
@@ -1429,7 +1537,7 @@ fn run_inmemory_typecheck(
             verter_tsgo_api::toolchain::validation::Capability::Api,
             tsgo_bin,
         )
-        .map(|p| simplify_verbatim_path(&p).into_owned())
+        .map(|resolution| simplify_verbatim_path(&resolution.path).into_owned())
         .map_err(|e| {
             api_check::TypecheckError::new(format!(
                 "verter-tsc: {e}\n(There is no tsc fallback for the typecheck path.)"
@@ -1446,7 +1554,8 @@ fn run_inmemory_typecheck(
     // Generate the validation carriers IN-MEMORY, rooted at deterministic
     // in-project virtual paths (so node_modules resolution walks from the root).
     let stubs = generate_public_api_stubs(host, admitted, &root);
-    let (mut stub_files, vue_ts_map) = stubs.value;
+    let (mut stub_files, mut vue_ts_map) = stubs.value;
+    route_foreign_surfaces(&mut vue_ts_map, foreign);
     // The stubs reference each OTHER: a component whose root is another
     // component names that child's carrier to carry its declared props onto the
     // parent-facing surface. Those specifiers are Verter's own generated
@@ -1507,6 +1616,8 @@ fn run_inmemory_typecheck(
             },
         });
     }
+    // Served for the imports routed to them, never as roots of this program.
+    overlay_files.extend(serve_foreign_surfaces(foreign, &vue_ts_map));
 
     // Synthetic tsconfig: byte-identical to the temp-file validation config (same
     // `synthetic_tsconfig_value` builder), served in-memory at a virtual in-project
@@ -1603,69 +1714,181 @@ fn run_declaration_stage(
     opts: &EmitOptions,
     tsgo_bin: Option<&Path>,
 ) -> Result<DeclarationStageResult, api_check::TypecheckError> {
-    // The temp dir MUST be inside the project root so tsc resolves node_modules
-    // (e.g. `import("vue")`) from the generated `.tsc.tsx` files.
-    let temp_dir = TempDir::new_in(&config.root_dir).map_err(|e| {
+    let (temp_dir, decl_dir) = declaration_stage_dirs(&config.root_dir, "_tsc")?;
+    // Minimal macro-only `.tsc.tsx` carriers (declaration codegen), on disk.
+    let declaration_batch = generate_all_tsc(host, admitted, &decl_dir)?;
+    let (diagnostics, emitted) = emit_staged_declarations(
+        &temp_dir,
+        &declaration_batch.value,
+        &config.root_dir,
+        &config.ts_files,
+        tsconfig_path,
+        opts,
+        tsgo_bin,
+    )?;
+    Ok((diagnostics, emitted, declaration_batch.failures))
+}
+
+/// The stage's temp directory and the directory `name` inside it, where the
+/// staged sources go. The temp dir MUST be inside the project root so tsc
+/// resolves node_modules (e.g. `import("vue")`) from the staged files.
+pub(crate) fn declaration_stage_dirs(
+    root_dir: &Path,
+    name: &str,
+) -> Result<(TempDir, PathBuf), api_check::TypecheckError> {
+    let temp_dir = TempDir::new_in(root_dir).map_err(|e| {
         api_check::TypecheckError::new(format!(
             "verter-tsc: failed to create temp directory for declaration emit in {}: {e}",
-            config.root_dir.display()
+            root_dir.display()
         ))
     })?;
-
-    // Minimal macro-only `.tsc.tsx` carriers (declaration codegen), on disk.
-    let decl_dir = temp_dir.path().join("_tsc");
+    let decl_dir = temp_dir.path().join(name);
     fs::create_dir_all(&decl_dir).map_err(|error| {
         api_check::TypecheckError::new(format!(
             "verter-tsc: failed to create declaration carrier directory {}: {error}",
             decl_dir.display()
         ))
     })?;
-    let declaration_batch = generate_all_tsc(host, admitted, &decl_dir)?;
-    let declaration_generated = declaration_batch.value;
+    Ok((temp_dir, decl_dir))
+}
 
+/// The engine run, remap and post-processing over staged
+/// `(carrier, staged text, staged path)` rows.
+fn emit_staged_declarations(
+    temp_dir: &TempDir,
+    declaration_generated: &[(PathBuf, String, PathBuf)],
+    root_dir: &Path,
+    ts_files: &[PathBuf],
+    tsconfig_path: &Path,
+    opts: &EmitOptions,
+    tsgo_bin: Option<&Path>,
+) -> Result<(Vec<Diagnostic>, Vec<PathBuf>), api_check::TypecheckError> {
     // vue-shims so the checker resolves `import X from '*.vue'`.
-    let shims_path = temp_dir.path().join("vue-shims.d.ts");
+    let shims_path = write_declaration_shim(temp_dir.path())?;
+
+    // Declaration file set + the `.tsc.tsx` → `.vue` source-map remap table.
+    let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
+    let mut tsc_tsx_paths: Vec<PathBuf> = vec![shims_path];
+    for (vue_path, tsc_code, tsc_tsx_path) in declaration_generated {
+        tsx_to_vue.insert(
+            staged_file_key(tsc_tsx_path),
+            (vue_path.clone(), tsc_code.clone()),
+        );
+        tsc_tsx_paths.push(tsc_tsx_path.clone());
+    }
+    // When emitting declarations, the checker needs the original `.ts` files too.
+    for ts_path in ts_files {
+        tsc_tsx_paths.push(ts_path.clone());
+    }
+
+    let mut run = run_declaration_engine(
+        temp_dir.path(),
+        &tsc_tsx_paths,
+        root_dir,
+        tsconfig_path,
+        opts,
+        tsgo_bin,
+    )?;
+    let diagnostics = remap_diagnostics(std::mem::take(&mut run.raw), &tsx_to_vue);
+    run.refuse_silent_failure(&diagnostics)?;
+
+    // Post-process: rename `.tsc.tsx.d.ts` → `.vue.d.ts`. Always run, even when the
+    // checker exits with errors: it emits `.d.ts` for non-erroring files
+    // (noEmitOnError: false), so skipping would leave 0 `.vue.d.ts` files.
+    if let Some(decl_dir_out) = &opts.declaration_dir {
+        postprocess_vue_declarations(decl_dir_out, declaration_generated, root_dir);
+    }
+    let emitted = opts
+        .declaration_dir
+        .as_ref()
+        .map(|d| collect_dts_files(d))
+        .unwrap_or_default();
+
+    Ok((diagnostics, emitted))
+}
+
+/// Write the ambient `*.vue` module the declaration program reads for a
+/// carrier it has no staged source for. Returns its path.
+pub(crate) fn write_declaration_shim(
+    temp_dir: &Path,
+) -> Result<PathBuf, api_check::TypecheckError> {
+    let shims_path = temp_dir.join("vue-shims.d.ts");
     fs::write(&shims_path, VUE_SHIMS_DTS).map_err(|error| {
         api_check::TypecheckError::new(format!(
             "verter-tsc: failed to write declaration shim {}: {error}",
             shims_path.display()
         ))
     })?;
+    Ok(shims_path)
+}
 
-    // Declaration file set + the `.tsc.tsx` → `.vue` source-map remap table.
-    let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
-    let mut tsc_tsx_paths: Vec<PathBuf> = vec![shims_path];
-    for (vue_path, tsc_code, tsc_tsx_path) in &declaration_generated {
-        let canon = simplify_verbatim_path(
-            &tsc_tsx_path
-                .canonicalize()
-                .unwrap_or_else(|_| tsc_tsx_path.clone()),
-        )
-        .into_owned();
-        tsx_to_vue.insert(
-            canon.to_string_lossy().replace('\\', "/"),
-            (vue_path.clone(), tsc_code.clone()),
-        );
-        tsc_tsx_paths.push(tsc_tsx_path.clone());
-    }
-    // When emitting declarations, the checker needs the original `.ts` files too.
-    for ts_path in &config.ts_files {
-        tsc_tsx_paths.push(ts_path.clone());
-    }
+/// The key a staged file's diagnostics are looked up by: its path resolved
+/// against disk, spelled as [`diagnostic_file_key`] spells a reported one.
+pub(crate) fn staged_file_key(path: &Path) -> String {
+    diagnostic_file_key(&path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
 
+/// One declaration-program run of the engine: its raw diagnostics and
+/// whether it exited cleanly.
+pub(crate) struct DeclarationEngineRun {
+    pub(crate) raw: Vec<TscDiagnostic>,
+    success: bool,
+    checker_bin: PathBuf,
+}
+
+impl DeclarationEngineRun {
+    /// FAIL-CLOSED: an engine that exited in error and produced NO parseable
+    /// diagnostics did not typecheck or emit anything. That is an engine
+    /// failure, not a clean run: it surfaces (non-zero exit) rather than an
+    /// empty diagnostic set with zero declarations, a broken engine
+    /// masquerading as a successful emit. `diagnostics` are the run's
+    /// diagnostics after remapping.
+    pub(crate) fn refuse_silent_failure(
+        &self,
+        diagnostics: &[Diagnostic],
+    ) -> Result<(), api_check::TypecheckError> {
+        if !self.success && diagnostics.is_empty() {
+            return Err(api_check::TypecheckError::new(format!(
+                "verter-tsc: declaration stage failed: the engine at {} exited in error \
+                 producing no diagnostics and no declarations — the declaration emit did \
+                 not run (fail-closed: a failed emit is never a silent success)",
+                self.checker_bin.display()
+            )));
+        }
+        if !self.success {
+            eprintln!(
+                "verter-tsc: declaration stage had errors; post-processing emitted declarations anyway"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Run the engine's declaration program over `files` with the project's own
+/// options (`tsconfig_path`) and `rootDir` set to `root_dir`, writing under
+/// `opts.declaration_dir`.
+pub(crate) fn run_declaration_engine(
+    temp_dir: &Path,
+    files: &[PathBuf],
+    root_dir: &Path,
+    tsconfig_path: &Path,
+    opts: &EmitOptions,
+    tsgo_bin: Option<&Path>,
+) -> Result<DeclarationEngineRun, api_check::TypecheckError> {
     // Resolve the checker for the temp-file path through the SAME first-working,
     // capability-VALIDATED resolver as the typecheck stage. `Capability::Lsp`
     // is the closest validated surface to the CLI-compiler invocation: it
     // proves the binary spawns and completes a real handshake, so a candidate
     // that merely answers `--version` can no longer mask a working one. A
     // resolution failure is a HARD failure (fail-closed).
-    let root = simplify_verbatim_path(&config.root_dir).into_owned();
+    let root = simplify_verbatim_path(root_dir).into_owned();
     let checker_bin = match resolve_tsgo_engine(
         &root,
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
         tsgo_bin,
     ) {
-        Ok(path) => {
+        Ok(resolution) => {
+            let path = resolution.path;
             eprintln!(
                 "verter-tsc: declaration emit using tsgo at {}",
                 path.display()
@@ -1684,14 +1907,8 @@ fn run_declaration_stage(
         declaration: true,
         declaration_dir: opts.declaration_dir.clone(),
     };
-    let decl_tsconfig = write_temp_tsconfig(
-        temp_dir.path(),
-        tsconfig_path,
-        &tsc_tsx_paths,
-        &decl_opts,
-        &config.root_dir,
-    )
-    .map_err(|e| {
+    let decl_tsconfig = write_temp_tsconfig(temp_dir, tsconfig_path, files, &decl_opts, root_dir)
+        .map_err(|e| {
         api_check::TypecheckError::new(format!(
             "verter-tsc: failed to write declaration tsconfig: {e}"
         ))
@@ -1701,42 +1918,11 @@ fn run_declaration_stage(
         api_check::TypecheckError::new(format!("verter-tsc: declaration stage failed: {e}"))
     })?;
 
-    let raw_diags = reporter::parse_tsc_output(&invocation.output);
-    let diagnostics = remap_diagnostics(raw_diags, &tsx_to_vue);
-
-    if !invocation.success && diagnostics.is_empty() {
-        // FAIL-CLOSED: the engine exited in error and produced NO parseable
-        // diagnostics — it did not typecheck/emit anything. This is an engine
-        // failure, not a clean run: surface it (non-zero exit) rather than
-        // returning an empty diagnostic set + zero declarations (a broken
-        // engine masquerading as a successful emit).
-        return Err(api_check::TypecheckError::new(format!(
-            "verter-tsc: declaration stage failed: the engine at {} exited in error \
-             producing no diagnostics and no declarations — the declaration emit did \
-             not run (fail-closed: a failed emit is never a silent success)",
-            checker_bin.display()
-        )));
-    }
-
-    if !invocation.success {
-        eprintln!(
-            "verter-tsc: declaration stage had errors; post-processing emitted declarations anyway"
-        );
-    }
-
-    // Post-process: rename `.tsc.tsx.d.ts` → `.vue.d.ts`. Always run, even when the
-    // checker exits with errors: it emits `.d.ts` for non-erroring files
-    // (noEmitOnError: false), so skipping would leave 0 `.vue.d.ts` files.
-    if let Some(decl_dir_out) = &opts.declaration_dir {
-        postprocess_vue_declarations(decl_dir_out, &declaration_generated, &config.root_dir);
-    }
-    let emitted = opts
-        .declaration_dir
-        .as_ref()
-        .map(|d| collect_dts_files(d))
-        .unwrap_or_default();
-
-    Ok((diagnostics, emitted, declaration_batch.failures))
+    Ok(DeclarationEngineRun {
+        raw: reporter::parse_tsc_output(&invocation.output),
+        success: invocation.success,
+        checker_bin,
+    })
 }
 
 /// The bound on one declaration-stage engine invocation. On expiry the engine
@@ -1781,20 +1967,7 @@ fn build_checker_command(
     tsconfig_path: &Path,
     opts: &EmitOptions,
 ) -> std::process::Command {
-    let mut cmd = if cfg!(target_os = "windows")
-        && !reporter::is_native_binary(checker_bin)
-        && checker_bin
-            .extension()
-            .map(|e| e.eq_ignore_ascii_case("cmd"))
-            .unwrap_or(false)
-    {
-        let mut c = std::process::Command::new("cmd.exe");
-        c.arg("/C").arg(checker_bin);
-        c
-    } else {
-        std::process::Command::new(checker_bin)
-    };
-
+    let mut cmd = checker_base_command(checker_bin);
     cmd.arg("--project")
         .arg(simplify_verbatim_path(tsconfig_path).as_ref());
     if opts.no_emit {
@@ -1810,6 +1983,23 @@ fn build_checker_command(
     cmd
 }
 
+/// Platform-aware engine command, shared by project checking and builds.
+pub(crate) fn checker_base_command(checker_bin: &Path) -> std::process::Command {
+    if cfg!(target_os = "windows")
+        && !reporter::is_native_binary(checker_bin)
+        && checker_bin
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("cmd"))
+            .unwrap_or(false)
+    {
+        let mut c = std::process::Command::new("cmd.exe");
+        c.arg("/C").arg(checker_bin);
+        c
+    } else {
+        std::process::Command::new(checker_bin)
+    }
+}
+
 /// The bound-injectable core of [`invoke_checker`] (tests drive a wedged engine
 /// against a short bound).
 fn invoke_checker_bounded(
@@ -1818,9 +2008,17 @@ fn invoke_checker_bounded(
     opts: &EmitOptions,
     bound: std::time::Duration,
 ) -> Result<CheckerInvocation, String> {
-    use verter_tsgo_api::process::{configure_tree_spawn_std, TreeKill};
+    let cmd = build_checker_command(checker_bin, tsconfig_path, opts);
+    invoke_command_bounded(cmd, &checker_bin.display().to_string(), bound)
+}
 
-    let mut cmd = build_checker_command(checker_bin, tsconfig_path, opts);
+/// Invoke one engine command with the shared process-tree and pipe bounds.
+pub(crate) fn invoke_command_bounded(
+    mut cmd: std::process::Command,
+    label: &str,
+    bound: std::time::Duration,
+) -> Result<CheckerInvocation, String> {
+    use verter_tsgo_api::process::{configure_tree_spawn_std, TreeKill};
 
     // Spawn with piped I/O and drain stdout/stderr in background threads to
     // avoid deadlock (child blocks on full pipe buffer if we don't read). The
@@ -1830,7 +2028,7 @@ fn invoke_checker_bounded(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("failed to run {}: {e}", checker_bin.display()))?;
+        .map_err(|e| format!("failed to run {label}: {e}"))?;
     let tree = TreeKill::arm(child.id());
 
     let stdout = child.stdout.take().unwrap();
@@ -2019,6 +2217,13 @@ fn synthetic_tsconfig_value(
     });
     // Validation (typecheck) uses TSX files that contain JSX syntax.
     // Standard Vue TSX config: `jsx: "react-jsx"` + `jsxImportSource: "vue"`.
+    if opts.declaration {
+        // The declaration program is temporary: it writes no build metadata
+        // where an inherited `incremental` / `tsBuildInfoFile` would put it,
+        // outside the staged declaration directory.
+        compiler_options["incremental"] = serde_json::json!(false);
+        compiler_options["tsBuildInfoFile"] = serde_json::json!(null);
+    }
     if !opts.declaration {
         compiler_options["jsx"] = serde_json::json!("react-jsx");
         compiler_options["jsxImportSource"] = serde_json::json!("vue");
@@ -2082,7 +2287,7 @@ fn synthetic_tsconfig_value(
 /// Resolution against disk stays in the CALLER: this is the pure derivation, so
 /// the UNC branch is exercised without a `canonicalize()` that would attempt a
 /// real SMB/DNS round trip on Windows.
-fn diagnostic_file_key(resolved: &Path) -> String {
+pub(crate) fn diagnostic_file_key(resolved: &Path) -> String {
     simplify_verbatim_path(resolved)
         .to_string_lossy()
         .replace('\\', "/")
@@ -2191,7 +2396,7 @@ pub(crate) fn is_vue_jsx_type_gap(ts_code: u32, message: &str) -> bool {
 /// These are config-level warnings (e.g. TS5102 "baseUrl removed", TS5090 "non-relative paths")
 /// that come from settings inherited from the user's tsconfig. They're not actionable for
 /// the user because they originate from verter-tsc's internal temp config.
-fn is_temp_tsconfig_error(d: &TscDiagnostic) -> bool {
+pub(crate) fn is_temp_tsconfig_error(d: &TscDiagnostic) -> bool {
     d.file.contains("verter-tsc-") && d.file.ends_with(".tsconfig.json")
 }
 
@@ -2304,35 +2509,21 @@ fn canonicalize_nonrelative_carrier_specifiers(
 ///
 /// A parse or walk refused its stack is the typed refusal: the inventory is
 /// unknown, not empty, and the code is not served.
-fn rewrite_import_specifiers(
+pub(crate) fn rewrite_import_specifiers(
     code: &str,
     rewrite: impl Fn(&str) -> Option<String>,
 ) -> Result<String, StackUnavailable> {
     let Some(spans) = verter_compiler::tsc::collect_module_specifier_spans(code)? else {
         return Ok(code.to_string());
     };
-    let mut result = String::with_capacity(code.len());
-    let mut cursor = 0usize;
-    for span in spans {
-        let Some(replacement) = rewrite(&span.text) else {
-            continue;
-        };
-        result.push_str(&code[cursor..span.start]);
-        // Re-emit the WHOLE literal rather than splicing into it: the recorded
-        // text is the specifier's decoded value, so an escaped one (a Windows
-        // `'..\\x'`) round-trips instead of being corrupted or skipped.
-        result.push_str(&verter_compiler::tsc::quote_module_specifier(
-            &replacement,
-            span.quote,
-        ));
-        cursor = span.end;
-    }
-    result.push_str(&code[cursor..]);
-    Ok(result)
+    // The rewrite's map is unused here: the generated carriers carry their own.
+    verter_compiler::tsc::rewrite_module_specifiers(code, &spans, rewrite, None)
+        .map(|rewritten| rewritten.text)
+        .or_else(|_| Ok(code.to_string()))
 }
 
 /// The absolute form of a RELATIVE specifier, or `None` for every other class.
-fn absolutize_relative_specifier(import_path: &str, vue_dir: &Path) -> Option<String> {
+pub(crate) fn absolutize_relative_specifier(import_path: &str, vue_dir: &Path) -> Option<String> {
     // Relative classification is the full TS `pathIsRelative` class (bare
     // `.`/`..` plus the `./`/`../`/`.\`/`..\` prefixes) — the SAME shared
     // predicate the workspace resolver uses. A narrower `./`/`../` prefix
@@ -2444,6 +2635,53 @@ fn lower_tsc_validation_carrier_specifiers(
     }
 
     lower_carrier_specifiers_in_module_positions(code, vue_ts_map)
+}
+
+/// Route each served `foreign` surface's carrier to the surface path in the
+/// map [`lower_tsc_validation_carrier_specifiers`] reads, so a carrier import
+/// of another lane's member resolves to the surface that lane's program
+/// owns. A carrier this lane already projects keeps its own entry.
+fn route_foreign_surfaces(vue_ts_map: &mut HashMap<String, PathBuf>, foreign: &[ForeignSurface]) {
+    for surface in foreign.iter().filter(|surface| surface.text.is_some()) {
+        vue_ts_map
+            .entry(canonical_path_id(&surface.carrier))
+            .or_insert_with(|| PathBuf::from(&surface.path));
+    }
+}
+
+/// The overlay files for the rendered `foreign` surfaces. Each is served at
+/// its own path beside its carrier. Its relative specifiers are joined to
+/// its carrier by the shared relative-path owner (so `../` segments resolve
+/// to the canonical path), and its carrier imports are then lowered through
+/// `vue_ts_map` as this lane's stubs are, so a member it imports (this
+/// lane's or the other lane's) keeps its real type instead of the wildcard
+/// shim. A surface whose specifier inventory refused its stack is served as
+/// rendered: its own carrier imports then fall back to the wildcard shim,
+/// and nothing in it is rewritten on a guess.
+fn serve_foreign_surfaces(
+    foreign: &[ForeignSurface],
+    vue_ts_map: &HashMap<String, PathBuf>,
+) -> Vec<api_check::OverlayFile> {
+    foreign
+        .iter()
+        .filter_map(|surface| {
+            let text = surface.text.as_deref()?;
+            let importer = canonical_path_id(&surface.carrier);
+            let joined = rewrite_import_specifiers(text, |specifier| {
+                verter_session_query::resolution::is_relative_specifier(specifier)
+                    .then(|| verter_workspace::relative_path::join_relative(&importer, specifier))
+            });
+            let content = match joined {
+                Ok(code) => lower_tsc_validation_carrier_specifiers(&code, vue_ts_map),
+                Err(_) => text.to_string(),
+            };
+            Some(api_check::OverlayFile {
+                path: surface.path.clone(),
+                content,
+                remap: api_check::RemapKind::ForeignSurface,
+            })
+        })
+        .collect()
 }
 
 /// What a freshly-read `import`/`export` keyword is waiting to consume next.
@@ -3093,11 +3331,11 @@ fn postprocess_vue_declarations(
         import_rewrite_map.insert(tsx_stem, rel.to_string_lossy().replace('\\', "/"));
     }
 
-    // Scan declarationDir recursively for .tsc.tsx.d.ts files.
+    // Scan declarationDir recursively for the declarations of staged files.
     let entries: Vec<PathBuf> = walkdir::WalkDir::new(decl_dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".tsc.tsx.d.ts"))
+        .filter(|e| rename_map.contains_key(e.file_name().to_string_lossy().as_ref()))
         .map(|e| e.into_path())
         .collect();
 
@@ -3264,7 +3502,7 @@ fn rewrite_single_import_path(
 /// Compute a relative path from `from_dir` to `to_path`.
 ///
 /// Both inputs should use forward slashes. Returns a path starting with `./` or `../`.
-fn compute_relative_path(from_dir: &str, to_path: &str) -> String {
+pub(crate) fn compute_relative_path(from_dir: &str, to_path: &str) -> String {
     let from_parts: Vec<&str> = from_dir.split('/').filter(|s| !s.is_empty()).collect();
     let to_parts: Vec<&str> = to_path.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -4106,7 +4344,7 @@ exit 2
             "the decoy must pass the shared resolver's version + Lsp capability smoke — \
              otherwise this fixture's PATH is not hostile and discriminates nothing",
         );
-        let ambient_norm = ambient.to_string_lossy().replace('\\', "/");
+        let ambient_norm = ambient.path.to_string_lossy().replace('\\', "/");
         let decoy_norm = decoy.to_string_lossy().replace('\\', "/");
         assert_eq!(
             ambient_norm, decoy_norm,
@@ -5176,6 +5414,122 @@ import _ from "lodash";"#;
             lower_tsc_validation_carrier_specifiers(dts, &map),
             dts,
             "a non-carrier `.d.ts` import must be unchanged"
+        );
+    }
+
+    /// A Svelte file's import of a Vue member, bare or in its IDE probe form,
+    /// lowers to the checking path the other lane serves. A surface that
+    /// lane could not render leaves the import to the wildcard shim, and a
+    /// carrier this lane projects keeps its own stub.
+    #[test]
+    fn a_svelte_import_of_a_vue_member_is_routed_to_its_checking_path() {
+        let child = canonical_path_id(Path::new("/ws/src/Child.vue"));
+        let gone = canonical_path_id(Path::new("/ws/src/Gone.vue"));
+        let own = canonical_path_id(Path::new("/ws/src/Own.vue"));
+        let surface = |carrier: &str, text: Option<&str>| ForeignSurface {
+            carrier: PathBuf::from(carrier),
+            path: format!("{carrier}.ts"),
+            text: text.map(std::sync::Arc::from),
+        };
+        let mut map = HashMap::new();
+        map.insert(own.clone(), PathBuf::from("/tmp/Own_abc.vue.ts"));
+        route_foreign_surfaces(
+            &mut map,
+            &[
+                surface(child.as_str(), Some("export default {};")),
+                surface(gone.as_str(), None),
+                surface(own.as_str(), Some("export default {};")),
+            ],
+        );
+        let code = format!(
+            "import Child from \"{child}\";\nimport Probe from \"{child}.tsx\";\nimport Gone from \"{gone}\";\nimport Own from \"{own}\";\n"
+        );
+        assert_eq!(
+            lower_tsc_validation_carrier_specifiers(&code, &map),
+            format!(
+                "import Child from \"{child}.ts\";\nimport Probe from \"{child}.ts\";\nimport Gone from \"{gone}\";\nimport Own from \"/tmp/Own_abc.vue.ts\";\n"
+            )
+        );
+    }
+
+    /// A Vue surface served to this lane keeps the real types of the members
+    /// it imports, from its own directory or a parent one: its `.svelte`
+    /// import reaches this lane's stub and its `.vue` import reaches the other
+    /// surface. An unknown carrier, a package import and a surface with no
+    /// text are left alone.
+    #[test]
+    fn a_vue_surface_keeps_the_types_of_the_members_it_imports() {
+        let mut map = HashMap::new();
+        map.insert(
+            "/ws/src/Counter.svelte".to_string(),
+            PathBuf::from("/tmp/Counter_abc.svelte.ts"),
+        );
+        let surface = |carrier: &str, text: Option<&str>| ForeignSurface {
+            carrier: PathBuf::from(carrier),
+            path: format!("{carrier}.ts"),
+            text: text.map(std::sync::Arc::from),
+        };
+        let foreign = [
+            surface(
+                "/ws/src/ui/Wrapper.vue",
+                Some(concat!(
+                    "import Counter from \"../Counter.svelte\";\n",
+                    "import Child from \"../Child.vue\";\n",
+                    "import Local from \"./Local.vue\";\n",
+                    "import { ref } from \"vue\";\n",
+                )),
+            ),
+            surface("/ws/src/Child.vue", Some("export default {};\n")),
+            surface("/ws/src/Gone.vue", None),
+        ];
+        route_foreign_surfaces(&mut map, &foreign);
+        let served = serve_foreign_surfaces(&foreign, &map);
+        assert_eq!(
+            served
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/ws/src/ui/Wrapper.vue.ts", "/ws/src/Child.vue.ts"]
+        );
+        assert_eq!(
+            served[0].content,
+            concat!(
+                "import Counter from \"/tmp/Counter_abc.svelte.ts\";\n",
+                "import Child from \"/ws/src/Child.vue.ts\";\n",
+                "import Local from \"/ws/src/ui/Local.vue\";\n",
+                "import { ref } from \"vue\";\n",
+            )
+        );
+        assert!(served
+            .iter()
+            .all(|file| matches!(file.remap, api_check::RemapKind::ForeignSurface)));
+    }
+
+    /// A carrier whose source changed is ingested again, so a later surface
+    /// request renders the new source, not the one first ingested.
+    #[test]
+    fn a_changed_svelte_carrier_renders_its_new_surface() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = simplify_verbatim_path(&temp.path().canonicalize().unwrap()).into_owned();
+        let config = root.join("tsconfig.json");
+        std::fs::write(&config, "{\"include\":[\"*.svelte\"]}").unwrap();
+        let counter = root.join("Counter.svelte");
+        let props = |kind: &str| {
+            format!("<script lang=\"ts\">\n  let {{ count }}: {{ count: {kind} }} = $props();\n</script>\n\n<p>{{count}}</p>\n")
+        };
+        let lane = SvelteSurfaces::new(&root, &config);
+        let render = || {
+            let surfaces = lane.surfaces(std::slice::from_ref(&counter));
+            assert_eq!(surfaces.len(), 1);
+            surfaces[0].text.clone().expect("the surface renders")
+        };
+        std::fs::write(&counter, props("number")).unwrap();
+        let first = render();
+        std::fs::write(&counter, props("string")).unwrap();
+        let second = render();
+        assert_ne!(
+            first, second,
+            "the second request renders the changed source"
         );
     }
 
@@ -7341,6 +7695,44 @@ const props = defineProps<{ msg: string }>()
         assert!(
             err.contains("--tsgo-bin"),
             "the validation failure must name the flag: {err}"
+        );
+    }
+
+    /// A relative `--tsgo-bin` names the engine from the invocation directory,
+    /// for the version probe and the `--api` capability smoke alike, though the
+    /// smoke runs the engine from its own staged project directory.
+    #[test]
+    fn explicit_tsgo_bin_relative_to_the_invocation_directory_resolves() {
+        use verter_tsgo_api::toolchain::discovery::ResolutionRequest;
+        use verter_tsgo_api::toolchain::validation::Capability;
+
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let engine = resolve_tsgo_engine_for(&ResolutionRequest {
+            requirement: Capability::Api,
+            project_root: Some(manifest.join("../../packages/example")),
+            env_override: None,
+            path_entries: Vec::new(),
+            cache_root: None,
+            host_exe: None,
+        })
+        .expect("the pinned API engine is required")
+        .path;
+        // Tests run from the crate directory.
+        let relative = engine
+            .strip_prefix(manifest)
+            .expect("the project-local engine is named from the crate directory")
+            .to_path_buf();
+        assert!(
+            relative.is_relative() && relative.is_file(),
+            "{}",
+            relative.display()
+        );
+
+        let resolution = resolve_tsgo_engine(Path::new("."), Capability::Api, Some(&relative))
+            .unwrap_or_else(|error| panic!("a relative --tsgo-bin must resolve: {error}"));
+        assert_eq!(
+            resolution.path.canonicalize().unwrap(),
+            engine.canonicalize().unwrap()
         );
     }
 

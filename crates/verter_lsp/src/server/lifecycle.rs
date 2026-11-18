@@ -150,6 +150,11 @@ pub(super) async fn handle_initialize(
             roots.push(folder.uri.as_str().to_string());
         }
         *server.workspace_roots.lock().await = roots.clone();
+        // Ownership production is owed as soon as initialize admits the roots.
+        // Requests may arrive while initialized is still awaiting the client.
+        server
+            .initialization_progress
+            .send_replace((0, !roots.is_empty()));
 
         // Create VFS workspace early so relative imports resolve before
         // background_init completes. The project graph starts empty —

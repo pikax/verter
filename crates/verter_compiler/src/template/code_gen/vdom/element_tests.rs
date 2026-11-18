@@ -73,7 +73,7 @@ fn make_ast() -> TemplateAst {
 /// Apply CodeGenOutput to source and return the result string.
 fn apply_output<'a>(source: &str, out: CodeGenOutput<'a>, alloc: &'a Allocator) -> String {
     let mut ct = crate::code_transform::CodeTransform::new(source, alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     ct.build_string()
 }
 
@@ -104,8 +104,8 @@ fn resolve_ws_removes_leading_newline() {
 
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].kind, ChildKind::Text);
-    assert_eq!(out.overwrites.len(), 1);
-    assert_eq!(out.overwrites[0], (0, 3, ""));
+    assert_eq!(out.overwrites().len(), 1);
+    assert_eq!(out.overwrites()[0], (0, 3, ""));
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn resolve_ws_removes_trailing_newline() {
 
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].kind, ChildKind::Text);
-    assert_eq!(out.overwrites[0], (5, 8, ""));
+    assert_eq!(out.overwrites()[0], (5, 8, ""));
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn resolve_ws_removes_leading_space() {
     resolve_whitespace(&mut children, &mut out, true);
 
     assert_eq!(children.len(), 1);
-    assert_eq!(out.overwrites[0], (0, 2, ""));
+    assert_eq!(out.overwrites()[0], (0, 2, ""));
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn resolve_ws_interior_newline_removed() {
     assert_eq!(children.len(), 2);
     assert_eq!(children[0].kind, ChildKind::Element);
     assert_eq!(children[1].kind, ChildKind::Element);
-    assert_eq!(out.overwrites[0], (5, 8, ""));
+    assert_eq!(out.overwrites()[0], (5, 8, ""));
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn resolve_ws_interior_space_becomes_text() {
 
     assert_eq!(children.len(), 3);
     assert_eq!(children[1].kind, ChildKind::Text);
-    assert_eq!(out.overwrites[0], (5, 6, " "));
+    assert_eq!(out.overwrites()[0], (5, 6, " "));
 }
 
 #[test]
@@ -258,7 +258,7 @@ fn resolve_ws_all_whitespace_removed() {
     resolve_whitespace(&mut children, &mut out, true);
 
     assert!(children.is_empty());
-    assert_eq!(out.overwrites.len(), 2);
+    assert_eq!(out.overwrites().len(), 2);
 }
 
 #[test]
@@ -285,7 +285,7 @@ fn resolve_ws_no_whitespace_unchanged() {
     resolve_whitespace(&mut children, &mut out, true);
 
     assert_eq!(children.len(), 2);
-    assert!(out.overwrites.is_empty());
+    assert!(out.overwrites().is_empty());
 }
 
 #[test]
@@ -322,7 +322,7 @@ fn resolve_ws_newline_between_element_and_interpolation_kept() {
 
     assert_eq!(children.len(), 3);
     assert_eq!(children[1].kind, ChildKind::Text); // Converted to text
-    assert_eq!(out.overwrites[0], (5, 8, " ")); // Collapsed to single space
+    assert_eq!(out.overwrites()[0], (5, 8, " ")); // Collapsed to single space
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn resolve_ws_newline_between_interpolation_and_element_kept() {
 
     assert_eq!(children.len(), 3);
     assert_eq!(children[1].kind, ChildKind::Text);
-    assert_eq!(out.overwrites[0], (5, 8, " "));
+    assert_eq!(out.overwrites()[0], (5, 8, " "));
 }
 
 // ==================== Self-closing element ====================

@@ -11,6 +11,10 @@
  * byte-wise). Never hand-edit. `node gen-vue-goldens.mjs --check`
  * regenerates in-memory and fails on drift.
  *
+ * Backends: `vdom`, `vapor` and `ssr`. The `ssr` backend uses the same
+ * non-inline topology as `vdom` with `ssr: true` (the server-render function
+ * `ssrRender`, attached as `_sfc_main.ssrRender`).
+ *
  * Two official topologies. Default `non-inline`: separate render function
  * (`compileScript({ inlineTemplate: false })` + `compileTemplate`), the
  * same `_sfc_main` shape `assemble_vue_main_module` ships. `inline`
@@ -56,7 +60,7 @@ const CORPUS_ROOT = path.join(REPO_ROOT, "crates", "verter_vue_conformance", "co
 const CASES_ROOT = path.join(CORPUS_ROOT, "cases");
 const GOLDENS_ROOT = path.join(CORPUS_ROOT, "goldens", VUE_ORACLE_VERSION);
 const MANIFEST_PATH = path.join(CORPUS_ROOT, "manifest.json");
-const BACKENDS = ["vdom", "vapor"];
+const BACKENDS = ["vdom", "vapor", "ssr"];
 const CHECK_MODE = process.argv.includes("--check");
 
 // ---------------------------------------------------------------------------
@@ -181,6 +185,15 @@ function toPosixRelative(absolute) {
   return rel.split(path.sep).join("/");
 }
 
+/**
+ * Scope id handed to the compiler for a case: eight hex digits derived from
+ * the SFC path, the shape a bundler integration passes (a case path with
+ * slashes would leak into `data-v-*` attributes and css variable names).
+ */
+function scopeIdFor(caseId) {
+  return sha256(`cases/${caseId}.vue`).slice(0, 8);
+}
+
 function withTrailingNewline(text) {
   return text.endsWith("\n") ? text : text + "\n";
 }
@@ -285,8 +298,14 @@ function reAnchorMapLines(map, lineOffset) {
   return { ...map, mappings };
 }
 
+/**
+ * Splits the leading `vue` / `vue/server-renderer` import lines off a
+ * `compileTemplate` module (one line for the client backends, two for SSR).
+ */
 function splitRenderImport(code) {
-  const match = code.match(/^import \{[^}]*\} from ["']vue["'];?[ \t]*\n/);
+  const match = code.match(
+    /^(?:import \{[^}]*\} from ["']vue(?:\/server-renderer)?["'];?[ \t]*\n)+/,
+  );
   if (!match) {
     return { importLine: null, body: code };
   }
@@ -330,7 +349,7 @@ async function compileInlineCell({ caseId, source }) {
   try {
     pipeline = "compileScript:inlineTemplate";
     const script = compileScript(descriptor, {
-      id: caseId,
+      id: scopeIdFor(caseId),
       vapor: false,
       inlineTemplate: true,
       fs: hermeticCompileFs,
@@ -399,8 +418,8 @@ async function compileInlineCell({ caseId, source }) {
  * - `scriptCode` (when present) has its `export default` rebound to
  *   `const _sfc_main =`.
  */
-function assembleNonInline({ importLine, body, scriptCode, vapor }) {
-  const renderBody = body.replace("export function render(", "function render(");
+function assembleNonInline({ importLine, body, scriptCode, vapor, renderName }) {
+  const renderBody = body.replace(`export function ${renderName}(`, `function ${renderName}(`);
   const parts = [];
   if (scriptCode != null) {
     parts.push(scriptCode.replace("export default", "const _sfc_main ="));
@@ -416,7 +435,7 @@ function assembleNonInline({ importLine, body, scriptCode, vapor }) {
     parts.push(vapor ? "const _sfc_main = { __vapor: true }" : "const _sfc_main = {}");
   }
   if (importLine) parts.push(importLine);
-  parts.push(renderBody, "_sfc_main.render = render", "export default _sfc_main");
+  parts.push(renderBody, `_sfc_main.${renderName} = ${renderName}`, "export default _sfc_main");
   return parts.join("\n");
 }
 
@@ -427,7 +446,10 @@ function assembleNonInline({ importLine, body, scriptCode, vapor }) {
  */
 async function compileCell({ caseId, source, backend }) {
   const vapor = backend === "vapor";
-  const compiler = vapor ? compilerVapor : compilerDom;
+  const ssr = backend === "ssr";
+  const renderName = ssr ? "ssrRender" : "render";
+  // `compileTemplate` selects the SSR compiler itself when `ssr` is set.
+  const compiler = ssr ? undefined : vapor ? compilerVapor : compilerDom;
   const filename = `cases/${caseId}.vue`;
   const diagnostics = [];
   const onError = (error) => pushDiagnostic(diagnostics, "error", error);
@@ -437,6 +459,16 @@ async function compileCell({ caseId, source, backend }) {
   for (const error of parseErrors) {
     pushDiagnostic(diagnostics, "parse-error", error);
   }
+
+  // Options only the server render consumes: the scope id attribute of a
+  // `<style scoped>` block and the `v-bind()` css variables.
+  const ssrTemplateOptions = ssr
+    ? {
+        ssr: true,
+        scoped: descriptor.styles.some((style) => style.scoped),
+        ssrCssVars: descriptor.cssVars,
+      }
+    : {};
 
   let code = null;
   let map = null;
@@ -451,17 +483,19 @@ async function compileCell({ caseId, source, backend }) {
       // (compiler-dom) and Vapor (compiler-vapor; vapor's render is a
       // separate exported function just like VDOM's).
       const script = compileScript(descriptor, {
-        id: caseId,
+        id: scopeIdFor(caseId),
         vapor,
         inlineTemplate: false,
+        ...(ssr ? { templateOptions: { ssr: true } } : {}),
         fs: hermeticCompileFs,
       });
       const render = compileTemplate({
         source: descriptor.template?.content ?? "",
         filename,
-        id: caseId,
+        id: scopeIdFor(caseId),
         compiler,
         vapor,
+        ...ssrTemplateOptions,
         sourceMap: true,
         compilerOptions: {
           bindingMetadata: script.bindings,
@@ -488,7 +522,7 @@ async function compileCell({ caseId, source, backend }) {
         };
       }
       const { importLine, body } = splitRenderImport(render.code);
-      code = assembleNonInline({ importLine, body, scriptCode, vapor });
+      code = assembleNonInline({ importLine, body, scriptCode, vapor, renderName });
       // compileTemplate original positions are template-content-relative;
       // re-anchor them SFC-absolute (the same offset the bundler applies).
       map = reAnchorMapLines(render.map ?? null, (descriptor.template?.loc.start.line ?? 1) - 1);
@@ -497,9 +531,10 @@ async function compileCell({ caseId, source, backend }) {
       const render = compileTemplate({
         source: descriptor.template?.content ?? "",
         filename,
-        id: caseId,
+        id: scopeIdFor(caseId),
         compiler,
         vapor,
+        ...ssrTemplateOptions,
         sourceMap: true,
         compilerOptions: { onError, onWarn },
       });
@@ -507,7 +542,7 @@ async function compileCell({ caseId, source, backend }) {
         pushDiagnostic(diagnostics, "returned-error", error);
       }
       const { importLine, body } = splitRenderImport(render.code);
-      code = assembleNonInline({ importLine, body, scriptCode: null, vapor });
+      code = assembleNonInline({ importLine, body, scriptCode: null, vapor, renderName });
       // compileTemplate original positions are template-content-relative;
       // re-anchor them SFC-absolute (the same offset the bundler applies).
       map = reAnchorMapLines(render.map ?? null, (descriptor.template?.loc.start.line ?? 1) - 1);
@@ -560,6 +595,7 @@ async function buildArtifacts(versions) {
   const totals = {
     vdom: { compiled: 0, rejected: 0 },
     vapor: { compiled: 0, rejected: 0 },
+    ssr: { compiled: 0, rejected: 0 },
     vdomInline: { compiled: 0, rejected: 0 },
   };
 
@@ -592,6 +628,7 @@ async function buildArtifacts(versions) {
       const optionsSummary = {
         backend,
         vapor: backend === "vapor",
+        ...(backend === "ssr" ? { ssr: true } : {}),
         filename: `cases/${caseId}.vue`,
         id: caseId,
         pipeline,
@@ -849,7 +886,7 @@ async function main() {
     `vue conformance oracle: ${ORACLE_PACKAGES.map((p) => `${p}@${versions[p]}`).join(", ")}, esbuild@${versions.esbuild}`,
   );
   const artifacts = await buildArtifacts(versions);
-  const { vdom, vapor, vdomInline } = artifacts.totals;
+  const { vdom, vapor, ssr, vdomInline } = artifacts.totals;
   if (CHECK_MODE) {
     await checkMode(artifacts);
   } else {
@@ -858,6 +895,7 @@ async function main() {
       `generated ${artifacts.caseCount} cases ` +
         `(vdom: ${vdom.compiled} compiled / ${vdom.rejected} rejected, ` +
         `vapor: ${vapor.compiled} compiled / ${vapor.rejected} rejected, ` +
+        `ssr: ${ssr.compiled} compiled / ${ssr.rejected} rejected, ` +
         `vdom-inline: ${vdomInline.compiled} compiled / ${vdomInline.rejected} rejected) ` +
         `-> ${toPosixRelative(GOLDENS_ROOT)}`,
     );

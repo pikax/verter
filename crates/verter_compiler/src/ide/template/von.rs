@@ -27,6 +27,7 @@ use verter_span::{GeneratedByteLen, SourceByteOffset, SourceByteRange};
 use super::flow::{CallbackSource, FlowNarrowing, GuardInjection, HandlerBody};
 use super::props::get_prop_end;
 use crate::ast::types::{ElementNode, TagType};
+use crate::code_transform::EditRecorder;
 use crate::ide::template::emit::{
     emit_expr_plan, emit_op, emit_relocated_value, plan_object_literal, plan_user_expr, trim_span,
     EmitOp, EmitText, ExprOptions, KeyRewritePolicy, Placement,
@@ -35,11 +36,10 @@ use crate::ide::{
     event_handler_params_type, event_to_jsx_name, native_dom_event_payload_type,
     TemplateComponentBindings,
 };
-use crate::template::code_gen::binding::BindingResolver;
-use crate::template::code_gen::shared::helpers::is_multi_statement_handler;
-use crate::template::code_gen::types::CodeGenOutput;
-use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
+use crate::template::binding::prefixed_expr::build_prefixed_expr;
+use crate::template::binding::BindingResolver;
 use crate::template::oxc::types::{OxcParsedExpression, OxcParsedProp};
+use crate::template::vue_syntax::is_multi_statement_handler;
 use crate::types::NodeProp;
 
 /// Process `v-on` / `@` directive.
@@ -53,7 +53,7 @@ pub(super) fn process_v_on<'alloc>(
     el: &ElementNode,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
     components: &TemplateComponentBindings,
@@ -243,8 +243,8 @@ pub(super) fn process_v_on<'alloc>(
             // resolved text looks like — the parse fact overrides the text probes.
             let is_multi_statement =
                 is_multi_statement_handler(oxc_prop.and_then(|p| p.exp.as_ref()));
-            let is_simple_ident = !is_multi_statement
-                && crate::template::code_gen::binding::is_simple_ident(resolved_expr);
+            let is_simple_ident =
+                !is_multi_statement && crate::template::binding::is_simple_ident(resolved_expr);
             let is_member_expr =
                 !is_multi_statement && resolved_expr.contains('.') && !resolved_expr.contains('(');
             // Arrow / function-expression handlers are classified from the OXC expression
@@ -264,7 +264,7 @@ pub(super) fn process_v_on<'alloc>(
 
             out.overwrite(prop.start, prop_end, "");
             let at = SourceByteOffset(prop.start);
-            let unmapped = |out: &mut CodeGenOutput<'alloc>, text: String| {
+            let unmapped = |out: &mut EditRecorder<'alloc>, text: String| {
                 emit_op(
                     out,
                     &EmitOp::InsertUnmapped {
@@ -300,7 +300,7 @@ pub(super) fn process_v_on<'alloc>(
                     )
                 })
             };
-            let value = |out: &mut CodeGenOutput<'alloc>| {
+            let value = |out: &mut EditRecorder<'alloc>| {
                 let mut plan = plan_user_expr(
                     source,
                     value_range,
@@ -323,7 +323,7 @@ pub(super) fn process_v_on<'alloc>(
             // text MAPPED to the source event-name token (`arg_start`), then the
             // closing `"` unmapped. This mirrors the in-place handler's mapped
             // event-name boundary.
-            let event_key = |out: &mut CodeGenOutput<'alloc>| {
+            let event_key = |out: &mut EditRecorder<'alloc>| {
                 unmapped(out, "{...{\"".to_string());
                 emit_op(
                     out,
@@ -417,8 +417,8 @@ pub(super) fn process_v_on<'alloc>(
         // never a bare reference, whatever its resolved text looks like — the
         // parse fact overrides the text probes below.
         let is_multi_statement = is_multi_statement_handler(oxc_prop.and_then(|p| p.exp.as_ref()));
-        let is_simple_ident = !is_multi_statement
-            && crate::template::code_gen::binding::is_simple_ident(resolved_expr);
+        let is_simple_ident =
+            !is_multi_statement && crate::template::binding::is_simple_ident(resolved_expr);
         let is_member_expr =
             !is_multi_statement && resolved_expr.contains('.') && !resolved_expr.contains('(');
         let is_fn_expr = !is_multi_statement
@@ -556,7 +556,7 @@ pub(super) fn process_v_on<'alloc>(
 /// same-position prepend order is `<guard><accessor-prefix><identifier>`.
 #[allow(clippy::too_many_arguments)]
 fn emit_in_place_handler<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
     source: &'alloc str,
     prop_start: u32,

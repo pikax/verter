@@ -5,8 +5,8 @@
 //! `(generated_code, source_map_json)` pair plus the original carrier
 //! source, so EVERY carrier vertical (Vue today; Svelte / React / Astro
 //! later) re-runs the SAME e2e correctness assertions against its own
-//! typed `compile_ide` output (e.g.
-//! [`VueCarrierCompiler::compile_ide`](super::vue_bridge::VueCarrierCompiler::compile_ide)).
+//! typed IDE projection output (e.g.
+//! [`VueProjectionBackend`](super::vue_projection_backend::VueProjectionBackend)).
 //! A token that maps to mismatched source text is the bug class these
 //! helpers catch.
 //!
@@ -232,8 +232,11 @@ pub fn assert_token_maps_to_source_line(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framework_common::carrier_compiler::IdeCompileOptions;
-    use crate::framework_common::vue_bridge::VueCarrierCompiler;
+    use crate::compile_request::{CompileProduct, IdeProductRequest};
+    use crate::framework_common::{
+        FrameworkHostIntegrationBackend, VueHostExecutionInputs, VueHostIntegrationBackend,
+        VueHostMultiProductDemand,
+    };
 
     #[test]
     fn position_conversions_round_trip() {
@@ -249,12 +252,11 @@ mod tests {
     fn helpers_assert_vue_ide_tokens_map_back_to_the_sfc() {
         // The reusable helpers exercised end-to-end against the Vue
         // bridge's IDE output — proving they are live, not a dead clone.
-        let compiler = VueCarrierCompiler;
         let source =
             "<script setup lang=\"ts\">\nconst myUniqueBinding = 1\n</script>\n<template><div>{{ myUniqueBinding }}</div></template>";
         let artifact = crate::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
             verter_language::FileLanguage::vue(),
-            verter_language::carrier_grammar::CarrierGrammarConfig::vue(
+            crate::framework_common::vue_grammar_config(
                 "{{",
                 "}}",
                 std::iter::empty::<&str>(),
@@ -262,17 +264,33 @@ mod tests {
             .expect("Vue grammar"),
             source,
         );
-        let ide = compiler
-            .compile_ide(
-                source,
+        let backend = VueHostIntegrationBackend::registered();
+        let admission = backend
+            .admit_host_products(
                 &artifact,
-                &IdeCompileOptions {
+                VueHostMultiProductDemand {
+                    products: vec![CompileProduct::IdeCompanion(IdeProductRequest {
+                        want_source_map: true,
+                        ..Default::default()
+                    })],
                     filename: Some("App.vue".to_string()),
                     ..Default::default()
                 },
             )
+            .expect("the IDE demand admits");
+        let alloc = oxc_allocator::Allocator::new();
+        let products = backend
+            .compile_host_products(
+                admission,
+                &artifact,
+                &VueHostExecutionInputs::default(),
+                &alloc,
+            )
             .expect("Vue TS SFC compiles to an IDE artifact");
-        let (code, sm) = parse_ide_output(&ide);
+        let ide = products
+            .ide_companion()
+            .expect("the admitted IDE companion publishes");
+        let (code, sm) = parse_ide_output(ide);
         let lookup = build_lookup_table(&sm);
         // The script binding maps back to its declaration LINE (script
         // regions map at statement/line granularity).

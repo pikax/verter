@@ -29,16 +29,12 @@ pub(super) enum Chunk<'a> {
         end: u32,
         content: &'a str,
     },
-    /// Content moved from its original position — maps back to source
-    /// line-by-line for accurate source maps
-    #[allow(dead_code)] // Used by move_slice() which is test/API only for now
-    Moved {
-        start: u32,
-        end: u32,
-        content: &'a str,
-        /// Whether the moved bytes were replacement text before the move.
-        replacement: bool,
-    },
+    /// A run of chunks a move took out of its range and placed elsewhere. The members are the chunks the range held when the move
+    /// ran, kept by reference in the bump arena: no text is copied, and each
+    /// member keeps its own correspondence (authored bytes, replacement,
+    /// mapped insertion, segmented anchors). Readers walk the members in
+    /// order and treat them as relocated.
+    Relocated { members: &'a [Chunk<'a>] },
     /// Inserted content mapped to a specific source position.
     /// Unlike `Inserted` (unmapped), this emits a source map token at `source_start`.
     /// Used for generated code that corresponds to a known source location
@@ -111,26 +107,6 @@ impl<'a> Chunk<'a> {
         }
     }
 
-    /// Create a moved chunk (content moved from original position, maps back to source)
-    #[allow(dead_code)]
-    pub fn moved(start: u32, end: u32, content: &'a str) -> Self {
-        Self::Moved {
-            start,
-            end,
-            content,
-            replacement: false,
-        }
-    }
-
-    pub fn moved_replacement(start: u32, end: u32, content: &'a str) -> Self {
-        Self::Moved {
-            start,
-            end,
-            content,
-            replacement: true,
-        }
-    }
-
     /// Create an inserted chunk mapped to a source position, with a content offset.
     /// Characters before `content_offset` are unmapped; the source map token is
     /// placed at `content_offset`, pointing to `source_start`.
@@ -178,5 +154,53 @@ impl<'a> Chunk<'a> {
     #[allow(dead_code)]
     pub fn is_original(&self) -> bool {
         matches!(self, Self::Original { .. })
+    }
+
+    /// The number of output bytes this chunk renders.
+    pub fn output_len(&self) -> u32 {
+        match self {
+            Self::Original { start, end } => end - start,
+            Self::Relocated { members } => members.iter().map(Chunk::output_len).sum(),
+            Self::Inserted { content }
+            | Self::Overwritten { content, .. }
+            | Self::InsertedMapped { content, .. }
+            | Self::InsertedAnchored { content, .. }
+            | Self::OverwrittenSegmented { content, .. } => content.len() as u32,
+        }
+    }
+}
+
+/// Depth-first walk over chunks in output order, expanding every
+/// [`Chunk::Relocated`] run into its members. Each leaf comes with whether
+/// it sits inside a relocated run.
+pub(super) struct LeafChunks<'c, 'a> {
+    stack: smallvec::SmallVec<[(std::slice::Iter<'c, Chunk<'a>>, bool); 4]>,
+}
+
+impl<'c, 'a> LeafChunks<'c, 'a> {
+    pub(super) fn new(chunks: &'c [Chunk<'a>]) -> Self {
+        let mut stack = smallvec::SmallVec::new();
+        stack.push((chunks.iter(), false));
+        Self { stack }
+    }
+}
+
+impl<'c, 'a: 'c> Iterator for LeafChunks<'c, 'a> {
+    type Item = (&'c Chunk<'a>, bool);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let (iter, relocated) = self.stack.last_mut()?;
+            let relocated = *relocated;
+            match iter.next() {
+                Some(Chunk::Relocated { members }) => {
+                    self.stack.push((members.iter(), true));
+                }
+                Some(chunk) => return Some((chunk, relocated)),
+                None => {
+                    self.stack.pop();
+                }
+            }
+        }
     }
 }

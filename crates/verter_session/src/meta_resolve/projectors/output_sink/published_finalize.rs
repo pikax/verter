@@ -1,5 +1,5 @@
 //! The published-field FINALIZE pass — the whole-surface field-type reducer
-//! over `ExpandedComponentTypes`, run once after the per-macro projectors and
+//! over `ExpandedComponentTypes`, run once after normalized macro shapes and
 //! the slot-binding synthesis. A CHILD module of the terminal `output_sink`
 //! (inside the capability mint scope), sharing the sink-private
 //! `reduce_field_value_node` node-start reducer.
@@ -11,7 +11,7 @@ use verter_type_engine::semantic_query::ProjectionMode;
 
 /// Run the shared field-value reducer over every published surface in
 /// `evaluated_types` so consumers see the same finalised sources the
-/// per-macro projectors already publish for `props` / `emits`.
+/// normalized producer rows publish.
 ///
 /// Published macro props / emits reduce under `ProjectionMode::Navigate` in
 /// NODE DOMAIN: each field's content-free source raises ONCE through the
@@ -82,12 +82,8 @@ pub(crate) fn reduce_published_field_types<M: verter_audit::observe::ObserveExec
             );
         }
     }
-    // The `define_props` SHAPE lane is NOT touched here: its property sources
-    // are the normalized macro rows' `type_source` positions
-    // (`define_props_shape` publishes them directly — the prop-type
-    // authority). Copying the finalized FLAT sources over the lane would
-    // re-impose the flat projection as a competing semantic producer — the
-    // authority inversion the emit-authority rule closed.
+    // Shape sources remain derived from normalized rows. Copying finalized
+    // flat sources over them would introduce a competing semantic producer.
 }
 
 /// Finalize ONE published prop SOURCE POSITION — the per-position half of

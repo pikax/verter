@@ -1,12 +1,15 @@
 //! Code generation output accumulator and internal types.
 //!
-//! All codegen operations are deferred into [`CodeGenOutput`] vecs.
-//! Nothing is applied to the source until [`CodeGenOutput::apply_to()`] is called.
+//! Source edits are deferred into the [`EditRecorder`] a [`CodeGenOutput`]
+//! holds. Nothing is applied to the source until
+//! [`CodeGenOutput::apply_to()`] is called.
 
 use oxc_allocator::Allocator;
-use smallvec::SmallVec;
 
-use crate::code_transform::{CodeTransform, GeneratedContentMarker, SegmentAnchor};
+use crate::code_transform::{
+    CodeTransform, CodeTransformError, EditRecorder, GeneratedContentMarker, MappedGeneratedText,
+    SegmentAnchor,
+};
 
 use super::vapor::PendingNavQueue;
 
@@ -15,74 +18,20 @@ use super::shared::helpers::{
     VdomHelperFlags,
 };
 
-/// Capability token for [`CodeTransform::try_overwrite_segmented`].
-/// Constructor is `pub(in crate::template::code_gen)` — only Vue
-/// VDOM/Vapor/SSR emitters can mint one. `ide`/`svelte` get `E0603`.
-/// `apply_to` mints its own only to drain already-authorized entries.
-///
-/// External-crate unreachability:
-/// the standalone compile-contract runner. Intra-crate
-/// exclusion of `ide`/`svelte` is the privacy checker, not a scanner.
-#[derive(Clone, Copy)]
-pub struct SegmentedOverwriteAuthority(());
-
-impl SegmentedOverwriteAuthority {
-    pub(in crate::template::code_gen) fn new() -> Self {
-        Self(())
-    }
-
-    /// Test-only hatch for `code_transform/segmented_tests.rs` (outside
-    /// `template::code_gen`). Present under `cfg(test)` only; production
-    /// builds keep the call-site restriction.
-    #[cfg(test)]
-    pub(crate) fn new_for_test() -> Self {
-        Self(())
-    }
-}
-
 // ======================== CodeGenOutput ========================
 
-/// A position in the ordered prepend channel whose text is supplied later
-/// (see [`CodeGenOutput::reserve_ordered_unmapped`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReservedPrepend(usize);
-
-/// Accumulated code generation operations.
+/// Accumulated code generation operations: the source edits (held by
+/// [`EditRecorder`], the transform owner's deferred-edit record) plus the Vue
+/// facts the edits do not carry — runtime helper imports, the helper and
+/// module preambles, and the script-export placement facts.
 ///
 /// All operations are deferred — nothing is applied until [`apply_to()`](Self::apply_to).
 /// This avoids passing `CodeTransform` through every trait method and enables
 /// a single O(n+m) batch application at the end.
 #[derive(Clone)]
 pub struct CodeGenOutput<'alloc> {
-    /// Replace source ranges: (start, end, replacement).
-    /// Applied via `ct.batch_overwrite()` in sorted order.
-    pub overwrites: Vec<(u32, u32, &'alloc str)>,
-
-    /// Replace source ranges with wholly synthetic content that has no
-    /// character-level correspondence to the replaced span: (start, end,
-    /// replacement). Applied via `ct.overwrite_unmapped()` per entry — see
-    /// [`overwrite_or_root_prefix`](Self::overwrite_or_root_prefix) for why
-    /// this is a separate channel from `overwrites` rather than a flag on
-    /// the same one.
-    unmapped_overwrites: Vec<(u32, u32, &'alloc str)>,
-
-    /// Segmented overwrite: (start, end, replacement, anchors). Applied via
-    /// `ct.try_overwrite_segmented()`. Vue VDOM/Vapor/SSR only — interpolation
-    /// identifiers and static attribute names inside otherwise synthetic code.
-    segmented_overwrites: Vec<(u32, u32, &'alloc str, &'alloc [SegmentAnchor])>,
-
-    /// Insert content before a position: (position, content).
-    /// Applied via `ct.batch_prepend_left_static()` in sorted order.
-    /// Used for binding prefixes (`_ctx.`, `$setup.`), suffixes (`.value`), separators.
-    pub prepends: Vec<(u32, &'alloc str)>,
-
-    /// Insert content before a position with source map mapping:
-    /// (insertion_pos, source_pos, content_offset, content).
-    /// Creates `InsertedMapped` chunks that emit source map tokens at `source_pos`.
-    /// `content_offset` shifts the token within the content (characters before it
-    /// are unmapped). Used for relocated directive expressions (v-if conditions,
-    /// v-for iterables) where binding prefixes precede the original identifier.
-    pub mapped_prepends: Vec<(u32, u32, u32, &'alloc str)>,
+    /// The deferred source edits.
+    pub(crate) edits: EditRecorder<'alloc>,
 
     /// VDOM runtime helper imports (bitflags, O(1) dedup).
     vdom_imports: VdomHelperFlags,
@@ -96,111 +45,51 @@ pub struct CodeGenOutput<'alloc> {
     /// Vue built-in component imports (Suspense, Teleport, etc.).
     builtin_imports: BuiltinComponentFlags,
 
-    /// Deferred move operations: (start, end, target).
-    /// Applied via `ct.move_slice()` after overwrites and prepends.
-    moves: Vec<(u32, u32, u32)>,
-
-    /// Deferred wrapped move operations: (start, end, target, prefix, suffix).
-    /// Applied via `ct.move_wrapped()` after overwrites and prepends.
-    /// Preserves sourcemap for the moved content while wrapping it.
-    wrapped_moves: Vec<(u32, u32, u32, &'alloc str, &'alloc str)>,
-
-    /// The bump-allocated content of the leading helper-import preamble insertion, when codegen
-    /// emitted one via [`prepend_helper_preamble`](Self::prepend_helper_preamble). Transferred to
-    /// the [`CodeTransform`] in [`apply_to`](Self::apply_to) so source-map generation can report
-    /// the generated-TSX position immediately after it (the typed preamble-end boundary). `None`
-    /// when no helper-import preamble was emitted.
-    helper_preamble: Option<(Option<u32>, &'alloc str)>,
-
     /// Inline-mode hoisted-constant module preamble, recorded via
     /// [`set_module_preamble`](Self::set_module_preamble). Transferred to
     /// [`TemplateImports::module_preamble`] in [`apply_to`](Self::apply_to)
     /// for the orchestrator to apply with `ct.prepend(...)`.
     module_preamble: Option<&'alloc str>,
 
-    /// Explicit source-map boundary offsets, transferred in
-    /// [`apply_to`](Self::apply_to) via `try_add_sourcemap_location`.
-    /// `Original`/`Moved` chunks otherwise token only start and newlines;
-    /// a registered offset gets a mid-line token (e.g. a top-level
-    /// identifier the `verbatim-carry` oracle must land on).
-    sourcemap_locations: Vec<u32>,
-
     /// Declared script-export-placement facts (see
     /// [`record_sfc_export_fact`](Self::record_sfc_export_fact)), resolved
     /// into markers in [`apply_to`](Self::apply_to).
     sfc_export_facts: Vec<SfcExportFact<'alloc>>,
-
-    /// Allocator reference for bump-allocating generated strings.
-    alloc: &'alloc Allocator,
-
-    /// One reusable scratch buffer for the `write!`-style format sinks
-    /// (`overwrite_fmt`, `prepend_fmt`, and the mapped variants). Each sink
-    /// clears and reuses it, so a formatted emission costs the retained heap
-    /// capacity plus one bump copy — never a fresh `String` per call. It is
-    /// an operation-construction helper only; it never holds built output.
-    scratch: String,
 }
 
 impl<'alloc> CodeGenOutput<'alloc> {
-    /// Create a new empty output accumulator.
+    /// Create a mapped accumulator for code-generation fixtures.
+    #[cfg(test)]
     pub fn new(alloc: &'alloc Allocator) -> Self {
+        Self::with_mode(alloc, crate::emission::MapMode::Map)
+    }
+
+    /// Preserve the transform owner's map policy while recording its edits.
+    pub(crate) fn with_mode(alloc: &'alloc Allocator, mode: crate::emission::MapMode) -> Self {
         Self {
-            overwrites: Vec::with_capacity(16),
-            unmapped_overwrites: Vec::new(),
-            segmented_overwrites: Vec::new(),
-            prepends: Vec::with_capacity(16),
-            mapped_prepends: Vec::new(),
+            edits: EditRecorder::with_mode(alloc, mode),
             vdom_imports: VdomHelperFlags::empty(),
             vapor_imports: VaporHelperFlags::empty(),
             ssr_imports: SsrHelperFlags::empty(),
             builtin_imports: BuiltinComponentFlags::empty(),
-            moves: Vec::new(),
-            wrapped_moves: Vec::new(),
-            helper_preamble: None,
             module_preamble: None,
-            sourcemap_locations: Vec::new(),
             sfc_export_facts: Vec::new(),
-            alloc,
-            scratch: String::new(),
         }
     }
 
-    /// Push an overwrite operation. The content is bump-allocated.
+    /// See [`EditRecorder::overwrite`].
     #[inline]
     pub fn overwrite(&mut self, start: u32, end: u32, content: &str) {
-        let allocated = self.alloc.alloc_str(content);
-        self.overwrites.push((start, end, allocated));
+        self.edits.overwrite(start, end, content);
     }
 
-    /// Push an overwrite with pre-allocated content (avoids double allocation).
+    /// See [`EditRecorder::overwrite_alloc`].
     #[inline]
     pub fn overwrite_alloc(&mut self, start: u32, end: u32, content: &'alloc str) {
-        self.overwrites.push((start, end, content));
+        self.edits.overwrite_alloc(start, end, content);
     }
 
-    /// Push an unmapped overwrite operation (see `unmapped_overwrites` field
-    /// doc). The content is bump-allocated.
-    #[inline]
-    pub fn overwrite_unmapped(&mut self, start: u32, end: u32, content: &str) {
-        let allocated = self.alloc.alloc_str(content);
-        self.unmapped_overwrites.push((start, end, allocated));
-    }
-
-    /// Same as [`overwrite_unmapped`](Self::overwrite_unmapped), but
-    /// `content` is already bump-allocated — avoids a second allocation,
-    /// and lets the caller later mint a
-    /// [`CodeTransform::mark_generated_sub_range`] fact against the EXACT
-    /// pointer this call inserts (see [`record_sfc_export_fact`]).
-    #[inline]
-    pub fn overwrite_unmapped_alloc(&mut self, start: u32, end: u32, content: &'alloc str) {
-        self.unmapped_overwrites.push((start, end, content));
-    }
-
-    /// Segmented overwrite: `content` replaces `[start, end)`; each `anchors`
-    /// entry is an authored lexeme inside `content`. Token is required here
-    /// (the emitter entry), not only on the primitive `apply_to` drains into —
-    /// otherwise any `CodeGenOutput` caller could reach this with no token.
-    /// See [`SegmentedOverwriteAuthority`].
+    /// See [`EditRecorder::overwrite_segmented`].
     #[inline]
     pub fn overwrite_segmented(
         &mut self,
@@ -208,105 +97,54 @@ impl<'alloc> CodeGenOutput<'alloc> {
         end: u32,
         content: &str,
         anchors: &[SegmentAnchor],
-        _authority: SegmentedOverwriteAuthority,
     ) {
-        let content_ref = self.alloc.alloc_str(content);
-        let anchors_ref: &'alloc [SegmentAnchor] = if anchors.is_empty() {
-            &[]
-        } else {
-            self.alloc.alloc_slice_copy(anchors)
-        };
-        self.segmented_overwrites
-            .push((start, end, content_ref, anchors_ref));
+        self.edits.overwrite_segmented(start, end, content, anchors);
     }
 
-    /// Push a prepend-left (insert before position) with `&'static str` content.
-    /// Zero allocation — the string lives in the binary.
+    /// See [`EditRecorder::prepend_static`].
     #[inline]
     pub fn prepend_static(&mut self, pos: u32, content: &'static str) {
-        self.prepends.push((pos, content));
+        self.edits.prepend_static(pos, content);
     }
 
-    /// Push a prepend-left with bump-allocated content.
+    /// See [`EditRecorder::prepend_alloc`].
     #[inline]
     pub fn prepend_alloc(&mut self, pos: u32, content: &str) {
-        let allocated = self.alloc.alloc_str(content);
-        self.prepends.push((pos, allocated));
+        self.edits.prepend_alloc(pos, content);
     }
 
-    /// Root wrapper insertion for a raw template unit whose synthetic root has
-    /// a zero-width opening tag. It must precede child operations at the same
-    /// byte boundary.
-    ///
-    /// Nonzero-width (a real tag, e.g. `<script setup>`, replaced by synthetic
-    /// wrapper) uses an unmapped overwrite: still `Overwritten` (ordering vs
-    /// later `move_slice` stays intact) but no source-map token. A mapped
-    /// `Overwritten` would claim the tag's start for the entire replacement —
-    /// truthful only for 1:1 substitutions. Official rc.5 `prependLeft` wrapper
-    /// insertion never touches the tag and carries no mapping either.
+    /// See [`EditRecorder::overwrite_or_root_prefix`].
     pub fn overwrite_or_root_prefix(&mut self, start: u32, end: u32, content: &str) {
-        if start == end {
-            let allocated = self.alloc.alloc_str(content);
-            self.prepends.insert(0, (start, allocated));
-        } else {
-            self.overwrite_unmapped(start, end, content);
-        }
+        self.edits.overwrite_or_root_prefix(start, end, content);
     }
 
-    /// Same dispatch as
-    /// [`overwrite_or_root_prefix`](Self::overwrite_or_root_prefix), but
-    /// `content` is already bump-allocated.
+    /// See [`EditRecorder::overwrite_or_root_prefix_alloc`].
     pub fn overwrite_or_root_prefix_alloc(&mut self, start: u32, end: u32, content: &'alloc str) {
-        if start == end {
-            self.prepends.insert(0, (start, content));
-        } else {
-            self.overwrite_unmapped_alloc(start, end, content);
-        }
+        self.edits
+            .overwrite_or_root_prefix_alloc(start, end, content);
     }
 
-    /// Segmented [`overwrite_or_root_prefix`](Self::overwrite_or_root_prefix):
-    /// authored anchors (e.g. a hoisted static-props `class` key) survive.
-    /// Zero-width stays an unmapped prepend; nonzero-width goes through
-    /// [`overwrite_segmented`](Self::overwrite_segmented).
+    /// See [`EditRecorder::overwrite_or_root_prefix_segmented`].
     pub fn overwrite_or_root_prefix_segmented(
         &mut self,
         start: u32,
         end: u32,
         content: &str,
         anchors: &[SegmentAnchor],
-        authority: SegmentedOverwriteAuthority,
     ) {
-        if start == end {
-            let allocated = self.alloc.alloc_str(content);
-            self.prepends.insert(0, (start, allocated));
-        } else {
-            self.overwrite_segmented(start, end, content, anchors, authority);
-        }
+        self.edits
+            .overwrite_or_root_prefix_segmented(start, end, content, anchors);
     }
 
-    /// Root wrapper close for a raw template unit whose synthetic closing tag
-    /// is a zero-width boundary after all authored bytes.
-    ///
-    /// See [`overwrite_or_root_prefix`](Self::overwrite_or_root_prefix) for
-    /// why the nonzero-width case uses an unmapped overwrite rather than a
-    /// regular (falsely position-claiming) one.
+    /// See [`EditRecorder::overwrite_or_root_suffix`].
     pub fn overwrite_or_root_suffix(&mut self, start: u32, end: u32, content: &str) {
-        if start == end {
-            self.prepend_alloc(start, content);
-        } else {
-            self.overwrite_unmapped(start, end, content);
-        }
+        self.edits.overwrite_or_root_suffix(start, end, content);
     }
 
-    /// Same dispatch as
-    /// [`overwrite_or_root_suffix`](Self::overwrite_or_root_suffix), but
-    /// `content` is already bump-allocated.
+    /// See [`EditRecorder::overwrite_or_root_suffix_alloc`].
     pub fn overwrite_or_root_suffix_alloc(&mut self, start: u32, end: u32, content: &'alloc str) {
-        if start == end {
-            self.prepends.push((start, content));
-        } else {
-            self.overwrite_unmapped_alloc(start, end, content);
-        }
+        self.edits
+            .overwrite_or_root_suffix_alloc(start, end, content);
     }
 
     /// Record a declared script-export-placement fact for `content` — a
@@ -332,24 +170,6 @@ impl<'alloc> CodeGenOutput<'alloc> {
         });
     }
 
-    /// Push the leading helper-import preamble as an (unmapped) prepend-left AND record its content
-    /// reference so source-map generation can report the generated-TSX position immediately after
-    /// it — the typed helper-import-preamble end boundary consumed by the LSP auto-import
-    /// classifier. Behaves exactly like [`prepend_alloc`](Self::prepend_alloc) for output (the
-    /// imports themselves stay unmapped synthetic text); the only addition is the recorded identity.
-    /// Called once per IDE script generation from `emit_helper_imports`.
-    #[inline]
-    pub fn prepend_helper_preamble(
-        &mut self,
-        pos: u32,
-        carrier_anchor: Option<u32>,
-        content: &str,
-    ) {
-        let allocated = self.alloc.alloc_str(content);
-        self.prepends.push((pos, allocated));
-        self.helper_preamble = Some((carrier_anchor, allocated));
-    }
-
     /// Record module-scope preamble content (inline-mode hoisted constants)
     /// for the caller to apply via `ct.prepend(...)` — NOT a position-
     /// anchored `prepend_alloc`/`overwrite`. A position-anchored prepend at
@@ -361,81 +181,27 @@ impl<'alloc> CodeGenOutput<'alloc> {
     /// once an earlier batch's same-position item is baked into an opaque
     /// `Chunk::Inserted`, a later batch's item at that position is appended
     /// after it, not before. `ct.prepend` sidesteps this entirely (it
-    /// manipulates `ct`'s `intro` directly, unconditionally ahead of every
+    /// manipulates `ct`'s intro directly, unconditionally ahead of every
     /// chunk), the same escape hatch the helper-import line already uses.
     #[inline]
     pub fn set_module_preamble(&mut self, content: &str) {
-        self.module_preamble = Some(self.alloc.alloc_str(content));
+        self.module_preamble = Some(self.edits.alloc_str(content));
     }
 
-    /// Register an explicit source-map boundary at an original-source byte
-    /// offset (see `sourcemap_locations` field doc). A no-op for source-map
-    /// purposes when the position ends up outside any surviving `Original`/
-    /// `Moved` chunk or mid-codepoint — `CodeTransform::try_add_sourcemap_location`
-    /// degrades gracefully rather than corrupting the map.
+    /// See [`EditRecorder::add_sourcemap_location`].
     #[inline]
     pub fn add_sourcemap_location(&mut self, offset: u32) {
-        self.sourcemap_locations.push(offset);
+        self.edits.add_sourcemap_location(offset);
     }
 
-    /// Push a source-mapped prepend-left with bump-allocated content.
-    /// The generated chunk maps back to `source_pos` in the source map.
-    /// The source map token is placed at the start of the content (offset 0).
+    /// See [`EditRecorder::prepend_alloc_mapped`].
     #[inline]
     pub fn prepend_alloc_mapped(&mut self, pos: u32, source_pos: u32, content: &str) {
-        let allocated = self.alloc.alloc_str(content);
-        self.mapped_prepends.push((pos, source_pos, 0, allocated));
+        self.edits.prepend_alloc_mapped(pos, source_pos, content);
     }
 
-    /// Push an UNMAPPED prepend-left that interleaves with mapped prepends at the
-    /// same position in insertion order.
-    ///
-    /// Plain [`prepend_static`](Self::prepend_static) / [`prepend_alloc`](Self::prepend_alloc)
-    /// land in the `prepends` vec, which `apply_to` concatenates BEFORE all
-    /// `mapped_prepends` at the same position — so an unmapped→mapped→unmapped
-    /// sequence at one anchor (e.g. `value={` + mapped `count` + `}` for relocated
-    /// `v-model`) would reorder to `value={}` + `count`. Routing the unmapped text
-    /// through `mapped_prepends` with `content_offset == content.len()` keeps it in
-    /// the same vec (token sits one-past-the-end → emits no mapping) so the order
-    /// is preserved. This mirrors the v-for `.map((` bridge emission.
-    #[inline]
-    pub fn prepend_ordered_unmapped(&mut self, pos: u32, content: &str) {
-        if content.is_empty() {
-            return;
-        }
-        let allocated = self.alloc.alloc_str(content);
-        let len = allocated.len() as u32;
-        self.mapped_prepends.push((pos, 0, len, allocated));
-    }
-
-    /// Reserve an UNMAPPED ordered prepend at `pos` whose text is decided later
-    /// with [`fill_reserved`](Self::fill_reserved).
-    ///
-    /// The reservation takes its place in the ordered (`mapped_prepends`)
-    /// channel NOW, so the eventual text lands after every ordered prepend
-    /// already recorded at `pos` and before every one recorded later — even
-    /// though it is only known once the content after it has been walked. A
-    /// reservation that is never filled emits nothing.
-    #[inline]
-    pub fn reserve_ordered_unmapped(&mut self, pos: u32) -> ReservedPrepend {
-        let index = self.mapped_prepends.len();
-        self.mapped_prepends.push((pos, 0, 0, ""));
-        ReservedPrepend(index)
-    }
-
-    /// Give a reservation its text (synthetic, unmapped).
-    #[inline]
-    pub fn fill_reserved(&mut self, reserved: ReservedPrepend, content: &str) {
-        let allocated = self.alloc.alloc_str(content);
-        let entry = &mut self.mapped_prepends[reserved.0];
-        entry.2 = allocated.len() as u32;
-        entry.3 = allocated;
-    }
-
-    /// Push a source-mapped prepend-left with a content offset.
-    /// Characters before `content_offset` are unmapped; the source map token is
-    /// placed at `content_offset`, pointing to `source_pos`. Used when binding
-    /// prefixes (e.g., `(__props.`) precede the original identifier.
+    /// See [`EditRecorder::prepend_alloc_mapped_with_offset`].
+    #[cfg(test)]
     #[inline]
     pub fn prepend_alloc_mapped_with_offset(
         &mut self,
@@ -444,88 +210,39 @@ impl<'alloc> CodeGenOutput<'alloc> {
         content_offset: u32,
         content: &str,
     ) {
-        let allocated = self.alloc.alloc_str(content);
-        self.mapped_prepends
-            .push((pos, source_pos, content_offset, allocated));
+        self.edits
+            .prepend_alloc_mapped_with_offset(pos, source_pos, content_offset, content);
     }
 
-    /// Write `args` into the reusable scratch buffer and bump-allocate the
-    /// result once. The buffer is cleared first and its capacity is retained
-    /// for the next emission, so repeated formatted emissions reuse one
-    /// allocation instead of allocating a fresh `String` per call.
-    ///
-    /// This is the arena-string companion to the op-recording format sinks
-    /// (`overwrite_fmt` / `prepend_fmt` / …): those record a `CodeTransform`
-    /// operation, whereas this returns the bump-allocated `&'alloc str` for
-    /// content that is stored and assembled later rather than applied at a
-    /// source position — e.g. the Vapor navigation (`const pN = _child(nM)`)
-    /// and text-creation (`const xN = _txt(pP)`) lines accumulated for the
-    /// render-function body. It produces a string through the SAME reusable
-    /// scratch + single-bump path, never by editing already-emitted output in
-    /// place.
+    /// See [`EditRecorder::alloc_fmt`].
     #[inline]
     pub(in crate::template::code_gen) fn alloc_fmt(
         &mut self,
         args: std::fmt::Arguments<'_>,
     ) -> &'alloc str {
-        use std::fmt::Write as _;
-        self.scratch.clear();
-        // Appending to a `String` never fails; `write_fmt` can only return
-        // `Err` if a `Display`/`Debug` impl inside `args` does. Surface that
-        // as a panic rather than silently recording partial content.
-        self.scratch
-            .write_fmt(args)
-            .expect("CodeGenOutput format sink: Display impl must not fail");
-        self.alloc.alloc_str(&self.scratch)
+        self.edits.alloc_fmt(args)
     }
 
-    /// Push an overwrite whose content is produced by a `write!`-style format
-    /// directly into the reusable scratch buffer, then bump-allocated once.
-    ///
-    /// Output-equivalent to `overwrite(start, end, &format!(...))` but avoids
-    /// the intermediate per-call `String` allocation. The recorded operation
-    /// is an ordinary overwrite — only the string PRODUCTION changes.
+    /// See [`EditRecorder::overwrite_fmt`].
     #[inline]
     pub fn overwrite_fmt(&mut self, start: u32, end: u32, args: std::fmt::Arguments<'_>) {
-        let allocated = self.alloc_fmt(args);
-        self.overwrites.push((start, end, allocated));
+        self.edits.overwrite_fmt(start, end, args);
     }
 
-    /// Push a prepend-left whose content is produced by a `write!`-style
-    /// format into the reusable scratch buffer, then bump-allocated once.
-    ///
-    /// Output-equivalent to `prepend_alloc(pos, &format!(...))`.
+    /// See [`EditRecorder::prepend_fmt`].
     #[inline]
     pub fn prepend_fmt(&mut self, pos: u32, args: std::fmt::Arguments<'_>) {
-        let allocated = self.alloc_fmt(args);
-        self.prepends.push((pos, allocated));
+        self.edits.prepend_fmt(pos, args);
     }
 
-    /// Push a source-mapped prepend-left whose content is produced by a
-    /// `write!`-style format into the reusable scratch buffer. The source map
-    /// token is placed at the start of the content (offset 0).
-    ///
-    /// Output-equivalent to `prepend_alloc_mapped(pos, source_pos, &format!(...))`.
-    ///
-    /// Rounds out the format-sink family alongside its `*_with_offset` peer;
-    /// exercised by the format-sink equivalence tests.
+    /// See [`EditRecorder::prepend_fmt_mapped`].
     #[allow(dead_code)]
     #[inline]
     pub fn prepend_fmt_mapped(&mut self, pos: u32, source_pos: u32, args: std::fmt::Arguments<'_>) {
-        let allocated = self.alloc_fmt(args);
-        self.mapped_prepends.push((pos, source_pos, 0, allocated));
+        self.edits.prepend_fmt_mapped(pos, source_pos, args);
     }
 
-    /// Push a source-mapped prepend-left with an explicit content offset whose
-    /// content is produced by a `write!`-style format into the reusable
-    /// scratch buffer. Characters before `content_offset` are unmapped; the
-    /// source map token is placed at `content_offset`, pointing to `source_pos`.
-    ///
-    /// Output-equivalent to
-    /// `prepend_alloc_mapped_with_offset(pos, source_pos, content_offset, &format!(...))`.
-    ///
-    /// Rounds out the format-sink family alongside its zero-offset peer;
-    /// exercised by the format-sink equivalence tests.
+    /// See [`EditRecorder::prepend_fmt_mapped_with_offset`].
     #[allow(dead_code)]
     #[inline]
     pub fn prepend_fmt_mapped_with_offset(
@@ -535,86 +252,32 @@ impl<'alloc> CodeGenOutput<'alloc> {
         content_offset: u32,
         args: std::fmt::Arguments<'_>,
     ) {
-        let allocated = self.alloc_fmt(args);
-        self.mapped_prepends
-            .push((pos, source_pos, content_offset, allocated));
+        self.edits
+            .prepend_fmt_mapped_with_offset(pos, source_pos, content_offset, args);
     }
 
-    /// Lower a [`MappedGeneratedText`] segment plan at `pos`: each source
-    /// segment maps its first byte to the recorded file offset; each synthetic
-    /// segment emits no source-map token. The concatenation of the segments
-    /// equals `mgt.text`, so the inserted bytes are identical to emitting the
-    /// flat string — only the source-map tokens become per-segment precise.
-    ///
-    /// This is the sole sourcemap-aware lowering for resolved condition / IIFE
-    /// expression heads: scaffolding (`__props.`, `.value`, brackets, the
-    /// `(` … `) ? ` wrapper, shorthand keys) stays unmapped, only authored
-    /// identifiers and verbatim source runs carry tokens.
+    /// See [`EditRecorder::prepend_mapped_generated_text`].
     #[inline]
     pub fn prepend_mapped_generated_text(&mut self, pos: u32, mgt: &MappedGeneratedText) {
-        for seg in &mgt.segments {
-            let content = &mgt.text[seg.generated_start as usize..seg.generated_end as usize];
-            self.push_prepend_segment(pos, content, seg.source_start);
-        }
+        self.edits.prepend_mapped_generated_text(pos, mgt);
     }
 
-    /// Record one prepend segment into the shared `mapped_prepends` channel.
-    /// `Some(source_pos)` places a single token at the content start; `None`
-    /// uses the content-offset-past-end form the source-map emitter treats as
-    /// fully unmapped (mirroring [`prepend_ordered_unmapped`](Self::prepend_ordered_unmapped)).
+    /// See [`EditRecorder::relocate`].
     #[inline]
-    fn push_prepend_segment(&mut self, pos: u32, content: &str, source: Option<u32>) {
-        if content.is_empty() {
-            return;
-        }
-        let allocated = self.alloc.alloc_str(content);
-        match source {
-            // Source-derived: token at the segment start (offset 0).
-            Some(source_pos) => self.mapped_prepends.push((pos, source_pos, 0, allocated)),
-            // Synthetic: content_offset == len → the emitter places the whole
-            // run as an unmapped prefix and emits no source token.
-            None => {
-                let len = allocated.len() as u32;
-                self.mapped_prepends.push((pos, 0, len, allocated));
-            }
-        }
-    }
-
-    /// Push a move operation: move source range [start, end) to target position.
-    #[inline]
-    pub fn move_slice(&mut self, start: u32, end: u32, target: u32) {
-        self.moves.push((start, end, target));
-    }
-
-    /// Push a wrapped move operation: move source range [start, end) to target
-    /// position with unmapped prefix and suffix.
-    ///
-    /// The moved content preserves its sourcemap mapping, while the prefix and
-    /// suffix are unmapped insertions. Used for wrapping type content in
-    /// declarations while preserving fine-grained hover resolution.
-    #[inline]
-    pub fn move_wrapped(&mut self, start: u32, end: u32, target: u32, prefix: &str, suffix: &str) {
-        let p = self.alloc.alloc_str(prefix);
-        let s = self.alloc.alloc_str(suffix);
-        self.wrapped_moves.push((start, end, target, p, s));
+    pub fn relocate(&mut self, start: u32, end: u32, target: u32, prefix: &str, suffix: &str) {
+        self.edits.relocate(start, end, target, prefix, suffix);
     }
 
     /// Allocate a string in the bump allocator.
     #[inline]
     pub fn alloc_str(&self, s: &str) -> &'alloc str {
-        self.alloc.alloc_str(s)
+        self.edits.alloc_str(s)
     }
 
-    /// Allocate a `SegmentAnchor` slice in the bump allocator — the anchor
-    /// carrier for [`VaporTextPart::Dynamic`] and analogous SSR/VDOM
-    /// interpolation-anchor call sites.
+    /// See [`EditRecorder::alloc_segment_anchors`].
     #[inline]
     pub fn alloc_segment_anchors(&self, anchors: &[SegmentAnchor]) -> &'alloc [SegmentAnchor] {
-        if anchors.is_empty() {
-            &[]
-        } else {
-            self.alloc.alloc_slice_copy(anchors)
-        }
+        self.edits.alloc_segment_anchors(anchors)
     }
 
     /// Record a VDOM runtime helper import.
@@ -655,162 +318,67 @@ impl<'alloc> CodeGenOutput<'alloc> {
         self.vapor_imports
     }
 
+    /// The recorded mapped replacements, in record order.
+    #[cfg(test)]
+    pub(crate) fn overwrites(&self) -> Vec<(u32, u32, &'alloc str)> {
+        self.edits
+            .replacements_of(|kind| *kind == crate::code_transform::ReplacementKind::Mapped)
+    }
+
     /// Current capacity of the reusable format-sink scratch buffer.
-    /// Lets tests prove the buffer is reused (capacity retained) across
-    /// formatted emissions rather than reallocated per call.
     #[cfg(test)]
     #[inline]
     pub fn scratch_capacity(&self) -> usize {
-        self.scratch.capacity()
+        self.edits.scratch_capacity()
     }
 
-    /// Sort and apply all accumulated operations to a CodeTransform.
-    /// Called once after the entire tree walk.
+    /// Apply all accumulated edits to a CodeTransform. Called once after the
+    /// entire tree walk.
     ///
     /// Returns the categorized runtime helper imports collected during codegen.
     /// Vue helpers go to `vue`, SSR helpers go to `ssr` (from `vue/server-renderer`).
+    /// A refused edit is the transform's typed error; the transform is left
+    /// as the refused edit found it.
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn apply_to(
-        mut self,
+        self,
         ct: &mut CodeTransform<'alloc, impl verter_audit::observe::ObserveExec>,
-    ) -> TemplateImports<'alloc> {
-        // Carry the recorded helper-import preamble identity into the transform. The same `&'alloc
-        // str` becomes an `Inserted` chunk below, so source-map generation can locate it by pointer
-        // and report the typed preamble-end boundary. No-op when no preamble was emitted.
-        if let Some((carrier_anchor, preamble)) = self.helper_preamble {
-            match carrier_anchor {
-                Some(anchor) => ct.set_helper_preamble_content_at(preamble, anchor),
-                None => ct.set_helper_preamble_content(preamble),
-            }
-        }
+    ) -> Result<TemplateImports<'alloc>, CodeTransformError> {
+        let Self {
+            edits,
+            vdom_imports,
+            vapor_imports,
+            ssr_imports,
+            builtin_imports,
+            module_preamble,
+            sfc_export_facts,
+        } = self;
 
-        // Apply wrapped moves FIRST — they operate on Original chunks and must
-        // run before overwrites replace those chunks. This preserves sourcemap
-        // for moved content (e.g., defineProps type params).
-        for &(start, end, target, prefix, suffix) in &self.wrapped_moves {
-            ct.move_wrapped(start, end, target, prefix, suffix);
-        }
-
-        // Sort by start ascending, then by end descending (so that for equal
-        // starts, the wider range comes first and the narrower is filtered out).
-        self.overwrites
-            .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-
-        // Filter out fully-contained ranges. After sorting, any range whose
-        // end <= the running max_end is fully inside a preceding range and
-        // would produce a redundant (overlapping) overwrite.
-        let mut max_end: u32 = 0;
-        self.overwrites.retain(|&(start, end, _)| {
-            if start >= max_end {
-                // Non-overlapping — accept and update max_end
-                max_end = end;
-                true
-            } else if end > max_end {
-                // Partial overlap extending beyond max_end — accept the extension
-                max_end = end;
-                true
-            } else {
-                // Fully contained (start >= prev_start && end <= max_end) — drop
-                false
-            }
-        });
-
-        ct.batch_overwrite(&self.overwrites);
-
-        // Unmapped overwrites are few and never overlap `overwrites` (both
-        // target root-level tag spans) — a sorted loop is enough.
-        //
-        // `overwrite_unmapped_alloc`, not `overwrite_unmapped`: every entry
-        // here is ALREADY bump-allocated against this same `'alloc`
-        // allocator (`overwrite_unmapped_alloc`/`overwrite_or_root_prefix_alloc`/
-        // `overwrite_or_root_suffix_alloc`'s nonzero-width branch all push
-        // here) — `overwrite_unmapped`'s unconditional re-allocation would
-        // mint a NEW pointer, breaking any `record_sfc_export_fact` marker
-        // minted against the original.
-        self.unmapped_overwrites
-            .sort_unstable_by_key(|&(start, ..)| start);
-        for &(start, end, content) in &self.unmapped_overwrites {
-            ct.overwrite_unmapped_alloc(start, end, content);
-        }
-
-        // Segmented overwrites: disjoint from the other overwrite channels
-        // (one mechanism per AST node), so ordering vs those channels is
-        // irrelevant. Failure is a caller precondition violation, not
-        // recoverable. Fail closed in every build: a silent `ct.overwrite()`
-        // fallback would re-fabricate whole-block provenance (every byte of
-        // `content` mapping to `start`) — a silently wrong source map.
-        self.segmented_overwrites
-            .sort_unstable_by_key(|&(start, ..)| start);
-        for &(start, end, content, anchors) in &self.segmented_overwrites {
-            if let Err(err) = ct.try_overwrite_segmented(
-                start,
-                end,
-                content,
-                anchors,
-                SegmentedOverwriteAuthority::new(),
-            ) {
-                panic!("overwrite_segmented precondition violated at [{start},{end}): {err:?}");
-            }
-        }
-
-        // Reservations that were never filled carry no text.
-        self.mapped_prepends
-            .retain(|&(_, _, _, content)| !content.is_empty());
-
-        if self.mapped_prepends.is_empty() {
-            // Fast path: no mapped prepends, use the simpler batch method.
-            // Must use stable sort to preserve insertion order for same-position
-            // prepends. Scope-close suffixes (e.g., ` : _createCommentVNode(...)`)
-            // are pushed before sibling comma separators during tree walking, and
-            // both land at the element's end position. Unstable sort can reorder
-            // them, producing invalid JS like `, : _createCommentVNode(...)`.
-            self.prepends.sort_by_key(|(pos, _)| *pos);
-            ct.batch_prepend_left_static(&self.prepends);
-        } else {
-            // Merge the unmapped (`prepends`) and source-mapped (`mapped_prepends`)
-            // channels DIRECTLY during one chunk rebuild — no third temporary Vec.
-            // Each channel is stably sorted by position; the merge emits every
-            // unmapped prepend before any mapped prepend at an equal position, so
-            // the two channels interleave at a shared anchor in unmapped-first order.
-            self.prepends.sort_by_key(|&(pos, _)| pos);
-            self.mapped_prepends.sort_by_key(|&(pos, ..)| pos);
-            ct.batch_prepend_left_merged(&self.prepends, &self.mapped_prepends);
-        }
-
-        // Apply deferred move operations (e.g., slot reordering)
-        for &(start, end, target) in &self.moves {
-            ct.move_slice(start, end, target);
-        }
-
-        // Explicit source-map boundaries (read at `generate_map`, after
-        // `apply_to`). Out-of-bounds/mid-codepoint degrades to no boundary.
-        for &offset in &self.sourcemap_locations {
-            let _ = ct.try_add_sourcemap_location(offset);
-        }
+        edits.apply(ct)?;
 
         // Return whichever mode's imports are non-empty (only one is ever active)
-        let mut vue = if !self.vdom_imports.is_empty() {
-            self.vdom_imports.to_imports()
+        let mut vue = if !vdom_imports.is_empty() {
+            vdom_imports.to_imports()
         } else {
-            self.vapor_imports.to_imports()
+            vapor_imports.to_imports()
         };
 
         // Append built-in component imports (Suspense, Teleport, etc.)
-        if !self.builtin_imports.is_empty() {
-            vue.extend(self.builtin_imports.to_imports());
+        if !builtin_imports.is_empty() {
+            vue.extend(builtin_imports.to_imports());
         }
 
-        let ssr = self.ssr_imports.to_imports();
+        let ssr = ssr_imports.to_imports();
 
         // Resolve every declared script-export-placement fact into markers
-        // NOW — after every above op (imports, moves, prepends) has been
-        // queued onto `ct` — never earlier, since a later edit can still
-        // shift where `content` lands. `generated_content_range` (called by
-        // this method's own caller, once `ct.build_string()` has run) turns
-        // each marker into its final built-output byte range.
+        // NOW — after every edit has been applied to `ct` — never earlier,
+        // since a later edit can still shift where `content` lands.
+        // `generated_content_range` (called by this method's own caller, once
+        // `ct.build_string()` has run) turns each marker into its final
+        // built-output byte range.
         let mut sfc_binding_markers = Vec::new();
         let mut sfc_export_statement_marker = None;
-        for fact in &self.sfc_export_facts {
+        for fact in &sfc_export_facts {
             for range in &fact.binding_local_ranges {
                 if let Some(marker) =
                     ct.mark_generated_sub_range(fact.content, range.start, range.end)
@@ -827,13 +395,13 @@ impl<'alloc> CodeGenOutput<'alloc> {
             }
         }
 
-        TemplateImports {
+        Ok(TemplateImports {
             vue,
             ssr,
             sfc_binding_markers,
             sfc_export_statement_marker,
-            module_preamble: self.module_preamble,
-        }
+            module_preamble,
+        })
     }
 }
 
@@ -883,118 +451,6 @@ impl TemplateImports<'_> {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.vue.is_empty() && self.ssr.is_empty()
-    }
-}
-
-// ======================== MappedGeneratedText ========================
-
-/// One contiguous run of generated text within a [`MappedGeneratedText`].
-///
-/// `[generated_start, generated_end)` indexes into the owning plan's `text`.
-/// A `Some(source_start)` run is an authored source token whose first byte
-/// maps to that file offset; a `None` run is resolver scaffolding (`__props.`,
-/// `.value`, `["`, `"]`, the `(` … `) ? ` wrapper, shorthand keys) that must
-/// NEVER carry a source-map token.
-#[derive(Debug, Clone)]
-pub struct MappedSegment {
-    pub generated_start: u32,
-    pub generated_end: u32,
-    pub source_start: Option<u32>,
-}
-
-/// A resolved generated expression plus an ordered plan classifying each byte
-/// run as authored source (mapped) or synthetic scaffolding (unmapped).
-///
-/// The concatenation of every segment's slice equals `text` exactly, so a
-/// consumer emits byte-identical output whether it uses the flat `text` or the
-/// segment plan — the plan only refines the source map. Producers
-/// (`build_prefixed_expr_segments` / `resolve_simple_expr_segments`) record one
-/// source segment per identifier or verbatim run and one synthetic segment per
-/// inserted prefix / suffix / bracket / wrapper, upholding the invariant that
-/// no synthetic byte ever maps to source. Lowered via
-/// [`CodeGenOutput::prepend_mapped_generated_text`].
-#[derive(Debug, Clone, Default)]
-pub struct MappedGeneratedText {
-    pub text: String,
-    pub segments: SmallVec<[MappedSegment; 8]>,
-}
-
-impl MappedGeneratedText {
-    /// A single authored-source run mapping its first byte to `source_start`.
-    /// Empty `text` yields an empty plan.
-    pub fn source(text: &str, source_start: u32) -> Self {
-        let mut mgt = Self {
-            text: String::new(),
-            segments: SmallVec::new(),
-        };
-        mgt.push(text, Some(source_start));
-        mgt
-    }
-
-    /// A single synthetic run with no source mapping. Empty `text` yields an
-    /// empty plan.
-    pub fn synthetic(text: &str) -> Self {
-        let mut mgt = Self {
-            text: String::new(),
-            segments: SmallVec::new(),
-        };
-        mgt.push(text, None);
-        mgt
-    }
-
-    /// Append `text` as one segment, classified by `source_start`. Empty input
-    /// is skipped so the plan never carries zero-length segments.
-    pub(crate) fn push(&mut self, text: &str, source_start: Option<u32>) {
-        if text.is_empty() {
-            return;
-        }
-        let generated_start = self.text.len() as u32;
-        self.text.push_str(text);
-        let generated_end = self.text.len() as u32;
-        self.segments.push(MappedSegment {
-            generated_start,
-            generated_end,
-            source_start,
-        });
-    }
-
-    /// Wrap the plan with an unmapped `prefix` and `suffix`, shifting the inner
-    /// segment offsets. Used to add the `(` … `) ? ` ternary head around a
-    /// resolved condition expression while keeping the wrapper synthetic.
-    pub fn wrapped(&self, prefix: &str, suffix: &str) -> Self {
-        let mut text = String::with_capacity(prefix.len() + self.text.len() + suffix.len());
-        let mut segments = SmallVec::with_capacity(self.segments.len() + 2);
-
-        if !prefix.is_empty() {
-            text.push_str(prefix);
-            segments.push(MappedSegment {
-                generated_start: 0,
-                generated_end: prefix.len() as u32,
-                source_start: None,
-            });
-        }
-
-        let shift = prefix.len() as u32;
-        for seg in &self.segments {
-            segments.push(MappedSegment {
-                generated_start: seg.generated_start + shift,
-                generated_end: seg.generated_end + shift,
-                source_start: seg.source_start,
-            });
-        }
-        text.push_str(&self.text);
-
-        if !suffix.is_empty() {
-            let generated_start = text.len() as u32;
-            text.push_str(suffix);
-            segments.push(MappedSegment {
-                generated_start,
-                generated_end: text.len() as u32,
-                source_start: None,
-            });
-        }
-
-        Self { text, segments }
     }
 }
 
@@ -1262,8 +718,7 @@ impl VaporEffect<'_> {
                     if let VaporTextPart::Dynamic(_, part_anchors) = part {
                         anchors.extend(part_anchors.iter().map(|a| SegmentAnchor {
                             content_offset: base + a.content_offset,
-                            length: a.length,
-                            source_pos: a.source_pos,
+                            ..*a
                         }));
                     }
                 }
@@ -1496,7 +951,7 @@ pub struct VaporElementState<'a> {
     /// `(kind, own node ref)` of each child merged into this scope via
     /// `merge_into_stack_index`, in visit order — used to detect the narrow
     /// "this scope's entire content is one non-stable construct" case that
-    /// forwards through `_extend(..., { _: 8 /* NON_STABLE */ })` instead of
+    /// forwards through `_extend(..., { _: 1 /* NON_STABLE */ })` instead of
     /// the normal slot form (official `hasStableSlotRoot`/
     /// `markSlotRootOperations`). The node ref is the merged construct's own
     /// root ref — the `return nN` target when that path applies.

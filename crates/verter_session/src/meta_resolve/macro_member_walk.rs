@@ -1,9 +1,6 @@
-//! Helpers used by the per-macro projector decomposition:
-//! `defineProps<T>()` root-name collection and the slot-binding
-//! registry-collection skip predicate. Production routes through
-//! `meta_resolve::projectors::project_evaluated_types`; per-member
-//! reduction is owned by the projector via
-//! `materialize_component_meta_type_expr_until_stable`.
+//! Root-name collection and slot-binding registry predicates.
+//! These helpers serve the retained declaration and binding evaluation paths;
+//! declared macro publication reads the framework-surface producer.
 
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 

@@ -498,6 +498,18 @@ pub fn model_modifiers_prop_name(name: &str) -> String {
     }
 }
 
+/// Vue's modifiers record over an authored modifier key type `M`:
+/// `Partial<Record<M, true>>` for an explicit `M`, otherwise
+/// `Record<string, true | undefined>`. Syntax-only producers splice the
+/// authored `M` text here; typed producers render the analyzer's retained
+/// modifiers payload instead.
+pub fn model_modifiers_record(explicit_keys: Option<&str>) -> TscSpliceText {
+    match explicit_keys {
+        Some(keys) => TscSpliceText::new(format!("Partial<Record<{keys}, true>>")),
+        None => TscSpliceText::new("Record<string, true | undefined>"),
+    }
+}
+
 impl TscPropRow {
     /// Construct the modifiers row shared by typed and untyped model projections.
     pub fn model_modifiers(name: &str, type_text: TscSpliceText, macro_index: u32) -> Self {
@@ -523,7 +535,7 @@ impl TscModelProjection {
             value_type: TscSpliceText::new("unknown"),
             modifiers_prop: TscPropRow::model_modifiers(
                 name,
-                TscSpliceText::new("Record<string, true | undefined>"),
+                model_modifiers_record(None),
                 macro_index,
             ),
             anchor: MacroAnchor::Synthesized {

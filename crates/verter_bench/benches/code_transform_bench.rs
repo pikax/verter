@@ -135,7 +135,8 @@ fn batch_vs_sequential(c: &mut Criterion) {
             b.iter(|| {
                 let allocator = Allocator::new();
                 let mut ct = CodeTransform::new(black_box(&source), &allocator);
-                ct.batch_overwrite(black_box(&overwrite_items));
+                ct.try_batch_overwrite(black_box(&overwrite_items))
+                    .expect("benchmark ranges are sorted and disjoint");
                 black_box(ct.build_string());
             });
         });
@@ -225,7 +226,7 @@ fn source_map_generation(c: &mut Criterion) {
         let ct = CodeTransform::new(&source, &allocator);
         b.iter(|| {
             let options = SourceMapOptions::new().with_source("test.vue");
-            black_box(ct.generate_map(options));
+            black_box(ct.generate_map(options).expect("mapped transform"));
         });
     });
 
@@ -242,7 +243,7 @@ fn source_map_generation(c: &mut Criterion) {
             }
             b.iter(|| {
                 let options = SourceMapOptions::new().with_source("test.vue");
-                black_box(ct.generate_map(options));
+                black_box(ct.generate_map(options).expect("mapped transform"));
             });
         });
     }
@@ -293,7 +294,7 @@ fn chunk_iteration(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(ct.build_string());
                     let options = SourceMapOptions::new().with_source("test.vue");
-                    black_box(ct.generate_map(options));
+                    black_box(ct.generate_map(options).expect("mapped transform"));
                 });
             },
         );
@@ -350,7 +351,7 @@ fn scaling(c: &mut Criterion) {
                     // Build output + source map
                     black_box(ct.build_string());
                     let options = SourceMapOptions::new().with_source("test.vue");
-                    black_box(ct.generate_map(options));
+                    black_box(ct.generate_map(options).expect("mapped transform"));
                 });
             },
         );

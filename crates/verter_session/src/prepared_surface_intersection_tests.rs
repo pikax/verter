@@ -412,11 +412,7 @@ defineEmits<{ submit: [event: Event] }>()
 /// `synthesize_model_prop_and_event` push to
 /// `declared_in_macro_type_arg: false` causes both assertions below
 /// to FAIL — that path is the load-bearing producer of `meta.props`
-/// for defineModel. The `model.rs:project_model` projector site
-/// independently sets `declared_in_macro_type_arg: true` on its
-/// `ExpandedField` (R21-F1 c3) so the projector arm of the
-/// publication chain also reports the correct structural fact when
-/// the analyzer's synthesis is bypassed by a downstream consumer.
+/// for defineModel.
 #[test]
 fn r21_c3_define_model_props_marked_declared_in_macro_type_arg() {
     let project = make_project();

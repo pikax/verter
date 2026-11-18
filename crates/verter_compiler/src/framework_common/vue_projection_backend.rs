@@ -30,18 +30,19 @@ use crate::framework_common::projection_plan::{
     build_projection_plan, incomplete_missing_parse, incomplete_parse_snapshot_mismatch, PlanInput,
     ProjectionPlan,
 };
-use crate::framework_common::vue_bridge::VueCarrierCompiler;
-use crate::framework_common::vue_carrier_frontend::VueSfcV3;
+use crate::framework_common::vue_carrier_frontend::{VueCarrierFrontend, VueSfcV3};
 use crate::framework_common::FrameworkParseArtifact;
 use crate::ide::vue_projection::attribute_operations::project_attribute_operations;
 use crate::ide::vue_projection::binder_capture::{capture_binder_plan, BinderCapturePlan};
 use crate::ide::vue_projection::binding_views::{project_binding_views, BindingViewsProjection};
+use crate::ide::vue_projection::checking_module::setup_binding_kinds;
 use crate::ide::vue_projection::component_resolution::project_component_resolution;
 use crate::ide::vue_projection::component_use::project_component_uses;
 use crate::ide::vue_projection::event_keys::project_event_transport;
 use crate::ide::vue_projection::generic_interop::project_advanced_generic_uses;
 use crate::ide::vue_projection::options_api::project_options_pair;
 use crate::ide::vue_projection::props::{caller_and_setup_from_blocks, project_props};
+use verter_parser::types::BindingType;
 
 /// STP13 named products: the acceptance surface of
 /// [`VueProjectionBackend::options_projection`]. Re-exported here (rather
@@ -129,9 +130,28 @@ pub use crate::ide::vue_projection::public_constructor::{
     VuePublicConstructorContract, EXPOSE_PROVIDER, PUBLIC_COMPONENT, PUBLIC_INSTANCE, PUBLIC_PROPS,
 };
 use crate::ide::vue_projection::script_setup::{
-    project_script_pair, ScriptBlockInput, ScriptProjectionFacts, SetupProjectionRefusal,
+    project_script_pair, ScriptBlockInput, ScriptProjectionFacts,
 };
-use crate::parser::types::RootNodeScript;
+
+/// The declaration product: the backend's `ProjectionBackend::Declarations`.
+pub use crate::ide::projection_declarations::{ClosureRefusal, DeclarationProjectionProduct};
+/// The checking module of one carrier and the fragments its products
+/// contribute. Re-exported here (rather than through `ide`, which is
+/// crate-internal) so the content mapper, diagnostic attribution and the
+/// CLI driver name the same types as the composer.
+pub use crate::ide::vue_projection::checking_fragment::{
+    BlockHead, CheckingFragment, CheckingPiece, ObligationFamily, PlacedStatement,
+    PreludeDeclaration, StatementAnchor, StatementPhase, TemplateBlockId, UseHost,
+};
+pub use crate::ide::vue_projection::checking_module::{
+    compose_checking_module, CheckingDialect, CheckingModule, CheckingModuleInput,
+    CheckingModuleRefusal, ObligationSpan, WithheldProduct, WithheldReason,
+};
+/// The reasons a [`CheckingModuleRefusal`] carries, so a consumer words each
+/// one without reaching into the crate-internal `ide` tree.
+pub use crate::ide::vue_projection::external_sources::ExternalLegality;
+pub use crate::ide::vue_projection::script_setup::SetupProjectionRefusal;
+use crate::parser::types::{ParsedSfc, RootNodeScript};
 use crate::standalone::{DirectCompileError, StandaloneCompiler};
 
 /// The two authored script blocks of one carrier plus the `generic`
@@ -145,6 +165,34 @@ type AuthoredScriptBlocks<'s> = (
 /// Vue IDE projection backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VueProjectionBackend;
+
+/// What every product lookup reads.
+#[derive(Debug, Clone, Copy)]
+pub struct VueProductInput<'a> {
+    pub source: &'a str,
+    pub artifact: &'a FrameworkParseArtifact,
+    pub canonical_id: &'a str,
+    pub custom_elements: Option<&'a [String]>,
+}
+
+/// A product the Vue projection backend can produce. Implemented by each
+/// product in its own module. Lookup is monomorphised; there is no registry.
+pub trait VueProjectionProduct: Sized {
+    fn project(
+        backend: &VueProjectionBackend,
+        input: &VueProductInput<'_>,
+    ) -> Result<Self, SetupProjectionRefusal>;
+}
+
+impl VueProjectionBackend {
+    /// The product `P` for one admitted parse.
+    pub fn product<P: VueProjectionProduct>(
+        &self,
+        input: &VueProductInput<'_>,
+    ) -> Result<P, SetupProjectionRefusal> {
+        P::project(self, input)
+    }
+}
 
 /// Compile diagnostic tagged with the source space it was emitted against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,13 +242,13 @@ impl VueProjectionBackend {
     /// Adapter this backend answers to.
     #[must_use]
     pub fn adapter_id(&self) -> FrameworkAdapterId {
-        VueCarrierCompiler.adapter_id()
+        VueCarrierFrontend.adapter_id()
     }
 
     /// Carrier language this backend projects.
     #[must_use]
     pub fn carrier_language_id(&self) -> LanguageId {
-        VueCarrierCompiler.carrier_language_id()
+        VueCarrierFrontend.carrier_language_id()
     }
 
     /// Source-backed projection plan. Dormant relative to [`Self::project_ide`]:
@@ -214,7 +262,21 @@ impl VueProjectionBackend {
         artifact: &FrameworkParseArtifact,
         canonical_id: &str,
     ) -> ProjectionPlan {
-        match VueCarrierCompiler.parsed_sfc(artifact) {
+        self.projection_plan_with_custom_elements(source, artifact, canonical_id, None)
+    }
+
+    /// [`Self::projection_plan`] for an artifact parsed under a custom-element
+    /// policy: tags the prefixes match are admitted as custom element uses.
+    /// `custom_elements` must be the prefixes selected for this parsed artifact.
+    #[must_use]
+    pub fn projection_plan_with_custom_elements(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+        custom_elements: Option<&[String]>,
+    ) -> ProjectionPlan {
+        match VueCarrierFrontend.parsed_sfc(artifact) {
             Some(parsed) => {
                 let exact_source = artifact.carrier_source().as_ref() == source;
                 if !exact_source {
@@ -226,6 +288,7 @@ impl VueProjectionBackend {
                     parsed,
                     parse_key: Some(artifact.parse_key()),
                     syntax_profile: Some(artifact.syntax_profile()),
+                    custom_elements,
                 })
             }
             None => incomplete_missing_parse(canonical_id, source),
@@ -269,7 +332,7 @@ impl VueProjectionBackend {
         artifact: &FrameworkParseArtifact,
         canonical_id: &str,
     ) -> Result<AttributeOperationsProjection, SetupProjectionRefusal> {
-        let parsed = VueCarrierCompiler
+        let parsed = VueCarrierFrontend
             .parsed_sfc(artifact)
             .ok_or(SetupProjectionRefusal::MissingParse)?;
         if artifact.carrier_source().as_ref() != source {
@@ -294,7 +357,7 @@ impl VueProjectionBackend {
         artifact: &FrameworkParseArtifact,
         canonical_id: &str,
     ) -> Result<ComponentUseProjection, SetupProjectionRefusal> {
-        let parsed = VueCarrierCompiler
+        let parsed = VueCarrierFrontend
             .parsed_sfc(artifact)
             .ok_or(SetupProjectionRefusal::MissingParse)?;
         if artifact.carrier_source().as_ref() != source {
@@ -317,10 +380,15 @@ impl VueProjectionBackend {
         custom_elements: Option<&[String]>,
     ) -> Result<ComponentResolutionProjection, SetupProjectionRefusal> {
         let script = self.script_projection(source, artifact)?;
-        let parsed = VueCarrierCompiler
+        let parsed = VueCarrierFrontend
             .parsed_sfc(artifact)
             .ok_or(SetupProjectionRefusal::MissingParse)?;
-        let plan = self.projection_plan(source, artifact, canonical_id);
+        let plan = self.projection_plan_with_custom_elements(
+            source,
+            artifact,
+            canonical_id,
+            custom_elements,
+        );
         let attributes = project_attribute_operations(&plan, parsed, source);
         let uses = project_component_uses(&plan, &attributes);
         Ok(project_component_resolution(
@@ -342,7 +410,7 @@ impl VueProjectionBackend {
         artifact: &FrameworkParseArtifact,
         canonical_id: &str,
     ) -> Result<EventTransportPlan, SetupProjectionRefusal> {
-        let parsed = VueCarrierCompiler
+        let parsed = VueCarrierFrontend
             .parsed_sfc(artifact)
             .ok_or(SetupProjectionRefusal::MissingParse)?;
         if artifact.carrier_source().as_ref() != source {
@@ -374,7 +442,7 @@ impl VueProjectionBackend {
     ) -> Result<AdvancedGenericUseProjection, SetupProjectionRefusal> {
         let (_, _, generic) = self.script_blocks(source, artifact)?;
         let binder = public_binder(generic)?;
-        let parsed = VueCarrierCompiler
+        let parsed = VueCarrierFrontend
             .parsed_sfc(artifact)
             .ok_or(SetupProjectionRefusal::MissingParse)?;
         let plan = self.projection_plan(source, artifact, canonical_id);
@@ -392,7 +460,7 @@ impl VueProjectionBackend {
         artifact: &FrameworkParseArtifact,
         canonical_id: &str,
     ) -> Result<(PropsProjection, CallerAndSetupPropsContract), SetupProjectionRefusal> {
-        let parsed = VueCarrierCompiler
+        let parsed = VueCarrierFrontend
             .parsed_sfc(artifact)
             .ok_or(SetupProjectionRefusal::MissingParse)?;
         if artifact.carrier_source().as_ref() != source {
@@ -416,8 +484,21 @@ impl VueProjectionBackend {
         source: &str,
         artifact: &FrameworkParseArtifact,
     ) -> Result<BindingViewsProjection, SetupProjectionRefusal> {
+        let parsed = self.admitted_parse(source, artifact)?;
+        let kinds = setup_binding_kinds(source, parsed);
+        self.binding_views_over(source, artifact, &kinds)
+    }
+
+    /// [`Self::binding_views`] over the setup binding classification the
+    /// caller already read from its script preparation.
+    pub fn binding_views_over(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        kinds: &[(String, BindingType)],
+    ) -> Result<BindingViewsProjection, SetupProjectionRefusal> {
         let (normal, setup, generic) = self.script_blocks(source, artifact)?;
-        project_binding_views(normal, setup, generic)
+        project_binding_views(normal, setup, generic, kinds)
     }
 
     /// Actual usage accounting over the admitted carrier's own regions:
@@ -430,7 +511,7 @@ impl VueProjectionBackend {
         source: &str,
         artifact: &FrameworkParseArtifact,
     ) -> Result<BindingUsageSet, SetupProjectionRefusal> {
-        let parsed = VueCarrierCompiler
+        let parsed = VueCarrierFrontend
             .parsed_sfc(artifact)
             .ok_or(SetupProjectionRefusal::MissingParse)?;
         let exact_source = artifact.carrier_source().as_ref() == source;
@@ -446,7 +527,8 @@ impl VueProjectionBackend {
         .flatten()
         .collect::<Vec<_>>()
         .join("\n");
-        let views = project_binding_views(normal, setup, generic)?;
+        // Only the declared names are read, never a write shape.
+        let views = project_binding_views(normal, setup, generic, &[])?;
         let declared: Vec<String> = views
             .read
             .bindings
@@ -501,6 +583,24 @@ impl VueProjectionBackend {
         project_public_constructor(normal, setup, generic)
     }
 
+    /// The admitted parse of exactly `source`, for the products that read
+    /// the parsed template or script blocks themselves (the template
+    /// topology, the setup binding kinds). Refuses an artifact that is not a
+    /// Vue parse or was not parsed from `source`.
+    pub(crate) fn admitted_parse<'a>(
+        &self,
+        source: &str,
+        artifact: &'a FrameworkParseArtifact,
+    ) -> Result<&'a ParsedSfc, SetupProjectionRefusal> {
+        let parsed = VueCarrierFrontend
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        if artifact.carrier_source().as_ref() != source {
+            return Err(SetupProjectionRefusal::MissingParse);
+        }
+        Ok(parsed)
+    }
+
     /// The two authored script blocks and the `generic` attribute value of
     /// an admitted parse of exactly `source`. Both script-facing projections
     /// read the blocks here, so neither can drift onto a different notion of
@@ -510,13 +610,7 @@ impl VueProjectionBackend {
         source: &'s str,
         artifact: &FrameworkParseArtifact,
     ) -> Result<AuthoredScriptBlocks<'s>, SetupProjectionRefusal> {
-        let parsed = VueCarrierCompiler
-            .parsed_sfc(artifact)
-            .ok_or(SetupProjectionRefusal::MissingParse)?;
-        let exact_source = artifact.carrier_source().as_ref() == source;
-        if !exact_source {
-            return Err(SetupProjectionRefusal::MissingParse);
-        }
+        let parsed = self.admitted_parse(source, artifact)?;
         let block = |script: &RootNodeScript| {
             let span = script.content?;
             Some(ScriptBlockInput {
@@ -553,7 +647,7 @@ impl VueProjectionBackend {
 impl ProjectionBackend for VueProjectionBackend {
     type IdeCompanion = VueIdeCompanion;
     type PublicApi = VuePublicConstructorContract;
-    type Declarations = ();
+    type Declarations = DeclarationProjectionProduct;
     type ParseArtifact = FrameworkParseArtifact;
     type Request = CompileRequest;
     type ExecutionInputs = VueProjectionInputs;
@@ -575,7 +669,7 @@ impl ProjectionBackend for VueProjectionBackend {
             })
         })?;
         require_ide_only(request)?;
-        let Some(parsed) = VueCarrierCompiler.parsed_sfc(artifact) else {
+        let Some(parsed) = VueCarrierFrontend.parsed_sfc(artifact) else {
             return Err(no_ide());
         };
         let requested_profile = requested_vue_syntax_profile(request)?;
@@ -821,4 +915,5 @@ pub fn vue_projection_backend_registration(
         VueProjectionBackend.carrier_language_id(),
         Present(VueProjectionBackend),
     )
+    .expect("the built-in Vue profile manifest is admitted")
 }

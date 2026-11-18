@@ -20,13 +20,15 @@ use crate::ast::types::{
 };
 use crate::common::{ErrorCode, Span};
 use crate::cursor::ScriptLanguage;
-use crate::diagnostics::{CompilerErrorCode, Diagnostic, SyntaxPluginContext};
+use crate::diagnostics::{CompilerErrorCode, Diagnostic, SyntaxPluginContext, SyntaxPluginOptions};
 use crate::parser::types::{
     RootNodeKind, RootNodeScript, RootNodeStyle, RootNodeTemplate, RootNodeTemplateContent,
     RootNodeUnknown, StyleLang,
 };
 use crate::tokenizer::{Event as TokenizerEvent, QuoteType};
-use crate::types::{NodeId, NodeProp, NodeTag};
+use crate::types::{
+    classify_directive_name, BuiltinDirective, DirectiveKind, NodeId, NodeProp, NodeTag,
+};
 use crate::utils::vue::{is_html_tag, is_mathml_tag, is_svg_tag, is_void_tag};
 use smallvec::SmallVec;
 
@@ -627,10 +629,16 @@ impl Syntax {
 
     /// `CloseTag` — a `</name>` close tag was encountered.
     ///
-    /// Validates that the close tag name matches the top of `stack_elements`
-    /// (case-insensitive). On match, pops the element and stores it as an
-    /// SFC root node or closes it in the AST builder. On mismatch, emits
-    /// `XInvalidEndTag` and rejects the close tag.
+    /// Recovers like Vue's compiler-core: the close tag closes the NEAREST
+    /// open element with the same name (case-insensitive). When that element
+    /// is an ancestor of the top of `stack_elements`, every element opened
+    /// inside it is implicitly closed at the `<` of this close tag, and ONE
+    /// `XMissingEndTag` is reported at the innermost unclosed element. A close
+    /// tag that matches no open element emits `XInvalidEndTag` and is ignored.
+    ///
+    /// The implicitly closed elements are always template content: the SFC
+    /// root sits at the bottom of the stack, so it can only be the matched
+    /// element, never an implied one.
     fn handle_close_tag<'alloc>(
         &mut self,
         start: u32,
@@ -649,42 +657,42 @@ impl Syntax {
             return;
         }
 
-        // --- Strict validation: close-tag must match the top of the open stack ---
-        let open = match self.stack_elements.last() {
-            Some(se) => se,
-            None => {
-                // Orphan close tag — nothing on the stack to match.
-                self.diagnostics.push(Diagnostic::error(
-                    "syntax",
-                    CompilerErrorCode::XInvalidEndTag,
-                    Span::new(start, end),
-                ));
-                return;
-            }
-        };
-
-        let open_name = open.name_bytes(ctx);
-
-        if !open_name.eq_ignore_ascii_case(close_name) {
-            // Mismatch: close tag doesn't match the current open element.
-            // Strict mode: emit diagnostic and reject the close tag entirely.
+        // The nearest open element with this name, searching innermost first.
+        let Some(match_index) = self
+            .stack_elements
+            .iter()
+            .rposition(|se| se.name_bytes(ctx).eq_ignore_ascii_case(close_name))
+        else {
+            // No open element has this name (including an empty stack).
             self.diagnostics.push(Diagnostic::error(
                 "syntax",
                 CompilerErrorCode::XInvalidEndTag,
                 Span::new(start, end),
             ));
             return;
+        };
+
+        // Elements opened inside the matched one are left unclosed by the
+        // author: report the innermost once, then close each at this tag's `<`.
+        let implied_closes = self.stack_elements.len() - 1 - match_index;
+        if implied_closes > 0 {
+            let innermost = self.stack_elements[self.stack_elements.len() - 1];
+            self.diagnostics.push(Diagnostic::error(
+                "syntax",
+                CompilerErrorCode::XMissingEndTag,
+                Span::new(innermost.tag_open_start, innermost.tag_open_end),
+            ));
+        }
+        for _ in 0..implied_closes {
+            self.stack_elements.pop();
+            self.close_template_element(None, start, ctx);
         }
 
-        // Names match — safe to pop.
-        verter_debug_assert!(
-            !self.stack_elements.is_empty(),
-            "stack_elements should not be empty after name match"
-        );
         let open = self
             .stack_elements
             .pop()
-            .expect("invariant: stack non-empty after name match");
+            .expect("invariant: the matched element is still on the stack");
+        let open_name = open.name_bytes(ctx);
 
         let was_sfc_root = !self.template_mode && self.stack_elements.is_empty();
         let tag_close = make_close_tag(start, end, name_end);
@@ -712,8 +720,22 @@ impl Syntax {
                     self.store_unknown_node(&open, Some(tag_close), content);
                 }
             }
-        } else if let Some(builder) = self.ast_builder.as_mut() {
-            let closed_id = builder.close_element(Some(tag_close), start);
+        } else {
+            self.close_template_element(Some(tag_close), start, ctx);
+        }
+    }
+
+    /// Close the builder's innermost open element at `content_end` and run the
+    /// sibling validations that need it attached to its parent. A no-op when no
+    /// template builder is active.
+    fn close_template_element<'alloc>(
+        &mut self,
+        tag_close: Option<NodeTag>,
+        content_end: u32,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        if let Some(builder) = self.ast_builder.as_mut() {
+            let closed_id = builder.close_element(tag_close, content_end);
             self.validate_v_condition_adjacency(closed_id, ctx);
             self.validate_v_if_same_key(closed_id, ctx);
             self.validate_slot_names(closed_id, ctx);
@@ -742,8 +764,9 @@ impl Syntax {
             // so the node gets attached and isn't orphaned.
             if !is_sfc_root {
                 if let Some(builder) = self.ast_builder.as_mut() {
-                    // Use the open tag end as a synthetic content_end.
-                    let closed_id = builder.close_element(None, se.tag_open_end);
+                    // Recovery retains the authored content through EOF. The
+                    // opening tag is not the end of an unclosed element's body.
+                    let closed_id = builder.close_element(None, ctx.bytes.len() as u32);
                     self.validate_v_condition_adjacency(closed_id, ctx);
                     self.validate_v_if_same_key(closed_id, ctx);
                 }
@@ -756,7 +779,7 @@ impl Syntax {
                         if let Some(mut builder) = self.ast_builder.take() {
                             builder.ast.root.tag_close = None;
                             if let Some(c) = builder.ast.root.content.as_mut() {
-                                c.end = se.tag_open_end;
+                                c.end = ctx.bytes.len() as u32;
                             }
                             self.template_ast = Some(builder.finish());
                         }
@@ -1269,11 +1292,15 @@ impl Syntax {
                     };
                 }
 
-                match dir_name {
-                    b"v-if" | b"v-else-if" | b"v-else" => {
-                        let kind = match dir_name {
-                            b"v-if" => ElementNodeConditionKind::If,
-                            b"v-else-if" => ElementNodeConditionKind::ElseIf,
+                match classify_directive_name(dir_name) {
+                    DirectiveKind::Builtin(
+                        which @ (BuiltinDirective::If
+                        | BuiltinDirective::ElseIf
+                        | BuiltinDirective::Else),
+                    ) => {
+                        let kind = match which {
+                            BuiltinDirective::If => ElementNodeConditionKind::If,
+                            BuiltinDirective::ElseIf => ElementNodeConditionKind::ElseIf,
                             _ => ElementNodeConditionKind::Else,
                         };
                         // v-if and v-else-if require an expression
@@ -1295,7 +1322,7 @@ impl Syntax {
                         };
                         warn_if_dup!(builder.set_v_condition(cond));
                     }
-                    b"v-for" => {
+                    DirectiveKind::Builtin(BuiltinDirective::For) => {
                         let p = prop.as_ref().expect("invariant: prop is Some");
                         if !prop_has_value(p) {
                             self.diagnostics.push(Diagnostic::error(
@@ -1321,7 +1348,7 @@ impl Syntax {
                                 .expect("invariant: prop not yet taken in v-for branch"),
                         ));
                     }
-                    b"v-slot" | b"#" => {
+                    DirectiveKind::Builtin(BuiltinDirective::Slot) => {
                         // v-slot placement (components/<template> only) is a
                         // compiler-core TRANSFORM-time check in official Vue
                         // (`X_V_SLOT_MISPLACED` in `transformElement.ts`), not
@@ -1342,7 +1369,7 @@ impl Syntax {
                         }
                         warn_if_dup!(builder.set_v_slot(slot_prop));
                     }
-                    b"v-once" => {
+                    DirectiveKind::Builtin(BuiltinDirective::Once) => {
                         warn_if_dup!(builder.set_v_once(
                             prop.take()
                                 .expect("invariant: prop not yet taken in v-once branch"),
@@ -1350,7 +1377,7 @@ impl Syntax {
                     }
                     // v-bind / : shorthand — classify arg for key/class/style, or spread
                     // Note: `:attr` without value is Vue 3.4 same-name shorthand, NOT an error.
-                    b"v-bind" | b":" => {
+                    DirectiveKind::Bind => {
                         let p = prop
                             .as_ref()
                             .expect("invariant: prop not yet taken in v-bind branch");
@@ -1396,7 +1423,7 @@ impl Syntax {
                     // v-on / @ shorthand — event listener or spread
                     // Note: `@click` without value is Vue 3.4 same-name shorthand, NOT an error.
                     // `@click.prevent` without value is also valid (modifier-only).
-                    b"v-on" | b"@" => {
+                    DirectiveKind::On => {
                         let p = prop
                             .as_ref()
                             .expect("invariant: prop not yet taken in v-on branch");
@@ -1410,7 +1437,7 @@ impl Syntax {
                         }
                     }
                     // v-model
-                    b"v-model" => {
+                    DirectiveKind::Builtin(BuiltinDirective::Model) => {
                         let p = prop
                             .as_ref()
                             .expect("invariant: prop is Some in v-model branch");
@@ -1450,21 +1477,23 @@ impl Syntax {
                         builder.add_prop_flag(PropFlags::HasModel);
                     }
                     // v-show
-                    b"v-show" => {
+                    DirectiveKind::Builtin(BuiltinDirective::Show) => {
                         builder.add_prop_flag(PropFlags::HasShow);
                     }
                     // v-html
-                    b"v-html" => {
+                    DirectiveKind::Builtin(BuiltinDirective::Html) => {
                         builder.add_prop_flag(PropFlags::HasVHtml);
                     }
                     // v-text
-                    b"v-text" => {
+                    DirectiveKind::Builtin(BuiltinDirective::Text) => {
                         builder.add_prop_flag(PropFlags::HasVText);
                     }
                     // Built-in directives that don't set any prop flag
-                    b"v-pre" | b"v-cloak" | b"v-memo" => {}
+                    DirectiveKind::Builtin(
+                        BuiltinDirective::Pre | BuiltinDirective::Cloak | BuiltinDirective::Memo,
+                    ) => {}
                     // Any other v-* directive is a custom directive
-                    _ => {
+                    DirectiveKind::Custom | DirectiveKind::Static => {
                         builder.add_prop_flag(PropFlags::HasCustomDirective);
                     }
                 }
@@ -1513,15 +1542,17 @@ impl Syntax {
         if let Some(b) = self.ast_builder.as_mut() {
             let is_whitespace_only = if !is_entity {
                 ctx.input[start as usize..end as usize]
-                    .chars()
-                    .all(|c| c.is_whitespace())
+                    .bytes()
+                    .all(crate::tokenizer::helpers::is_whitespace)
             } else {
                 // For entity text, decode and check if whitespace.
-                // Common whitespace entities: &#32;, &#10;, &nbsp;, &#160;
+                // HTML whitespace excludes non-breaking spaces such as &nbsp;.
                 let raw = &ctx.input[start as usize..end as usize];
                 let mut decoded = String::new();
                 crate::common::html_entities::decode_html_entities_into(&mut decoded, raw);
-                decoded.chars().all(|c| c.is_whitespace())
+                decoded
+                    .bytes()
+                    .all(crate::tokenizer::helpers::is_whitespace)
             };
             b.add_text(start, end, is_entity, is_whitespace_only);
         }
@@ -1654,9 +1685,12 @@ impl Syntax {
             return;
         };
 
-        // Only check elements in v-if chains
-        if el.v_condition.is_none() {
-            return;
+        // Only `v-else-if` / `v-else` branches are checked, against the
+        // branches of their own chain. A `v-if` starts a new chain, so it may
+        // share a key with earlier siblings.
+        match &el.v_condition {
+            Some(cond) if !matches!(cond.kind, ElementNodeConditionKind::If) => {}
+            _ => return,
         }
 
         // Find :key prop on this element
@@ -1915,4 +1949,47 @@ pub fn sfc_script_lang_mismatch_span(source: &str) -> Option<Span> {
         .iter()
         .find(|diagnostic| diagnostic.code == CompilerErrorCode::ScriptLangMismatch)
         .map(|diagnostic| diagnostic.span)
+}
+
+/// Parse Vue carrier syntax without semantic or compile-time validation.
+pub fn parse_sfc(
+    input: &str,
+    delimiters: Option<(&str, &str)>,
+    custom_elements: Option<&[String]>,
+) -> types::ParsedSfc {
+    let bytes = input.as_bytes();
+
+    let syntax_options = if let Some(prefixes) = custom_elements {
+        let prefixes = prefixes.to_vec();
+        crate::diagnostics::SyntaxPluginOptions {
+            is_custom_element: Box::new(move |tag_name: &[u8]| {
+                prefixes
+                    .iter()
+                    .any(|prefix| tag_name.starts_with(prefix.as_bytes()))
+            }),
+            ..SyntaxPluginOptions::default()
+        }
+    } else {
+        SyntaxPluginOptions::default()
+    };
+    let ctx = crate::diagnostics::SyntaxPluginContext {
+        input,
+        bytes,
+        options: &syntax_options,
+        diagnostics: Vec::new(),
+    };
+
+    let mut syntax = Syntax::new(false);
+    if let Some((open, close)) = delimiters {
+        crate::tokenizer::byte::tokenize_sfc_with_delimiters(
+            bytes,
+            |e| syntax.handle(&e, &ctx),
+            open.as_bytes(),
+            close.as_bytes(),
+        );
+    } else {
+        crate::tokenizer::byte::tokenize_sfc(bytes, |e| syntax.handle(&e, &ctx));
+    }
+
+    syntax.into_parsed_sfc()
 }

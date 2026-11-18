@@ -33,7 +33,7 @@
 //! ## Shared vs unique logic
 //!
 //! Binding resolution (`_ctx.`/`$setup.`/`.value` prefixing) is shared via
-//! [`super::binding::BindingResolver`]. Runtime helper constants and import
+//! [`crate::template::binding::BindingResolver`]. Runtime helper constants and import
 //! bitflags are shared via [`super::shared::helpers`]. The DFS walk is shared
 //! via [`super::walker`]. Element-specific codegen (props, directives,
 //! whitespace resolution, children separators) lives in this module's
@@ -64,7 +64,7 @@ pub mod text;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::code_transform::SegmentAnchor;
+use crate::code_transform::{MappedGeneratedText, SegmentAnchor};
 
 use crate::ast::types::{
     AstNodeKind, ChildrenMode, CommentNode, ElementNode, ElementNodeCondition,
@@ -74,14 +74,13 @@ use crate::parser::types::RootNodeTemplate;
 use crate::template::oxc::types::{OxcNodeData, OxcParsedElement, OxcParsedExpression};
 use crate::types::NodeId;
 
-use super::binding::BindingResolver;
-use super::expression::{build_prefixed_expr_segments, resolve_simple_expr_segments};
 use super::shared::helpers::{self, VdomHelper};
-use super::types::{
-    ChildKind, ChildRecord, CodeGenOutput, ConditionChainRole, MappedGeneratedText, ScopeClose,
-    SegmentedOverwriteAuthority,
-};
+use super::types::{ChildKind, ChildRecord, CodeGenOutput, ConditionChainRole, ScopeClose};
 use super::{TemplateCodeGen, TemplateCodeGenOptions};
+use crate::template::binding::prefixed_expr::{
+    build_prefixed_expr_segments, resolve_simple_expr_segments,
+};
+use crate::template::binding::BindingResolver;
 
 /// VDOM code generation backend.
 ///
@@ -343,8 +342,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         continue;
                     };
                     let value = &source[vs as usize..ve as usize];
-                    let oxc_exp =
-                        crate::template::code_gen::vapor::find_prop_oxc_exp(oxc_el, prop_idx);
+                    let oxc_exp = crate::template::binding::prefixed_expr::find_prop_oxc_exp(
+                        oxc_el, prop_idx,
+                    );
                     // Modifier wrapping (`_withModifiers`/`_withKeys`) composes
                     // around the handler span separately — no current case
                     // combines it with handler caching, so skip reserving
@@ -966,8 +966,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 preamble.push('\n');
                 hoisted_preamble_anchors.extend(constant_anchors.iter().map(|a| SegmentAnchor {
                     content_offset: base + a.content_offset,
-                    length: a.length,
-                    source_pos: a.source_pos,
+                    ..*a
                 }));
             }
             preamble.push('\n');
@@ -1151,7 +1150,6 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                             child.start,
                             &prefix,
                             &hoisted_preamble_anchors,
-                            SegmentedOverwriteAuthority::new(),
                         );
                     } else {
                         out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);

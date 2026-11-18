@@ -9,19 +9,14 @@
 //! the SOLE props/emits/slots member authority, resolved through the active
 //! `ResolverContext` so overlay sessions read overlay content), with NO solver
 //! fallback, NO source reparse, and NO `eval_source` type-parameter
-//! collection. The flat `evaluated_types.props` field contributes only props
-//! exactness / execution-status / diagnostics metadata. Emits are complete
-//! occurrence rows and never join the flat evaluated emit table.
-//!
-//! `project_define_macro_shapes` runs AFTER `project_evaluated_types` (so
-//! the flat metadata fields exist to fold in) and BEFORE
-//! `resolve_slot_bindings_graph_native` (which consumes the slot shape).
+//! collection. Each row supplies its own expansion metadata. Shapes are built
+//! before slot-binding synthesis consumes the slot shape.
 //!
 //! Per-kind rules:
 //! - **Props**: properties only (a member is a property name on the DTO
 //!   surface), each typed from the normalized prop row's published
 //!   member-value SOURCE
-//!   ([`crate::typeinfo::framework_surface::results::ResolvedPropField::type_source`]
+//!   ([`crate::typeinfo::framework_surface::results::ResolvedPropField::authority`]
 //!   — the prop-type AUTHORITY). A call-signature-only
 //!   `defineProps<{ (): void }>()` has NO property members, so its DTO
 //!   `props` is empty and the published `define_props` shape is EMPTY — no
@@ -36,7 +31,6 @@
 
 use std::sync::Arc;
 
-use verter_session_query::analysis::component_meta::MacroExpansionDiagnostics;
 use verter_session_query::analysis::type_expand::{
     ExpandedComponentTypes, ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedObjectShape,
     ExpandedProperty, ExpansionExecutionStatus, ExpansionResult,
@@ -50,22 +44,19 @@ use verter_type_engine::resolver_core::ResolverContext;
 /// Top-level driver: publish the `define_props` / `define_emits` /
 /// `define_slots` shapes for every type-based macro in `snapshot`.
 ///
-/// Runs after [`super::project_evaluated_types`]; reads the per-macro DTOs
-/// through the active context and draws member types from the already-projected
-/// flat fields. `diag_sink` is reserved for macro-expansion diagnostics; the
-/// shape conversions below are pure (the diagnostics surface upstream at the
-/// projector / DTO resolution layer).
+/// Reads normalized rows through the active context; no declaration engine is needed.
 pub(crate) fn project_define_macro_shapes<M: verter_audit::observe::ObserveExec>(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities<M>,
+    >,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
     evaluated_types: &mut ExpandedComponentTypes,
-    _diag_sink: &mut [MacroExpansionDiagnostics],
     purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
 ) {
-    let dispatch = query_engine.dispatch;
     use crate::resolver_core::ComponentMetaResolutionPurpose;
-    let ctx = query_engine.ctx;
 
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
         if !mac.is_type_based {
@@ -91,7 +82,7 @@ pub(crate) fn project_define_macro_shapes<M: verter_audit::observe::ObserveExec>
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
                 if let Some(result) =
-                    define_props_shape(ctx, dispatch, owner_canonical, macro_index, evaluated_types)
+                    define_props_shape(ctx, dispatch, owner_canonical, macro_index)
                 {
                     evaluated_types.define_props.push(ExpandedMacroProps {
                         macro_index,
@@ -129,17 +120,11 @@ pub(crate) fn project_define_macro_shapes<M: verter_audit::observe::ObserveExec>
 
 /// Build the `define_props` shape: one [`ExpandedProperty`] per DTO prop row,
 /// typed from the normalized row's published member-value SOURCE
-/// ([`crate::typeinfo::framework_surface::results::ResolvedPropField::type_source`])
+/// ([`crate::typeinfo::framework_surface::results::ResolvedPropField::authority`])
 /// — the prop-type AUTHORITY. The normalization already applied the
 /// authored-candidate proof, the closed/ref upgrades, and the projected
 /// member-path replay split; a genuine miss arrives as the typed
 /// `Failed(UnrepresentableRequiredMemberValue)` position.
-///
-/// The flat `evaluated_types.props` field — when one matched by name —
-/// contributes ONLY exactness / execution-status / diagnostics metadata,
-/// NEVER the member-value source: preferring its `r#type` over the
-/// normalized row shadowed the session-resolved member source (the same
-/// competing-producer class the emit-authority rule closed).
 ///
 /// The DTO's producer-owned guarantee accompanies even an empty shape. A
 /// complete no-surface answer and an unavailable membership demand therefore
@@ -152,7 +137,6 @@ fn define_props_shape<M: verter_audit::observe::ObserveExec>(
     >,
     owner_canonical: &str,
     macro_index: usize,
-    evaluated_types: &ExpandedComponentTypes,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
@@ -172,18 +156,13 @@ fn define_props_shape<M: verter_audit::observe::ObserveExec>(
     let mut properties = Vec::with_capacity(dtos.prop_fields().len());
 
     for prop in dtos.prop_fields() {
-        // Metadata-only merge from the flat evaluated field: exactness /
-        // execution status / diagnostics fold in, the member-value source
-        // does NOT — the normalized row's `type_source` is authoritative.
-        if let Some(field) = evaluated_types
-            .props
-            .iter()
-            .find(|field| field.name == prop.analysis.name)
-        {
-            exactness = exactness.merge(field.exactness);
-            execution_status = merge_execution_status(execution_status, field.execution_status);
-            diagnostics.extend(field.diagnostics.clone());
-        }
+        let metadata =
+            verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(
+                &prop.authority,
+            );
+        exactness = exactness.merge(metadata.exactness);
+        execution_status = merge_execution_status(execution_status, metadata.execution_status);
+        diagnostics.extend(metadata.diagnostics);
         properties.push(ExpandedProperty {
             name: prop.analysis.name.clone(),
             ty: prop.authority.source_position(),

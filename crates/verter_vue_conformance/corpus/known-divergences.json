@@ -1,4 +1,240 @@
 {
   "schema": 1,
-  "cells": []
+  "cells": [
+    {
+      "case": "ssr/comment-only-template",
+      "backend": "vdom",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `openBlock`",
+        "[identifier] Program[2]/FunctionDeclaration[0] — private binding key: verter (scope#0, decl#3, slot[], Function) vs golden (scope#0, decl#2, slot[], Function)",
+        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression — node kind: verter `SequenceExpression` vs golden `CallExpression`",
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] — private binding key: verter (scope#0, decl#3, slot[], Function) vs golden (scope#0, decl#2, slot[], Function)"
+      ],
+      "total": 4,
+      "note": "Comment-only template with backticks in the comment: Verter's VDOM render wraps the comment in an openBlock sequence where the official output is a single call, and its Vapor module omits the vue import and items the official output has."
+    },
+    {
+      "case": "ssr/comment-only-template",
+      "backend": "vapor",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports(vue) — missing import source",
+        "[structure] Program — child count: verter 4 vs golden 6"
+      ],
+      "total": 2,
+      "note": "Comment-only template with backticks in the comment: Verter's VDOM render wraps the comment in an openBlock sequence where the official output is a single call, and its Vapor module omits the vue import and items the official output has."
+    },
+    {
+      "case": "ssr/comment-only-template-plain",
+      "backend": "vdom",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `openBlock`",
+        "[identifier] Program[2]/FunctionDeclaration[0] — private binding key: verter (scope#0, decl#3, slot[], Function) vs golden (scope#0, decl#2, slot[], Function)",
+        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression — node kind: verter `SequenceExpression` vs golden `CallExpression`",
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] — private binding key: verter (scope#0, decl#3, slot[], Function) vs golden (scope#0, decl#2, slot[], Function)"
+      ],
+      "total": 4,
+      "note": "Comment-only template: Verter's VDOM render wraps the comment in an openBlock sequence where the official output is a single call, and its Vapor module omits the vue import and items the official output has."
+    },
+    {
+      "case": "ssr/comment-only-template-plain",
+      "backend": "vapor",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports(vue) — missing import source",
+        "[structure] Program — child count: verter 4 vs golden 6"
+      ],
+      "total": 2,
+      "note": "Comment-only template: Verter's VDOM render wraps the comment in an openBlock sequence where the official output is a single call, and its Vapor module omits the vue import and items the official output has."
+    },
+    {
+      "case": "ssr/conditional-slot",
+      "backend": "vdom",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createCommentVNode`",
+        "[structure] Program — child count: verter 6 vs golden 7"
+      ],
+      "total": 2,
+      "note": "Conditional slot template with a bound condition: Verter's VDOM output imports createCommentVNode and has one module item fewer than the official output; Vapor has one module item fewer."
+    },
+    {
+      "case": "ssr/conditional-slot",
+      "backend": "vapor",
+      "topology": "non-inline",
+      "reasons": [
+        "[structure] Program — child count: verter 7 vs golden 8"
+      ],
+      "total": 1,
+      "note": "Conditional slot template with a bound condition: Verter's VDOM output imports createCommentVNode and has one module item fewer than the official output; Vapor has one module item fewer."
+    },
+    {
+      "case": "ssr/conditional-slot",
+      "backend": "vdom",
+      "topology": "inline",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createCommentVNode`",
+        "[structure] Program — child count: verter 4 vs golden 5"
+      ],
+      "total": 2,
+      "note": "Conditional slot template with a bound condition: Verter's VDOM output imports createCommentVNode and has one module item fewer than the official output; Vapor has one module item fewer."
+    },
+    {
+      "case": "ssr/conditional-slot-static",
+      "backend": "vdom",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createCommentVNode`",
+        "[identifier] Program[3]/FunctionDeclaration[0] — private binding key: verter (scope#0, decl#9, slot[], Function) vs golden (scope#0, decl#8, slot[], Function)",
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[2]/ArrayExpression[0]/ConditionalExpression[1]/ObjectExpression — child count: verter 2 vs golden 3",
+        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] — private binding key: verter (scope#0, decl#9, slot[], Function) vs golden (scope#0, decl#8, slot[], Function)"
+      ],
+      "total": 4,
+      "note": "Conditional slot template with a literal condition: Verter's VDOM output imports createCommentVNode and builds the dynamic slot object with fewer entries; its Vapor slot is a function where the official output holds an array."
+    },
+    {
+      "case": "ssr/conditional-slot-static",
+      "backend": "vapor",
+      "topology": "non-inline",
+      "reasons": [
+        "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody — child count: verter 2 vs golden 3"
+      ],
+      "total": 1,
+      "note": "Conditional slot template with a literal condition: Verter's VDOM output imports createCommentVNode and builds the dynamic slot object with fewer entries; its Vapor render has one statement fewer because it emits the slot as a static named function where the official output declares a render-local `let s` and builds a dynamic `$` slot array whose entry caches its function in it."
+    },
+    {
+      "case": "ssr/conditional-slot-static",
+      "backend": "vdom",
+      "topology": "inline",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createCommentVNode`",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[0]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[2]/ArrayExpression[0]/ConditionalExpression[1]/ObjectExpression — child count: verter 2 vs golden 3",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[0]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[2]/ArrayExpression[0]/ConditionalExpression[2] — node kind `UnaryExpression` vs leaf `ident` `undefined`"
+      ],
+      "total": 3,
+      "note": "Conditional slot template with a literal condition: Verter's VDOM output imports createCommentVNode and builds the dynamic slot object with fewer entries; its Vapor slot is a function where the official output holds an array."
+    },
+    {
+      "case": "ssr/css-vars-root",
+      "backend": "vdom",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports/side-effect — side-effect import sequence: verter [\"cases/ssr/css-vars-root.vue?vue&type=style&index=0&lang.css\"] vs golden []",
+        "[import] /imports(cases/ssr/css-vars-root.vue?vue&type=style&index=0&lang.css) — unexpected import source",
+        "[structure] Program — child count: verter 7 vs golden 6"
+      ],
+      "total": 3,
+      "note": "Style block with v-bind(): Verter's module imports the style sub-request that the official script and render modules do not carry, and its Vapor output uses useCssVars where the official output uses useVaporCssVars."
+    },
+    {
+      "case": "ssr/css-vars-root",
+      "backend": "vapor",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports/side-effect — side-effect import sequence: verter [\"cases/ssr/css-vars-root.vue?vue&type=style&index=0&lang.css\"] vs golden []",
+        "[import] /imports(cases/ssr/css-vars-root.vue?vue&type=style&index=0&lang.css) — unexpected import source",
+        "[import] /imports(vue) — unexpected imported helper/name `useCssVars`",
+        "[import] /imports(vue) — missing imported helper/name `useVaporCssVars`",
+        "[structure] Program — child count: verter 7 vs golden 6"
+      ],
+      "total": 5,
+      "note": "Style block with v-bind(): Verter's module imports the style sub-request that the official script and render modules do not carry, and its Vapor output uses useCssVars where the official output uses useVaporCssVars."
+    },
+    {
+      "case": "ssr/css-vars-root",
+      "backend": "vdom",
+      "topology": "inline",
+      "reasons": [
+        "[import] /imports/side-effect — side-effect import sequence: verter [\"cases/ssr/css-vars-root.vue?vue&type=style&index=0&lang.css\"] vs golden []",
+        "[import] /imports(cases/ssr/css-vars-root.vue?vue&type=style&index=0&lang.css) — unexpected import source",
+        "[structure] Program — child count: verter 5 vs golden 4"
+      ],
+      "total": 3,
+      "note": "Style block with v-bind(): Verter's module imports the style sub-request that the official script and render modules do not carry, and its Vapor output uses useCssVars where the official output uses useVaporCssVars."
+    },
+    {
+      "case": "ssr/scoped-slot-branches",
+      "backend": "vapor",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `setInsertionState`",
+        "[import] /imports(vue) — unexpected imported helper/name `txt`",
+        "[import] /imports(vue) — missing imported helper/name `extend`",
+        "[structure] Program — child count: verter 9 vs golden 8"
+      ],
+      "total": 4,
+      "note": "Scoped slot content with a v-if/v-else branch: Verter's Vapor output uses setInsertionState and txt where the official output uses extend, and its inline VDOM output imports createCommentVNode."
+    },
+    {
+      "case": "ssr/scoped-slot-branches",
+      "backend": "vdom",
+      "topology": "inline",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createCommentVNode`",
+        "[identifier] Program[1]/VariableDeclaration[1]/VariableDeclarator[0] — private binding key: verter (scope#0, decl#9, slot[], Const) vs golden (scope#0, decl#8, slot[], Const)",
+        "[identifier] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[0]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrowFunctionExpression[1]/FunctionBody[0]/ExpressionStatement[0]/ArrayExpression[0]/ConditionalExpression[1]/SequenceExpression[1]/CallExpression[2] — private binding key: verter (scope#0, decl#9, slot[], Const) vs golden (scope#0, decl#8, slot[], Const)"
+      ],
+      "total": 3,
+      "note": "Scoped slot content with a v-if/v-else branch: Verter's Vapor output uses setInsertionState and txt where the official output uses extend, and its inline VDOM output imports createCommentVNode."
+    },
+    {
+      "case": "ssr/scoped-style-root",
+      "backend": "vdom",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports/side-effect — side-effect import sequence: verter [\"cases/ssr/scoped-style-root.vue?vue&type=style&index=0&lang.css\"] vs golden []",
+        "[import] /imports(cases/ssr/scoped-style-root.vue?vue&type=style&index=0&lang.css) — unexpected import source",
+        "[structure] Program — child count: verter 8 vs golden 6"
+      ],
+      "total": 3,
+      "note": "Scoped style block: Verter's module imports the style sub-request that the official script and render modules do not carry."
+    },
+    {
+      "case": "ssr/scoped-style-root",
+      "backend": "vapor",
+      "topology": "non-inline",
+      "reasons": [
+        "[import] /imports/side-effect — side-effect import sequence: verter [\"cases/ssr/scoped-style-root.vue?vue&type=style&index=0&lang.css\"] vs golden []",
+        "[import] /imports(cases/ssr/scoped-style-root.vue?vue&type=style&index=0&lang.css) — unexpected import source",
+        "[structure] Program — child count: verter 8 vs golden 6"
+      ],
+      "total": 3,
+      "note": "Scoped style block: Verter's module imports the style sub-request that the official script and render modules do not carry."
+    },
+    {
+      "case": "ssr/scoped-style-root",
+      "backend": "vdom",
+      "topology": "inline",
+      "reasons": [
+        "[import] /imports/side-effect — side-effect import sequence: verter [\"cases/ssr/scoped-style-root.vue?vue&type=style&index=0&lang.css\"] vs golden []",
+        "[import] /imports(cases/ssr/scoped-style-root.vue?vue&type=style&index=0&lang.css) — unexpected import source",
+        "[structure] Program — child count: verter 6 vs golden 4"
+      ],
+      "total": 3,
+      "note": "Scoped style block: Verter's module imports the style sub-request that the official script and render modules do not carry."
+    },
+    {
+      "case": "ssr/slot-handler-statements",
+      "backend": "vdom",
+      "topology": "non-inline",
+      "reasons": [
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[3]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression — child count: verter 4 vs golden 3"
+      ],
+      "total": 1,
+      "note": "Slot content holding an event handler with two statements: the setup return object has one more entry than the official output."
+    },
+    {
+      "case": "ssr/slot-handler-statements",
+      "backend": "vapor",
+      "topology": "non-inline",
+      "reasons": [
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[3]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression — child count: verter 4 vs golden 3",
+        "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody[0]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[3]/ArrowFunctionExpression — node kind: verter `ObjectExpression` vs golden `ArrowFunctionExpression`"
+      ],
+      "total": 2,
+      "note": "Slot content holding an event handler with two statements: the setup return object has one more entry than the official output, and the Vapor slot value is an object where the official output is an arrow function."
+    }
+  ]
 }

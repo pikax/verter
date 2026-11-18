@@ -18,7 +18,8 @@ use verter_identity::identity::{InputBasisId, ParseKey, SourceId, SourceUnitId, 
 use crate::assembly::source_unit::{carrier_revision, carrier_source_id};
 pub use crate::code_transform::MappingProduct;
 use crate::code_transform::{
-    CodeTransform, MappingSpan, ProjectedClass, ProjectedRegion, SourceMapChainError,
+    CodeTransform, CodeTransformError, MappingSpan, ProjectedClass, ProjectedRegion,
+    SourceMapChainError,
 };
 use crate::ide::template::emit::EmitOp;
 
@@ -259,6 +260,9 @@ pub enum EmissionRefusal {
     UnboundOrigin,
     /// Observation span is not on UTF-8 character boundaries.
     ObservationNotOnCharBoundary { generated: MappingSpan },
+    /// The transform was created without map capture, so it has no
+    /// correspondence to project.
+    MapNotCaptured,
 }
 
 /// Checking text plus correspondence from one transform operation record,
@@ -284,7 +288,7 @@ impl ProjectionEmission {
         observations: Vec<RoleQualifiedObservation>,
     ) -> Result<Self, EmissionRefusal> {
         let checking_text = transform.build_string();
-        let mapping = MappingProduct::of(transform);
+        let mapping = MappingProduct::of(transform).map_err(|_| EmissionRefusal::MapNotCaptured)?;
         assemble(checking_text, mapping, observations, None)
     }
 
@@ -301,7 +305,7 @@ impl ProjectionEmission {
             return Err(EmissionRefusal::UnboundOrigin);
         }
         let checking_text = transform.build_string();
-        let mapping = MappingProduct::of(transform);
+        let mapping = MappingProduct::of(transform).map_err(|_| EmissionRefusal::MapNotCaptured)?;
         assemble(
             checking_text,
             mapping,
@@ -346,7 +350,7 @@ impl ProjectionEmission {
             }
         }
         let checking_text = transform.build_string();
-        let mapping = MappingProduct::of(transform);
+        let mapping = MappingProduct::of(transform).map_err(|_| EmissionRefusal::MapNotCaptured)?;
         if checking_text == previous.checking_text && mapping != previous.mapping {
             return Err(EmissionRefusal::StaleMap);
         }
@@ -486,12 +490,19 @@ impl ProjectionEmission {
 /// offsets from the completed [`MappingProduct`]. Every other variant
 /// returns spans local to the emitted text (or the moved slice), starting
 /// at `0`. Callers must not mix the two spaces.
-#[must_use]
+///
+/// # Errors
+///
+/// [`CodeTransformError::MapNotCaptured`] for a transform created without
+/// map capture.
 pub fn projected_class_for_emit_op(
     op: &EmitOp<'_>,
     transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
-) -> Vec<(MappingSpan, ProjectedClass)> {
-    projected_class_for_emit_op_with(op, &MappingProduct::of(transform))
+) -> Result<Vec<(MappingSpan, ProjectedClass)>, CodeTransformError> {
+    Ok(projected_class_for_emit_op_with(
+        op,
+        &MappingProduct::of(transform)?,
+    ))
 }
 
 /// Same lowering against a mapping the caller already built once per transform.
@@ -1397,7 +1408,7 @@ mod tests {
         after.overwrite_unmapped(0, 1, "");
         assert_eq!(after.build_string(), "foo");
         assert_eq!(after.build_string(), previous.checking_text());
-        let current = MappingProduct::of(&after);
+        let current = MappingProduct::of(&after).expect("mapped transform");
         let previous_identity = previous
             .mapping()
             .projected()
@@ -1506,7 +1517,7 @@ mod tests {
             anchor: None,
         };
         assert_eq!(
-            projected_class_for_emit_op(&unmapped, &identity),
+            projected_class_for_emit_op(&unmapped, &identity).expect("mapped transform"),
             vec![(
                 MappingSpan {
                     start: 0,
@@ -1516,19 +1527,19 @@ mod tests {
             )]
         );
         assert_eq!(
-            projected_class_for_emit_op(&mapped, &identity),
+            projected_class_for_emit_op(&mapped, &identity).expect("mapped transform"),
             vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Rewritten)]
         );
         assert_eq!(
-            projected_class_for_emit_op(&preserve, &identity),
+            projected_class_for_emit_op(&preserve, &identity).expect("mapped transform"),
             vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Identity)]
         );
         assert_eq!(
-            projected_class_for_emit_op(&r#move, &identity),
+            projected_class_for_emit_op(&r#move, &identity).expect("mapped transform"),
             vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Relocated)]
         );
         assert_eq!(
-            projected_class_for_emit_op(&boundary, &identity),
+            projected_class_for_emit_op(&boundary, &identity).expect("mapped transform"),
             vec![(
                 MappingSpan { start: 0, end: 1 },
                 ProjectedClass::Synthesized
@@ -1541,7 +1552,7 @@ mod tests {
             content_offset: GeneratedByteLen(2),
         };
         assert_eq!(
-            projected_class_for_emit_op(&mixed, &identity),
+            projected_class_for_emit_op(&mixed, &identity).expect("mapped transform"),
             vec![
                 (
                     MappingSpan { start: 0, end: 2 },
@@ -1557,7 +1568,7 @@ mod tests {
             content_offset: GeneratedByteLen(3),
         };
         assert_eq!(
-            projected_class_for_emit_op(&wholly_unmapped, &identity),
+            projected_class_for_emit_op(&wholly_unmapped, &identity).expect("mapped transform"),
             vec![(
                 MappingSpan { start: 0, end: 3 },
                 ProjectedClass::Synthesized
@@ -1574,19 +1585,19 @@ mod tests {
         let mut moved = CodeTransform::new("aabb", &allocator);
         moved.move_slice(2, 4, 0);
         assert_eq!(moved.build_string(), "bbaa");
-        let mapping = MappingProduct::of(&moved);
+        let mapping = MappingProduct::of(&moved).expect("mapped transform");
         assert_eq!(
             mapping.projected_at(2).map(|region| region.class),
             Some(ProjectedClass::Relocated),
             "untouched aa at generated 2..4 is Relocated after bb moved ahead"
         );
         assert_eq!(
-            projected_class_for_emit_op(&preserve_aa, &moved),
+            projected_class_for_emit_op(&preserve_aa, &moved).expect("mapped transform"),
             vec![(MappingSpan { start: 2, end: 4 }, ProjectedClass::Relocated)]
         );
         let control = CodeTransform::new("aabb", &allocator);
         assert_eq!(
-            projected_class_for_emit_op(&preserve_aa, &control),
+            projected_class_for_emit_op(&preserve_aa, &control).expect("mapped transform"),
             vec![(MappingSpan { start: 0, end: 2 }, ProjectedClass::Identity)]
         );
     }
@@ -1602,17 +1613,18 @@ mod tests {
         assert_eq!(moved.build_string(), "BA");
         assert_eq!(
             MappingProduct::of(&moved)
+                .expect("mapped transform")
                 .projected_at(1)
                 .map(|region| region.class),
             Some(ProjectedClass::Relocated)
         );
         assert_eq!(
-            projected_class_for_emit_op(&preserve_a, &moved),
+            projected_class_for_emit_op(&preserve_a, &moved).expect("mapped transform"),
             vec![(MappingSpan { start: 1, end: 2 }, ProjectedClass::Relocated)]
         );
         let control = CodeTransform::new("AB", &allocator);
         assert_eq!(
-            projected_class_for_emit_op(&preserve_a, &control),
+            projected_class_for_emit_op(&preserve_a, &control).expect("mapped transform"),
             vec![(MappingSpan { start: 0, end: 1 }, ProjectedClass::Identity)]
         );
     }
@@ -1622,7 +1634,7 @@ mod tests {
         let allocator = Allocator::default();
         let mut rewritten = CodeTransform::new("abcdef", &allocator);
         rewritten.overwrite(0, 6, "XY");
-        let mapping = MappingProduct::of(&rewritten);
+        let mapping = MappingProduct::of(&rewritten).expect("mapped transform");
         let region = mapping
             .projected()
             .iter()
@@ -1638,7 +1650,7 @@ mod tests {
             source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(3)),
         };
         assert_eq!(
-            projected_class_for_emit_op(&preserve_partial, &rewritten),
+            projected_class_for_emit_op(&preserve_partial, &rewritten).expect("mapped transform"),
             vec![],
             "partial rewritten overlap must not return the whole generated span"
         );
@@ -1646,7 +1658,7 @@ mod tests {
             source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(6)),
         };
         assert_eq!(
-            projected_class_for_emit_op(&preserve_full, &rewritten),
+            projected_class_for_emit_op(&preserve_full, &rewritten).expect("mapped transform"),
             vec![(MappingSpan { start: 0, end: 2 }, ProjectedClass::Rewritten)]
         );
     }
@@ -1657,7 +1669,7 @@ mod tests {
         let mut rewritten = CodeTransform::new("abcdef", &allocator);
         rewritten.overwrite(0, 6, "é😃");
         assert_eq!(rewritten.build_string(), "é😃");
-        let mapping = MappingProduct::of(&rewritten);
+        let mapping = MappingProduct::of(&rewritten).expect("mapped transform");
         let region = mapping
             .projected()
             .iter()
@@ -1674,7 +1686,7 @@ mod tests {
             source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(3)),
         };
         assert_eq!(
-            projected_class_for_emit_op(&preserve_partial, &rewritten),
+            projected_class_for_emit_op(&preserve_partial, &rewritten).expect("mapped transform"),
             vec![],
             "equal-length rewritten partial must not invent generated [0,3) inside 😃"
         );
@@ -1682,12 +1694,12 @@ mod tests {
             source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(6)),
         };
         assert_eq!(
-            projected_class_for_emit_op(&preserve_full, &rewritten),
+            projected_class_for_emit_op(&preserve_full, &rewritten).expect("mapped transform"),
             vec![(MappingSpan { start: 0, end: 6 }, ProjectedClass::Rewritten)]
         );
         let control = CodeTransform::new("abcdef", &allocator);
         assert_eq!(
-            projected_class_for_emit_op(&preserve_partial, &control),
+            projected_class_for_emit_op(&preserve_partial, &control).expect("mapped transform"),
             vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Identity)],
             "Identity still maps the carrier overlap by offset"
         );
@@ -1697,11 +1709,13 @@ mod tests {
     fn compose_source_chain_uses_code_transform_owner() {
         let allocator = Allocator::default();
         let ct = CodeTransform::new("abc", &allocator);
-        let upstream = ct.generate_map(
-            crate::code_transform::SourceMapOptions::new()
-                .with_source("in.js")
-                .with_file("out.js"),
-        );
+        let upstream = ct
+            .generate_map(
+                crate::code_transform::SourceMapOptions::new()
+                    .with_source("in.js")
+                    .with_file("out.js"),
+            )
+            .expect("mapped transform");
         compose_source_chain(&ct, &upstream).expect("identity chain uses CodeTransform");
     }
 
@@ -1783,7 +1797,7 @@ mod tests {
         current_ct.move_slice(0, 1, 0);
         current_ct.move_slice(0, 1, 4);
         assert_eq!(current_ct.build_string(), previous.checking_text());
-        let current = MappingProduct::of(&current_ct);
+        let current = MappingProduct::of(&current_ct).expect("mapped transform");
         assert!(
             carrier_span_class_eq(&current, previous.mapping()),
             "carrier span/class partition stays identical across this move"
@@ -1996,7 +2010,10 @@ mod tests {
         let plan = role_plan();
         let origin = authored_in(&plan);
         let anchored_ct = helper_preamble_at(&allocator, source, "X", 0);
-        let projected = MappingProduct::of(&anchored_ct).insertion_anchors()[0].projected;
+        let projected = MappingProduct::of(&anchored_ct)
+            .expect("mapped transform")
+            .insertion_anchors()[0]
+            .projected;
         let anchored = RoleQualifiedObservation::new(
             MappingSpan {
                 start: projected,
@@ -2242,8 +2259,8 @@ mod tests {
         current_ct.overwrite_unmapped(0, prefix, "");
         assert_eq!(previous_ct.build_string(), current_ct.build_string());
         assert_eq!(
-            MappingProduct::of(&previous_ct),
-            MappingProduct::of(&current_ct)
+            MappingProduct::of(&previous_ct).expect("mapped transform"),
+            MappingProduct::of(&current_ct).expect("mapped transform")
         );
         let observations = vec![RoleQualifiedObservation::new(
             vfor_alias_span(ROLE_SFC),
@@ -2310,13 +2327,14 @@ mod tests {
         source: &str,
         parse_key: Option<&ParseKey>,
     ) -> ProjectionPlan {
-        let parsed = crate::compile::parse_sfc(source, None, None);
+        let parsed = crate::framework_common::vue_bridge::parse_sfc(source, None, None);
         build_projection_plan(PlanInput {
             canonical_id,
             source,
             parsed: &parsed,
             parse_key,
             syntax_profile: None,
+            custom_elements: None,
         })
     }
 
@@ -2658,7 +2676,7 @@ mod tests {
             at: SourceByteOffset(6),
         };
         assert_eq!(
-            projected_class_for_emit_op(&r#move, &ct),
+            projected_class_for_emit_op(&r#move, &ct).expect("mapped transform"),
             vec![(MappingSpan { start: 0, end: 2 }, ProjectedClass::Rewritten)],
             "moved overwritten content must report Rewritten with replacement length"
         );
@@ -2667,7 +2685,7 @@ mod tests {
         control.move_slice(0, 3, 6);
         assert_eq!(control.build_string(), "defabc");
         assert_eq!(
-            projected_class_for_emit_op(&r#move, &control),
+            projected_class_for_emit_op(&r#move, &control).expect("mapped transform"),
             vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Relocated)],
             "untouched moved content must report Relocated with original length"
         );
@@ -2747,7 +2765,7 @@ mod tests {
         let mut ct = CodeTransform::new("abcdef", &allocator);
         ct.overwrite(0, 3, "XY");
         ct.move_slice(0, 3, 6);
-        let mapping = MappingProduct::of(&ct);
+        let mapping = MappingProduct::of(&ct).expect("mapped transform");
 
         let r#move = EmitOp::MoveOriginal {
             source: SourceByteRange::new(SourceByteOffset(0), SourceByteOffset(3)),
@@ -2759,11 +2777,11 @@ mod tests {
 
         assert_eq!(
             projected_class_for_emit_op_with(&r#move, &mapping),
-            projected_class_for_emit_op(&r#move, &ct)
+            projected_class_for_emit_op(&r#move, &ct).expect("mapped transform")
         );
         assert_eq!(
             projected_class_for_emit_op_with(&preserve, &mapping),
-            projected_class_for_emit_op(&preserve, &ct)
+            projected_class_for_emit_op(&preserve, &ct).expect("mapped transform")
         );
     }
 

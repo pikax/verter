@@ -1,17 +1,21 @@
-//! Fragment placement/splice composition — the typed replacement for the
-//! former `framework_common::generated_chunk` engine. Same position math
-//! (byte offset -> line/column, table composition into one source map),
-//! driven by [`ValidatedFragment`] + [`PlacementSlot::Hole`] instead of a
-//! raw `Range<u32>` plus ad hoc `&str` source-space tags — the owner/hole
-//! relationship is checked against the fragment's OWN declared placement,
-//! never re-derived by scanning generated text for a landmark.
+//! Fragment placement/splice composition over the shared emission writer.
+//! Each input enters one emission plan as a piece: authored inputs with an
+//! encoded map as external pieces over their admitted decoded map, assembly
+//! bytes as synthetic pieces. The plan is written once, and its decoded map
+//! is encoded once, at this boundary. The owner/hole relationship is checked
+//! against the fragment's OWN declared placement, never re-derived by
+//! scanning generated text for a landmark.
 
-use oxc_sourcemap::{SourceMap, SourceMapBuilder, Token};
+use oxc_sourcemap::SourceMap;
+#[cfg(test)]
+use oxc_sourcemap::SourceMapBuilder;
+use verter_audit::observe::Uncaptured;
 
-use crate::code_transform::advance_generated_position;
-
+use super::emit_plan::{EmissionBuilder, EmitPlanBuilder, EmittedArtifact, MapMode, MapSource};
 use super::fragment::{FragmentId, PlacementSlot, ValidatedFragment};
+use super::map_input::{validate_and_decode, DecodedFragmentMap};
 use super::source_space::AssembledOffset;
+use crate::work_ledger::CompilerWorkLedger;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposedOutput {
@@ -38,183 +42,85 @@ pub enum ComposeRefusal {
     UncomposableMap,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Position {
-    line: u32,
-    column: u32,
+/// A fragment's declared map, admitted against its own code.
+fn admitted(
+    code: &str,
+    source_map: Option<&str>,
+) -> Result<Option<DecodedFragmentMap>, ComposeRefusal> {
+    source_map
+        .map(|raw| validate_and_decode(raw, code).map_err(|_| ComposeRefusal::UncomposableMap))
+        .transpose()
 }
 
-fn byte_position(code: &str, offset: u32) -> Option<Position> {
-    let offset = usize::try_from(offset).ok()?;
-    if offset > code.len() || !code.is_char_boundary(offset) {
-        return None;
-    }
-    let mut position = Position { line: 0, column: 0 };
-    for character in code[..offset].chars() {
-        if character == '\n' {
-            position.line += 1;
-            position.column = 0;
-        } else {
-            position.column += character.len_utf16() as u32;
-        }
-    }
-    Some(position)
-}
-
-fn relative(position: Position, origin: Position) -> Option<Position> {
-    (position >= origin).then(|| {
-        if position.line == origin.line {
-            Position {
-                line: 0,
-                column: position.column - origin.column,
-            }
-        } else {
-            Position {
-                line: position.line - origin.line,
-                column: position.column,
-            }
-        }
-    })
-}
-
-fn append(origin: Position, relative: Position) -> Position {
-    if relative.line == 0 {
-        Position {
-            line: origin.line,
-            column: origin.column + relative.column,
-        }
-    } else {
-        Position {
-            line: origin.line + relative.line,
-            column: relative.column,
-        }
-    }
-}
-
-fn token_position(token: Token) -> Position {
-    Position {
-        line: token.get_dst_line(),
-        column: token.get_dst_col(),
-    }
-}
-
-/// Per-decoded-map lookup tables into the composed builder's OWN `sources`/
-/// `names` tables — built once per contributing map so every token from that
-/// map remaps to the right composed row. Never a synthetic placeholder
-/// source: every row here is copied verbatim from the map being composed.
-struct CopiedTables {
-    source_ids: Vec<u32>,
-    name_ids: Vec<u32>,
-}
-
-fn copy_tables<'a>(builder: &mut SourceMapBuilder<'a>, decoded: &'a SourceMap<'_>) -> CopiedTables {
-    // `get_source_content(i)` (index lookup, `None` on a short/absent
-    // `sourcesContent` table) rather than zipping `get_sources()` with
-    // `get_source_contents()` — the two iterators are NOT guaranteed the
-    // same length (an input map with no `sourcesContent` member decodes to
-    // a zero-length content table, which would silently truncate a zip to
-    // zero pairs and drop every source).
-    let source_ids = decoded
-        .get_sources()
-        .enumerate()
-        .map(|(index, source)| {
-            let content = decoded.get_source_content(index as u32).unwrap_or("");
-            builder.add_source_and_content(source, content)
-        })
-        .collect();
-    let name_ids = decoded
-        .get_names()
-        .map(|name| builder.add_name(name))
-        .collect();
-    CopiedTables {
-        source_ids,
-        name_ids,
-    }
-}
-
-/// `decoded`'s own ignore-list entries, remapped through `tables`' source
-/// index table — an ignore-listed source stays ignore-listed after
-/// composition instead of silently losing that marker.
-fn copied_ignore_list(decoded: &SourceMap<'_>, tables: &CopiedTables) -> Vec<u32> {
-    decoded
-        .get_ignore_list()
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|&index| tables.source_ids.get(index as usize).copied())
-        .collect()
-}
-
-fn add_token(
-    builder: &mut SourceMapBuilder,
-    token: Token,
-    position: Position,
-    tables: &CopiedTables,
+/// Push `code` as an external piece over `map`, or as synthetic bytes when
+/// it declared none.
+fn push_code<'a>(
+    fragment: &mut EmissionBuilder<'a>,
+    code: &'a str,
+    map: Option<DecodedFragmentMap>,
 ) {
-    let source_id = token
-        .get_source_id()
-        .and_then(|id| tables.source_ids.get(id as usize).copied());
-    let name_id = token
-        .get_name_id()
-        .and_then(|id| tables.name_ids.get(id as usize).copied());
-    builder.add_token(
-        position.line,
-        position.column,
-        token.get_src_line(),
-        token.get_src_col(),
-        source_id,
-        name_id,
-    );
+    match map {
+        Some(map) => fragment.push_external(code, map),
+        None => fragment.push_borrowed(code),
+    }
+}
+
+/// Write one fragment as a whole artifact.
+fn write(fragment: EmissionBuilder<'_>) -> Result<EmittedArtifact, ComposeRefusal> {
+    let mut plan = EmitPlanBuilder::new(MapMode::Map);
+    plan.push_fragment(
+        fragment
+            .finish()
+            .map_err(|_| ComposeRefusal::InvalidBoundary)?,
+    )
+    .map_err(|_| ComposeRefusal::InvalidBoundary)?;
+    plan.finish()
+        .and_then(|plan| plan.write(&mut CompilerWorkLedger::<Uncaptured>::new()))
+        .map_err(|_| ComposeRefusal::InvalidBoundary)
+}
+
+/// The artifact's text and its map encoded at this external boundary, over
+/// the inputs' own tables; `None` for a text-only artifact.
+pub(crate) fn encoded(
+    artifact: EmittedArtifact,
+    sources: &[MapSource<'_>],
+    source_root: Option<&str>,
+) -> (String, Option<SourceMap<'static>>) {
+    let (code, map) = artifact.into_parts();
+    let map = map.map(|map| map.to_source_map(&code, sources, source_root));
+    (code, map)
+}
+
+/// A mapped composition's text and encoded map.
+fn mapped(
+    artifact: EmittedArtifact,
+    source_root: Option<&str>,
+) -> Result<(String, SourceMap<'static>), ComposeRefusal> {
+    match encoded(artifact, &[], source_root) {
+        (code, Some(map)) => Ok((code, map)),
+        (_, None) => Err(ComposeRefusal::UncomposableMap),
+    }
 }
 
 /// Prepend `preamble` (assembly-owned bytes with no source mapping of
 /// their own — e.g. a synthesized `import { ... } from "..."` line) ahead
-/// of `code`, shifting `source_map`'s segments into the resulting
-/// coordinate space so the map keeps describing the same bytes it
-/// described before the prepend. `source_map` is decoded and re-encoded
-/// once here rather than left to silently drift out of sync with `code` —
-/// exactly the failure mode of concatenating text onto already-mapped
-/// bytes with a bare `format!`.
+/// of `code`, so `source_map` keeps describing the same bytes it described
+/// before the prepend. The map is admitted once against `code` and encoded
+/// once for the result — exactly what concatenating text onto
+/// already-mapped bytes with a bare `format!` would get wrong.
 pub fn prepend_preamble(
     preamble: &str,
     code: &str,
     source_map: Option<&str>,
 ) -> Result<ComposedOutput, ComposeRefusal> {
-    let output_origin =
-        byte_position(preamble, preamble.len() as u32).ok_or(ComposeRefusal::InvalidBoundary)?;
-
-    let mut composed_code = String::with_capacity(preamble.len() + code.len());
-    composed_code.push_str(preamble);
-    composed_code.push_str(code);
-
-    let decoded = source_map
-        .map(SourceMap::from_json_string)
-        .transpose()
-        .map_err(|_| ComposeRefusal::UncomposableMap)?;
-
-    let mut builder = SourceMapBuilder::default();
-    let mut ignore_list = Vec::new();
-    if let Some(decoded) = &decoded {
-        let tables = copy_tables(&mut builder, decoded);
-        for token in decoded.get_tokens() {
-            let position = token_position(token);
-            add_token(
-                &mut builder,
-                token,
-                append(output_origin, position),
-                &tables,
-            );
-        }
-        ignore_list = copied_ignore_list(decoded, &tables);
-    }
-
-    let mut result = builder.into_sourcemap();
-    if !ignore_list.is_empty() {
-        result.set_ignore_list(ignore_list);
-    }
-
+    let map = admitted(code, source_map)?;
+    let mut fragment = EmissionBuilder::new(MapMode::Map);
+    fragment.push_borrowed(preamble);
+    push_code(&mut fragment, code, map);
+    let (code, source_map) = mapped(write(fragment)?, None)?;
     Ok(ComposedOutput {
-        code: composed_code,
-        source_map: result.to_json_string(),
+        code,
+        source_map: source_map.to_json_string(),
         fragment_starts_at: AssembledOffset(preamble.len() as u32),
     })
 }
@@ -225,105 +131,17 @@ pub struct SequencedOutput {
     pub source_map: SourceMap<'static>,
 }
 
-/// Table accumulator for [`assemble_sequence`] — STABLE APPEND, no dedup.
-/// Unlike [`copy_tables`] (used by `prepend_preamble`/`splice_into_hole`,
-/// which have no "one row per contributing fragment" contract to honor),
-/// two fragments that happen to declare the identical source path are two
-/// independently declared identities, not one: collapsing them would
-/// destroy the one-to-one row-to-fragment attribution a consumer's lookup
-/// depends on. `SourceMapBuilder::add_source_and_content`/`add_name`
-/// dedupe by string identity, so this accumulator bypasses the builder
-/// entirely and constructs the final [`SourceMap`] directly.
-#[derive(Default)]
-struct SequenceTables {
-    sources: Vec<String>,
-    names: Vec<String>,
-    sources_content: Vec<Option<String>>,
-    ignore_list: Vec<u32>,
-    tokens: Vec<Token>,
-}
-
-impl SequenceTables {
-    /// Append one fragment's tables unconditionally; returns the
-    /// `(source_base, name_base)` this fragment's own indices shift by.
-    fn contribute(&mut self, decoded: &SourceMap<'_>) -> (u32, u32) {
-        let source_base = self.sources.len() as u32;
-        let name_base = self.names.len() as u32;
-        for (index, source) in decoded.get_sources().enumerate() {
-            self.sources.push(source.to_owned());
-            self.sources_content
-                .push(decoded.get_source_content(index as u32).map(str::to_owned));
-        }
-        self.names.extend(decoded.get_names().map(str::to_owned));
-        self.ignore_list.extend(
-            decoded
-                .get_ignore_list()
-                .unwrap_or(&[])
-                .iter()
-                .map(|entry| entry + source_base),
-        );
-        (source_base, name_base)
-    }
-
-    fn push_token(&mut self, token: Token, position: Position, source_base: u32, name_base: u32) {
-        let source_id = token.get_source_id().map(|id| id + source_base);
-        let (src_line, src_col, name_id) = match source_id {
-            Some(_) => (
-                token.get_src_line(),
-                token.get_src_col(),
-                token.get_name_id().map(|id| id + name_base),
-            ),
-            None => (0, 0, None),
-        };
-        self.tokens.push(Token::new(
-            position.line,
-            position.column,
-            src_line,
-            src_col,
-            source_id,
-            name_id,
-        ));
-    }
-
-    fn push_boundary(&mut self, at_line: u32) {
-        self.tokens.push(Token::new(at_line, 0, 0, 0, None, None));
-    }
-
-    fn finish(self, source_root: Option<&str>) -> SourceMap<'static> {
-        let mut map = SourceMap::new(
-            None,
-            self.names
-                .into_iter()
-                .map(std::borrow::Cow::Owned)
-                .collect(),
-            source_root.map(|s| std::borrow::Cow::Owned(s.to_owned())),
-            self.sources
-                .into_iter()
-                .map(std::borrow::Cow::Owned)
-                .collect(),
-            self.sources_content
-                .into_iter()
-                .map(|c| c.map(std::borrow::Cow::Owned))
-                .collect(),
-            self.tokens.into_boxed_slice(),
-            None,
-        );
-        if !self.ignore_list.is_empty() {
-            map.set_ignore_list(self.ignore_list);
-        }
-        map
-    }
-}
-
 /// Write `fragments` in order into one module, composing every
 /// contributing map into the result's coordinate space — the general
 /// N-fragment placement engine multi-fragment module assembly (Vue main-
-/// module assembly among its callers) is built on, replacing the former
-/// session-private `MapComposer`/`ModuleWriter`/`FragmentWrite` (same
-/// algorithm: stable no-dedup table append, and a sourceless BOUNDARY
-/// segment follows each mapped fragment whose own code ends in a newline,
-/// so trailing assembly-owned bytes never inherit that fragment's last
-/// authored position).
+/// module assembly among its callers) is built on. Tables are a stable
+/// append with no dedup: two fragments that happen to declare the identical
+/// source path are two independently declared identities, and collapsing
+/// them would destroy the one-to-one row-to-fragment attribution a
+/// consumer's lookup depends on. A declared map boundary follows each
+/// mapped fragment whose own code ends in a newline, so trailing
+/// assembly-owned bytes never inherit that fragment's last authored
+/// position.
 ///
 /// Takes [`ValidatedFragment`] references exclusively — there is no raw
 /// `{code, source_map}` overload. A caller cannot sequence a fragment whose
@@ -334,41 +152,21 @@ pub fn assemble_sequence(
     fragments: &[&ValidatedFragment],
     source_root: Option<&str>,
 ) -> Result<SequencedOutput, ComposeRefusal> {
-    let mut code = String::new();
-    let mut cursor = Position { line: 0, column: 0 };
-    let mut tables = SequenceTables::default();
-
+    let mut builder = EmissionBuilder::new(MapMode::Map);
     for fragment in fragments {
         let f = fragment.fragment();
-        let placement = cursor;
-        advance_generated_position(&f.code, &mut cursor.line, &mut cursor.column);
-        code.push_str(&f.code);
-
-        let Some(source_map) = f.source_map.as_deref().filter(|m| !m.is_empty()) else {
-            continue;
-        };
-        let decoded =
-            SourceMap::from_json_string(source_map).map_err(|_| ComposeRefusal::UncomposableMap)?;
-        let (source_base, name_base) = tables.contribute(&decoded);
-        for token in decoded.get_tokens() {
-            let position = append(placement, token_position(token));
-            tables.push_token(token, position, source_base, name_base);
-        }
-        if f.code.ends_with('\n') {
-            // Boundary: a sourceless segment at the write cursor AFTER
-            // this fragment, so a following fragment's assembly-owned
-            // bytes (or a plain literal one) do not inherit this
-            // fragment's trailing authored position.
-            tables.push_boundary(cursor.line);
+        let map = admitted(
+            &f.code,
+            f.source_map.as_deref().filter(|map| !map.is_empty()),
+        )?;
+        let mapped = map.is_some();
+        push_code(&mut builder, &f.code, map);
+        if mapped && f.code.ends_with('\n') {
+            builder.push_map_stop();
         }
     }
-
-    let result = tables.finish(source_root);
-
-    Ok(SequencedOutput {
-        code,
-        source_map: result,
-    })
+    let (code, source_map) = mapped(write(builder)?, source_root)?;
+    Ok(SequencedOutput { code, source_map })
 }
 
 /// Splice `fragment`'s bytes into the hole its own declared
@@ -394,127 +192,49 @@ pub fn splice_into_hole(
     let inserted_fragment = fragment.fragment();
     let shell_code = owner_fragment.code.as_str();
     let fragment_code = inserted_fragment.code.as_str();
-
-    let output_origin =
-        byte_position(preamble, preamble.len() as u32).ok_or(ComposeRefusal::InvalidBoundary)?;
-    let hole_start =
-        byte_position(shell_code, hole.start).ok_or(ComposeRefusal::InvalidBoundary)?;
-    let hole_end = byte_position(shell_code, hole.end).ok_or(ComposeRefusal::InvalidBoundary)?;
-    let fragment_text = fragment_code;
-    let fragment_start = byte_position(fragment_code, 0).ok_or(ComposeRefusal::InvalidBoundary)?;
-    let fragment_end = byte_position(fragment_code, fragment_code.len() as u32)
+    let before = shell_code
+        .get(..hole.start as usize)
         .ok_or(ComposeRefusal::InvalidBoundary)?;
-    let inserted_text = format!("\n{fragment_text}\n");
-    let fragment_origin = append(hole_start, Position { line: 1, column: 0 });
-    let inserted_end = append(
-        hole_start,
-        byte_position(&inserted_text, inserted_text.len() as u32)
-            .ok_or(ComposeRefusal::InvalidBoundary)?,
-    );
+    let after = shell_code
+        .get(hole.end as usize..)
+        .ok_or(ComposeRefusal::InvalidBoundary)?;
 
-    let mut code = String::with_capacity(
-        preamble.len() + shell_code.len() - (hole.end - hole.start) as usize + inserted_text.len(),
-    );
-    code.push_str(preamble);
-    code.push_str(
-        shell_code
-            .get(..hole.start as usize)
-            .ok_or(ComposeRefusal::InvalidBoundary)?,
-    );
-    code.push_str(&inserted_text);
-    code.push_str(
-        shell_code
-            .get(hole.end as usize..)
-            .ok_or(ComposeRefusal::InvalidBoundary)?,
-    );
+    let shell_map = admitted(shell_code, owner_fragment.source_map.as_deref())?;
+    let fragment_map = admitted(fragment_code, inserted_fragment.source_map.as_deref())?;
+    let (before_map, after_map) = match &shell_map {
+        Some(map) => (
+            Some(
+                map.slice(shell_code, 0, Some(hole.start))
+                    .ok_or(ComposeRefusal::InvalidBoundary)?,
+            ),
+            Some(
+                map.slice(shell_code, hole.end, None)
+                    .ok_or(ComposeRefusal::InvalidBoundary)?,
+            ),
+        ),
+        None => (None, None),
+    };
+    let fragment_map = fragment_map
+        .map(|map| map.slice(fragment_code, 0, Some(fragment_code.len() as u32)))
+        .map(|map| map.ok_or(ComposeRefusal::InvalidBoundary))
+        .transpose()?;
 
-    let shell_map = owner_fragment
-        .source_map
-        .as_deref()
-        .map(SourceMap::from_json_string)
-        .transpose()
-        .map_err(|_| ComposeRefusal::UncomposableMap)?;
-    let fragment_map = inserted_fragment
-        .source_map
-        .as_deref()
-        .map(SourceMap::from_json_string)
-        .transpose()
-        .map_err(|_| ComposeRefusal::UncomposableMap)?;
+    let mut builder = EmissionBuilder::new(MapMode::Map);
+    builder.push_borrowed(preamble);
+    push_code(&mut builder, before, before_map);
+    builder.push_borrowed("\n");
+    push_code(&mut builder, fragment_code, fragment_map);
+    builder.push_borrowed("\n");
+    push_code(&mut builder, after, after_map);
+    let (code, source_map) = mapped(write(builder)?, None)?;
 
-    let mut builder = SourceMapBuilder::default();
-    let shell_tables = shell_map
-        .as_ref()
-        .map(|shell_map| copy_tables(&mut builder, shell_map));
-    let fragment_tables = fragment_map
-        .as_ref()
-        .map(|fragment_map| copy_tables(&mut builder, fragment_map));
-
-    if let (Some(shell_map), Some(shell_tables)) = (&shell_map, &shell_tables) {
-        for token in shell_map.get_tokens() {
-            let position = token_position(token);
-            if position < hole_start {
-                add_token(
-                    &mut builder,
-                    token,
-                    append(output_origin, position),
-                    shell_tables,
-                );
-            }
-        }
-    }
-
-    if let (Some(fragment_map), Some(fragment_tables)) = (&fragment_map, &fragment_tables) {
-        for token in fragment_map.get_tokens() {
-            let position = token_position(token);
-            if position >= fragment_start && position < fragment_end {
-                let rebased = append(
-                    output_origin,
-                    append(
-                        fragment_origin,
-                        relative(position, fragment_start)
-                            .ok_or(ComposeRefusal::InvalidBoundary)?,
-                    ),
-                );
-                add_token(&mut builder, token, rebased, fragment_tables);
-            }
-        }
-    }
-
-    if let (Some(shell_map), Some(shell_tables)) = (&shell_map, &shell_tables) {
-        for token in shell_map.get_tokens() {
-            let position = token_position(token);
-            if position >= hole_end {
-                let rebased = append(
-                    output_origin,
-                    append(
-                        inserted_end,
-                        relative(position, hole_end).ok_or(ComposeRefusal::InvalidBoundary)?,
-                    ),
-                );
-                add_token(&mut builder, token, rebased, shell_tables);
-            }
-        }
-    }
-
-    let mut ignore_list = Vec::new();
-    if let (Some(shell_map), Some(shell_tables)) = (&shell_map, &shell_tables) {
-        ignore_list.extend(copied_ignore_list(shell_map, shell_tables));
-    }
-    if let (Some(fragment_map), Some(fragment_tables)) = (&fragment_map, &fragment_tables) {
-        ignore_list.extend(copied_ignore_list(fragment_map, fragment_tables));
-    }
-    let mut result = builder.into_sourcemap();
-    if !ignore_list.is_empty() {
-        result.set_ignore_list(ignore_list);
-    }
-
-    // The inserted fragment's own bytes begin one byte after
-    // `inserted_text`'s leading `\n` — see its construction above.
+    // The inserted fragment's own bytes begin one byte after the leading
+    // `\n` pushed above.
     let fragment_starts_at = AssembledOffset(preamble.len() as u32 + hole.start + 1);
 
     Ok(ComposedOutput {
         code,
-        source_map: result.to_json_string(),
+        source_map: source_map.to_json_string(),
         fragment_starts_at,
     })
 }
@@ -959,6 +679,36 @@ mod tests {
     }
 
     #[test]
+    fn assemble_sequence_preserves_a_carried_position_across_empty_table_only_maps() {
+        let carried_map =
+            "{\"version\":3,\"sources\":[\"carried.vue\"],\"names\":[],\"mappings\":\"AAIA\"}";
+        let tables_map =
+            "{\"version\":3,\"sources\":[\"tables.vue\"],\"names\":[\"unused\"],\"mappings\":\"\"}";
+        let carried = seq_fragment("carried", "", Some(carried_map));
+        let tables = seq_fragment("tables", "", Some(tables_map));
+        let output = assemble_sequence(&[&carried, &tables], None).expect("empty maps compose");
+
+        assert_eq!(output.code, "");
+        assert_eq!(
+            output.source_map.get_sources().collect::<Vec<_>>(),
+            ["carried.vue", "tables.vue"]
+        );
+        assert_eq!(
+            output.source_map.get_names().collect::<Vec<_>>(),
+            ["unused"]
+        );
+        let tokens = output.source_map.get_tokens().collect::<Vec<_>>();
+        assert_eq!(
+            tokens.len(),
+            1,
+            "table-only maps must introduce no boundary"
+        );
+        assert_eq!(tokens[0].get_source_id(), Some(0));
+        assert_eq!((tokens[0].get_dst_line(), tokens[0].get_dst_col()), (0, 0));
+        assert_eq!((tokens[0].get_src_line(), tokens[0].get_src_col()), (4, 0));
+    }
+
+    #[test]
     fn assemble_sequence_attaches_the_requested_source_root() {
         let map = "{\"version\":3,\"sources\":[\"Comp.vue\"],\"names\":[],\"mappings\":\"MACM\"}";
         let a = seq_fragment("a", "const n = 1", Some(map));
@@ -999,6 +749,21 @@ mod tests {
             .find(|t| t.get_dst_line() == 1 && t.get_source_id().is_some())
             .expect("the template's own segment survives");
         assert_eq!(template_token.get_source_id(), Some(1));
+    }
+
+    #[test]
+    fn composition_builds_one_buffer() {
+        let map = "{\"version\":3,\"sources\":[\"Comp.vue\"],\"names\":[],\"mappings\":\"MACM\"}";
+        let a = seq_fragment("a", "import \"a\"\n", None);
+        let b = seq_fragment("b", "const n = 1\n", Some(map));
+        let c = seq_fragment("c", "export default {}", None);
+        crate::emission::take_text_buffers();
+        let output = assemble_sequence(&[&a, &b, &c], None).expect("assembles cleanly");
+        assert_eq!(output.code, "import \"a\"\nconst n = 1\nexport default {}");
+        // Every input is written straight into the one output buffer: no
+        // fragment holds a copy of its bytes on the way.
+        assert_eq!(crate::emission::take_text_buffers(), 0);
+        assert_eq!(output.code.capacity(), output.code.len());
     }
 
     #[test]

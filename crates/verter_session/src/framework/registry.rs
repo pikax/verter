@@ -287,9 +287,6 @@ impl ActiveProviderIndex {
 /// needs its own version pair is a catalog row, not a host literal.
 const BUILT_IN_ADAPTER_SEMANTIC_VERSION: u32 = 1;
 
-/// The registered parser-grammar version of every built-in capability row.
-pub(crate) const BUILT_IN_PARSER_GRAMMAR_VERSION: u32 = 1;
-
 /// One composed carrier-grammar capability row: the exact facts the host
 /// registers for one adapter × carrier-language pair.
 ///
@@ -388,9 +385,8 @@ impl FrameworkCapabilityCatalog {
     /// fact. Host construction turns that into a construction failure — a host
     /// that silently dropped a row would serve a framework it cannot parse.
     pub fn built_in() -> Result<Self, MissingRegisteredGrammar> {
-        let catalog =
-            verter_compiler::framework_common::registered_carrier_projection::built_in_frontend_catalog();
-        Self::compose(catalog.iter().map(|row| {
+        let frontends = verter_compiler::framework_common::CarrierFrontendRegistry::built_in();
+        Self::compose(frontends.rows().map(|row| {
             let identity = row.identity();
             (
                 identity.adapter_id().clone(),
@@ -429,7 +425,7 @@ impl FrameworkCapabilityCatalog {
                 )
                 .expect("built-in adapter semantic version is representable"),
                 parser_grammar_version: CarrierParserGrammarVersion::new(
-                    BUILT_IN_PARSER_GRAMMAR_VERSION,
+                    verter_compiler::framework_common::profile::CARRIER_PARSER_GRAMMAR_VERSION,
                 )
                 .expect("built-in parser grammar version is representable"),
                 grammar,
@@ -964,8 +960,9 @@ impl FrameworkAdapterRegistry {
     fn finish(
         rows: Vec<(FrameworkAdapterId, FrameworkRegistration)>,
     ) -> Result<Self, FrameworkRegistryBuildError> {
-        let carrier_syntax =
-            crate::framework::descriptor::carrier_syntax_schema(BUILT_IN_PARSER_GRAMMAR_VERSION);
+        let carrier_syntax = crate::framework::descriptor::carrier_syntax_schema(
+            verter_compiler::framework_common::profile::CARRIER_PARSER_GRAMMAR_VERSION,
+        );
         let mut registrations: FxHashMap<FrameworkAdapterId, Arc<FrameworkRegistration>> =
             FxHashMap::default();
         let mut profiles: FxHashMap<FrameworkProfileWireKey, Arc<RegisteredFrameworkProfile>> =
@@ -2041,7 +2038,9 @@ mod tests {
             }
         );
 
-        let syntax = carrier_syntax_schema(BUILT_IN_PARSER_GRAMMAR_VERSION);
+        let syntax = carrier_syntax_schema(
+            verter_compiler::framework_common::profile::CARRIER_PARSER_GRAMMAR_VERSION,
+        );
         let mint = |manifest: &FrameworkProfileManifest| {
             manifest
                 .mint(&syntax)
@@ -2058,7 +2057,9 @@ mod tests {
                 ..VUE_PROFILE_MANIFEST
             }),
             VUE_PROFILE_MANIFEST
-                .mint(&carrier_syntax_schema(BUILT_IN_PARSER_GRAMMAR_VERSION + 1))
+                .mint(&carrier_syntax_schema(
+                    verter_compiler::framework_common::profile::CARRIER_PARSER_GRAMMAR_VERSION + 1,
+                ))
                 .expect("an exact admitted release mints"),
         ];
         for other in &distinct {
@@ -2097,5 +2098,30 @@ mod tests {
             std::sync::Arc::new(LanguageRegistry::new(rows)),
             crate::framework::ProjectCapabilitySnapshot::empty(),
         )
+    }
+
+    /// The adapter registry and the compiler catalog mint each built-in
+    /// framework profile from one manifest under one grammar version: a
+    /// profile the session advertises is the profile the catalog keys its
+    /// rows by.
+    #[test]
+    fn the_session_registry_and_the_compiler_catalog_mint_one_profile_per_built_in_family() {
+        let registry = built_in();
+        let catalog: Vec<_> =
+            verter_compiler::framework_common::CarrierFrontendRegistry::built_in()
+                .rows()
+                .map(|row| row.identity().framework_profile().clone())
+                .collect();
+        let advertised: Vec<_> = registry
+            .advertised_profiles()
+            .map(|entry| entry.profile.clone())
+            .collect();
+        assert_eq!(advertised.len(), catalog.len());
+        for profile in &advertised {
+            assert!(
+                catalog.contains(profile),
+                "an advertised profile is a catalog profile: {profile:?}"
+            );
+        }
     }
 }

@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 
 use oxc_span::GetSpan;
 use rustc_hash::FxHashMap;
+use verter_parser::utils::oxc::bindings::{BindingContext, BindingExtractionResult};
+use verter_parser::utils::vue::tag::{is_html_tag, is_mathml_tag, is_svg_tag};
 
 use verter_identity::canonical::Canonical;
 use verter_identity::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
@@ -28,6 +30,7 @@ use crate::template::oxc::types::{
     OxcNodeData, OxcParsedAst, OxcParsedElement, OxcParsedExpression,
 };
 use crate::types::{NodeId, NodeProp, NodeTag};
+use verter_parser::utils::vue::tag::matches_custom_element;
 
 pub mod origin;
 pub use origin::ObservationRole;
@@ -38,6 +41,7 @@ const SCOPE_DOMAIN: &str = "verter.compiler.projection_plan.lexical_scope_id.v1"
 const EXPR_DOMAIN: &str = "verter.compiler.projection_plan.admitted_expression_id.v1";
 const SNAPSHOT_DOMAIN: &str = "verter.compiler.projection_plan.snapshot_id.v1";
 const BINDER_DOMAIN: &str = "verter.compiler.projection_plan.generic_binder_ref.v1";
+const ELEMENT_DOMAIN: &str = "verter.compiler.projection_plan.element_use_id.v1";
 const INPUT_BASIS_DOMAIN: &str = "verter.compiler.projection_plan.input_basis.v1";
 
 /// Logical component-use identity: one component expression in one
@@ -65,6 +69,11 @@ pub struct PlanSnapshotId(Canonical);
 /// Accepted two-binder family member (`T` / `U`) attached to one use.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GenericBinderRef(Canonical);
+
+/// Logical identity of one non-component element that carries checked
+/// operations: its tag in one lexical environment, by occurrence.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ElementUseId(Canonical);
 
 macro_rules! id_debug {
     ($t:ident) => {
@@ -97,6 +106,7 @@ id_debug!(LexicalScopeId);
 id_debug!(AdmittedExpressionId);
 id_debug!(PlanSnapshotId);
 id_debug!(GenericBinderRef);
+id_debug!(ElementUseId);
 
 /// Kind of an admitted template expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +125,10 @@ pub enum ExpressionKind {
     SlotParams,
     /// Mustache interpolation.
     Interpolation,
+    /// `v-for` alias pattern (value, key, index), verbatim.
+    VForAlias,
+    /// Dynamic slot name (`#[name]`) or `<slot :name>` value.
+    SlotName,
 }
 
 impl ExpressionKind {
@@ -127,6 +141,8 @@ impl ExpressionKind {
             Self::VForSource => "v-for-source",
             Self::SlotParams => "slot-params",
             Self::Interpolation => "interpolation",
+            Self::VForAlias => "v-for-alias",
+            Self::SlotName => "slot-name",
         }
     }
 }
@@ -184,9 +200,14 @@ pub struct OrderedAttributeOp {
     pub modifiers: Vec<String>,
     /// Whether this bound/value-bearing channel participates in inference.
     pub inference_participation: bool,
-    /// Shape of a `v-on` value, read from the admitted parse; `None` for
-    /// other operations and for a listener without an admitted value.
+    /// Shape of a `v-on` or bound `ref` value, read from the admitted parse;
+    /// `None` for other operations and values without an admitted parse.
     pub handler: Option<HandlerShape>,
+    /// Authored start, without surrounding whitespace, of a `v-model` value
+    /// whose outermost node is a type assertion (`x as T`, `x satisfies T`,
+    /// `<T>x`), read from the admitted parse. Such a target is assignable only
+    /// inside parentheses. `None` for every other operation and value.
+    pub asserted_target: Option<u32>,
 }
 
 /// Shape of a `v-on` value, decided from the same parse facts every backend
@@ -284,6 +305,10 @@ pub struct ExpressionOccurrence {
     pub end: u32,
     /// Lexical environment the expression was admitted in.
     pub lexical_env: LexicalScopeId,
+    /// Parser node that carries the expression (snapshot-local; not part
+    /// of identity). The join key to the template topology
+    /// (`VueTemplateTopology::node_for_syntax`).
+    pub syntax_node: u32,
 }
 
 /// A named slot provided by one component use.
@@ -295,6 +320,19 @@ pub struct ProvidedSlot {
     pub expression: Option<AdmittedExpressionId>,
     /// Slot contents participate in the inference transaction.
     pub inference_participation: bool,
+    /// Nodes that provide this slot: the `<template>` elements, or the
+    /// component's own node for a tag-level `v-slot`. Empty for the implicit
+    /// default slot. Same-name templates share one entry.
+    pub sites: Vec<ProvidedSlotSite>,
+}
+
+/// One parser node that provides a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProvidedSlotSite {
+    /// The `<template>` node, or the component node for a tag-level `v-slot`.
+    pub syntax_node: u32,
+    /// Authored bytes of the slot name (`#name`), when the node writes one.
+    pub name_range: Option<(u32, u32)>,
 }
 
 /// One component use observation: logical id plus this snapshot's inputs.
@@ -316,6 +354,51 @@ pub struct ComponentUse {
     pub generic_binders: Vec<GenericBinderRef>,
     /// Constructor-family expose-value channel stays in the inference transaction.
     pub expose_participation: bool,
+    /// Static `ref="name"` value, when authored.
+    pub static_ref: Option<String>,
+    /// Parser node of the use (snapshot-local; not part of identity).
+    pub syntax_node: u32,
+}
+
+/// What kind of element an [`ElementUse`] is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ElementUseKind {
+    /// HTML, SVG or MathML element.
+    Native {
+        tag: String,
+        namespace: ElementNamespace,
+    },
+    /// Tag matched by the selected custom-element policy.
+    CustomElement { tag: String },
+    /// `<slot>` outlet.
+    SlotOutlet,
+    /// `<template>` that is not a slot body (carries directives only).
+    TemplateWrapper,
+}
+
+/// Namespace an element is parsed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElementNamespace {
+    Html,
+    Svg,
+    MathMl,
+}
+
+/// One element with ordered operations, in the same shape as a component use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElementUse {
+    pub id: ElementUseId,
+    pub kind: ElementUseKind,
+    /// Authored tag-name span in the carrier.
+    pub tag_start: u32,
+    pub tag_end: u32,
+    pub lexical_env: LexicalScopeId,
+    /// Same op shape and ordering rules as [`ComponentUse::operations`].
+    pub operations: Vec<OrderedAttributeOp>,
+    /// Static `ref="name"` value, when authored.
+    pub static_ref: Option<String>,
+    /// Parser node of the element (snapshot-local; not part of identity).
+    pub syntax_node: u32,
 }
 
 /// One binding origin observation.
@@ -403,8 +486,12 @@ pub struct ProjectionPlan {
     pub origins: Vec<BindingOrigin>,
     /// Branch edges in source order.
     pub branches: Vec<BranchEdge>,
+    /// Non-component elements with checked operations, in source order.
+    pub elements: Vec<ElementUse>,
     /// Snapshot-qualified expression occurrences, keyed by durable id.
     expressions: Vec<ExpressionOccurrence>,
+    /// Context references of each occurrence, aligned with `expressions`.
+    references: Vec<Vec<ContextReference>>,
     /// Syntax/obligation products for CodeTransform.
     syntax_obligations: Vec<SyntaxObligation>,
     /// Parse-key used to mint `snapshot`, when the caller supplied one.
@@ -440,6 +527,32 @@ impl ProjectionPlan {
         matches!(self.completeness, PlanCompleteness::Complete)
     }
 
+    /// Element use of `id`.
+    #[must_use]
+    pub fn element(&self, id: &ElementUseId) -> Option<&ElementUse> {
+        self.elements.iter().find(|element| element.id == *id)
+    }
+
+    /// Byte ranges of the free identifiers of one admitted expression that the
+    /// template context must qualify: every identifier reference that is not
+    /// bound by the expression itself, by a template binder in
+    /// `lexical_env` or an enclosing scope, by `$event` in a handler, or by
+    /// the JavaScript globals Vue allows in templates. Sorted, non-overlapping.
+    ///
+    /// Read from the template parse the plan was built from: an expression's
+    /// references are the identifier bindings its parse recorded and did not
+    /// ignore. An expression the parse records no references for (a static
+    /// tag or attribute, a `v-for` alias pattern, a slot parameter list) and
+    /// an id the plan did not admit have none.
+    #[must_use]
+    pub fn context_references(&self, id: &AdmittedExpressionId) -> &[ContextReference] {
+        self.expressions
+            .iter()
+            .position(|occurrence| occurrence.id == *id)
+            .and_then(|index| self.references.get(index))
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// Observation fingerprint used by fresh/incremental equality.
     #[must_use]
     pub fn observation_key(&self) -> String {
@@ -473,6 +586,17 @@ impl ProjectionPlan {
             self.is_complete()
         )
     }
+}
+
+/// One identifier the template context qualifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextReference {
+    /// Identifier start in the carrier.
+    pub start: u32,
+    /// Identifier end in the carrier (exclusive).
+    pub end: u32,
+    /// `{ name }` shorthand property: the qualifier is written as `name: ctx.name`.
+    pub shorthand: bool,
 }
 
 /// Refusal when an incomplete plan is offered to a complete cache.
@@ -518,6 +642,10 @@ pub struct PlanInput<'a> {
     pub parse_key: Option<&'a ParseKey>,
     /// Syntax profile of the bound artifact, when the caller supplied one.
     pub syntax_profile: Option<&'a SyntaxProfileId>,
+    /// Custom-element prefixes selected for the parsed artifact, read by
+    /// [`verter_parser::utils::vue::tag::matches_custom_element`]. A tag it matches is a native
+    /// custom element, not a component use.
+    pub custom_elements: Option<&'a [String]>,
 }
 
 /// Build a fresh plan from an admitted parse.
@@ -566,6 +694,7 @@ pub fn build_projection_plan(input: PlanInput<'_>) -> ProjectionPlan {
     );
     let root_scope = mint_scope(None, "template-root", &[], "", "", "", "", 0);
     let mut builder = PlanBuilder {
+        custom_elements: input.custom_elements,
         source: input.source,
         ast,
         oxc: &oxc,
@@ -573,12 +702,15 @@ pub fn build_projection_plan(input: PlanInput<'_>) -> ProjectionPlan {
         uses: Vec::new(),
         origins: Vec::new(),
         branches: Vec::new(),
+        elements: Vec::new(),
         expressions: Vec::new(),
+        references: Vec::new(),
         obligations: Vec::new(),
         reasons,
         use_counts: FxHashMap::default(),
         expr_counts: FxHashMap::default(),
         scope_counts: FxHashMap::default(),
+        element_counts: FxHashMap::default(),
     };
     let root_children = ast
         .root
@@ -680,7 +812,7 @@ fn mint_expression(
     spelling: &str,
     path: &str,
     role: &str,
-    owner: Option<&ComponentUseId>,
+    owner: Option<&Canonical>,
     occurrence: u32,
 ) -> AdmittedExpressionId {
     let mut encoder = CanonicalEncoder::new(EXPR_DOMAIN);
@@ -690,7 +822,7 @@ fn mint_expression(
     encoder.field_str(4, spelling);
     encoder.field_str(5, path);
     encoder.field_str(6, role);
-    encoder.field_option(7, owner.map(|use_id| use_id.canonical_bytes()));
+    encoder.field_option(7, owner.map(Canonical::bytes));
     encoder.field_u32(8, occurrence);
     AdmittedExpressionId(Canonical::from_encoder(&encoder))
 }
@@ -735,6 +867,89 @@ fn mint_origin(
     BindingOriginId(Canonical::from_encoder(&encoder))
 }
 
+fn mint_element(
+    unit: &SourceUnitId,
+    env: &LexicalScopeId,
+    kind: &ElementUseKind,
+    tag: &str,
+    path: &[String],
+    ops_sig: &str,
+    occurrence: u32,
+) -> ElementUseId {
+    let mut encoder = CanonicalEncoder::new(ELEMENT_DOMAIN);
+    encoder.field_bytes(1, unit.digest().as_bytes());
+    encoder.field_bytes(2, env.digest().as_bytes());
+    encoder.field_str(
+        3,
+        match kind {
+            ElementUseKind::Native { .. } => "native",
+            ElementUseKind::CustomElement { .. } => "custom",
+            ElementUseKind::SlotOutlet => "slot",
+            ElementUseKind::TemplateWrapper => "template",
+        },
+    );
+    encoder.field_str(4, tag);
+    encoder.field_str(5, ops_sig);
+    encoder.field_u32(6, occurrence);
+    encoder.field_u32(7, path.len() as u32);
+    for (i, seg) in path.iter().enumerate() {
+        encoder.field_str(8 + i as u16, seg);
+    }
+    ElementUseId(Canonical::from_encoder(&encoder))
+}
+
+/// The kind of a non-component element, or `None` for a `<template>` that
+/// is a slot body (a slot body is not an element with operations).
+fn element_use_kind(
+    el: &ElementNode,
+    tag: &str,
+    ancestors: &[String],
+    custom_element: bool,
+) -> Option<ElementUseKind> {
+    if custom_element {
+        Some(ElementUseKind::CustomElement {
+            tag: tag.to_string(),
+        })
+    } else if el.tag_type.is_slot_outlet() {
+        Some(ElementUseKind::SlotOutlet)
+    } else if el.tag_type.is_template() {
+        el.v_slot
+            .is_none()
+            .then_some(ElementUseKind::TemplateWrapper)
+    } else if el.tag_type.is_element() {
+        Some(ElementUseKind::Native {
+            tag: tag.to_string(),
+            namespace: element_namespace(tag, ancestors),
+        })
+    } else {
+        None
+    }
+}
+
+/// Namespace a native element is parsed in: the nearest `svg` or `math`
+/// ancestor decides (`foreignObject` returns to HTML); otherwise the tag
+/// tables decide.
+pub(crate) fn element_namespace(tag: &str, ancestors: &[String]) -> ElementNamespace {
+    for ancestor in ancestors.iter().rev() {
+        match ancestor.as_str() {
+            "svg" => return ElementNamespace::Svg,
+            "math" => return ElementNamespace::MathMl,
+            "foreignObject" => return ElementNamespace::Html,
+            _ => {}
+        }
+    }
+    let bytes = tag.as_bytes();
+    if is_html_tag(bytes) {
+        ElementNamespace::Html
+    } else if is_svg_tag(bytes) {
+        ElementNamespace::Svg
+    } else if is_mathml_tag(bytes) {
+        ElementNamespace::MathMl
+    } else {
+        ElementNamespace::Html
+    }
+}
+
 fn mint_binder(use_id: &ComponentUseId, name: &str, ordinal: u8) -> GenericBinderRef {
     let mut encoder = CanonicalEncoder::new(BINDER_DOMAIN);
     encoder.field_bytes(1, use_id.canonical_bytes());
@@ -759,7 +974,9 @@ fn unfinished_plan(
         uses: Vec::new(),
         origins: Vec::new(),
         branches: Vec::new(),
+        elements: Vec::new(),
         expressions: Vec::new(),
+        references: Vec::new(),
         syntax_obligations: Vec::new(),
         parse_key,
         syntax_profile,
@@ -816,6 +1033,7 @@ struct ScopeCountKey {
 }
 
 struct PlanBuilder<'a> {
+    custom_elements: Option<&'a [String]>,
     source: &'a str,
     ast: &'a crate::ast::types::TemplateAst,
     oxc: &'a OxcParsedAst<'a>,
@@ -823,10 +1041,13 @@ struct PlanBuilder<'a> {
     uses: Vec<ComponentUse>,
     origins: Vec<BindingOrigin>,
     branches: Vec<BranchEdge>,
+    elements: Vec<ElementUse>,
     expressions: Vec<ExpressionOccurrence>,
+    references: Vec<Vec<ContextReference>>,
     obligations: Vec<SyntaxObligation>,
     reasons: Vec<Incompleteness>,
     use_counts: FxHashMap<UseCountKey, u32>,
+    element_counts: FxHashMap<UseCountKey, u32>,
     expr_counts: FxHashMap<ExprCountKey, u32>,
     scope_counts: FxHashMap<ScopeCountKey, u32>,
 }
@@ -855,7 +1076,9 @@ impl<'a> PlanBuilder<'a> {
             uses: self.uses,
             origins: self.origins,
             branches: self.branches,
+            elements: self.elements,
             expressions: self.expressions,
+            references: self.references,
             syntax_obligations: self.obligations,
             parse_key,
             syntax_profile,
@@ -903,22 +1126,26 @@ impl<'a> PlanBuilder<'a> {
 
         // Vue evaluates same-element v-if before v-for; the condition lives in
         // the parent environment. Loop aliases are not visible to it.
-        self.record_condition(el, oxc_el, env, ancestors, host, chain);
+        self.record_condition(id, el, oxc_el, env, ancestors, host, chain);
 
         let mut child_env = env.clone();
         if let Some(v_for) = el.v_for.as_ref() {
-            child_env = self.push_vfor_scope(el, v_for, oxc_el, env, host, ancestors);
+            child_env = self.push_vfor_scope(id, el, v_for, oxc_el, env, host, ancestors);
         }
 
         let component_env = child_env.clone();
         if let Some(v_slot) = el.v_slot.as_ref() {
-            child_env = self.push_slot_scope(el, v_slot, &child_env, oxc_el, host, ancestors);
+            child_env = self.push_slot_scope(id, el, v_slot, &child_env, oxc_el, host, ancestors);
         }
 
-        if el.tag_type.is_component() || is_dynamic_component(el, self.source) {
-            self.record_component_use(el, oxc_el, &component_env, ancestors, host);
+        let custom_element = el.tag_type.is_component()
+            && !is_dynamic_component(el, self.source)
+            && matches_custom_element(self.custom_elements, host);
+        if !custom_element && (el.tag_type.is_component() || is_dynamic_component(el, self.source))
+        {
+            self.record_component_use(id, el, oxc_el, &component_env, ancestors, host);
         } else {
-            self.scan_unadmitted_props(el, oxc_el);
+            self.record_element_use(id, el, oxc_el, &component_env, ancestors, host);
         }
 
         let children = el
@@ -931,8 +1158,10 @@ impl<'a> PlanBuilder<'a> {
         self.walk_nodes(children, &child_env, &child_ancestors);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_condition(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         oxc_el: Option<&OxcParsedElement<'a>>,
         env: &LexicalScopeId,
@@ -951,9 +1180,8 @@ impl<'a> PlanBuilder<'a> {
                 let spelling = prop_value(self.source, &condition.prop).unwrap_or("");
                 let start = condition.prop.value_start.unwrap_or(condition.prop.start);
                 let end = condition.prop.value_end.unwrap_or(condition.prop.name_end);
-                if spelling.trim().is_empty()
-                    || oxc_unadmitted(oxc_el.and_then(|el| el.condition.as_ref()), spelling)
-                {
+                let parsed = oxc_el.and_then(|el| el.condition.as_ref());
+                if spelling.trim().is_empty() || oxc_unadmitted(parsed, spelling) {
                     self.reasons.push(Incompleteness::UnadmittedExpression {
                         kind: ExpressionKind::BranchCondition,
                     });
@@ -969,6 +1197,7 @@ impl<'a> PlanBuilder<'a> {
                     host,
                     "branch",
                     None,
+                    ParsedFacts::of(id, parsed),
                 );
                 let excluded = match condition.kind {
                     ElementNodeConditionKind::If => {
@@ -1026,8 +1255,10 @@ impl<'a> PlanBuilder<'a> {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_vfor_scope(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         v_for: &NodeProp,
         oxc_el: Option<&OxcParsedElement<'a>>,
@@ -1085,6 +1316,10 @@ impl<'a> PlanBuilder<'a> {
                 }
             })
             .unwrap_or_else(|| (value.trim().to_string(), start, end));
+        // The iterable is read in the enclosing scope, before this loop's
+        // aliases bind. Its references come from the shared collector's
+        // occurrence inventory, as for every other admitted expression, so
+        // reads inside callbacks and spreads are context reads too.
         let _ = self.admit_expr(
             env,
             ExpressionKind::VForSource,
@@ -1095,6 +1330,10 @@ impl<'a> PlanBuilder<'a> {
             host,
             "v-for",
             None,
+            ParsedFacts {
+                node: id,
+                references: inventory_references(parsed.source_bindings.as_ref()),
+            },
         );
         let spelling = value.trim();
         let content_sig = scope_content_sig(el, self.ast, self.source);
@@ -1118,6 +1357,34 @@ impl<'a> PlanBuilder<'a> {
             &content_sig,
             occurrence,
         );
+        // Each alias position (value, key, index) is admitted verbatim in the
+        // scope it binds. An alias pattern declares names; the v-for parse
+        // records no references inside it.
+        if let Some(left) = parsed.parsed.left() {
+            let source = self.source;
+            let positions = match left.without_parentheses() {
+                oxc_ast::ast::Expression::SequenceExpression(sequence) => &sequence.expressions[..],
+                single => std::slice::from_ref(single),
+            };
+            for (ordinal, alias) in positions.iter().enumerate() {
+                let span = alias.span();
+                let _ = self.admit_expr(
+                    &scope,
+                    ExpressionKind::VForAlias,
+                    &source[span.start as usize..span.end as usize],
+                    span.start,
+                    span.end,
+                    ancestors,
+                    host,
+                    &format!("v-for-alias:{ordinal}"),
+                    None,
+                    ParsedFacts {
+                        node: id,
+                        references: Vec::new(),
+                    },
+                );
+            }
+        }
         for name in &names {
             let id = mint_origin(&self.template_unit, &scope, BinderKind::VForAlias, name);
             self.origins.push(BindingOrigin {
@@ -1130,8 +1397,10 @@ impl<'a> PlanBuilder<'a> {
         scope
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_slot_scope(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         v_slot: &NodeProp,
         env: &LexicalScopeId,
@@ -1166,6 +1435,8 @@ impl<'a> PlanBuilder<'a> {
                 }
                 let start = v_slot.value_start.unwrap_or(v_slot.start);
                 let end = v_slot.value_end.unwrap_or(v_slot.name_end);
+                // A parameter list declares names; the v-slot parse keeps no
+                // separate reference set for its default values.
                 let _ = self.admit_expr(
                     env,
                     ExpressionKind::SlotParams,
@@ -1176,6 +1447,10 @@ impl<'a> PlanBuilder<'a> {
                     host,
                     "slot-params",
                     None,
+                    ParsedFacts {
+                        node: id,
+                        references: Vec::new(),
+                    },
                 );
             }
         }
@@ -1242,16 +1517,27 @@ impl<'a> PlanBuilder<'a> {
 
     fn record_component_use(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         oxc_el: Option<&OxcParsedElement<'a>>,
         env: &LexicalScopeId,
         ancestors: &[String],
         host: &str,
     ) {
-        let (kind, spelling, expr_start, expr_end) = self.component_expression(el, oxc_el);
-        let drafts = self.collect_op_drafts(el, oxc_el);
+        let (kind, spelling, expr_start, expr_end, expr_references) =
+            self.component_expression(id, el, oxc_el);
+        let drafts = self.collect_op_drafts(id, el, oxc_el);
         let ops_sig = op_signature(&drafts);
-        let slot_drafts = slot_drafts(el, self.ast, self.source);
+        let mut slot_drafts = slot_drafts(el, self.ast, self.source);
+        // A tag-level `v-slot` belongs to the component's own node.
+        for draft in &mut slot_drafts {
+            if draft.prop.is_some() && draft.child_id.is_none() {
+                draft.nodes = vec![ProvidedSlotSite {
+                    syntax_node: syntax_node(id),
+                    name_range: draft.prop.as_ref().and_then(name_range),
+                }];
+            }
+        }
         let slots_sig = slot_drafts
             .iter()
             .map(|slot| slot.name.as_str())
@@ -1292,11 +1578,15 @@ impl<'a> PlanBuilder<'a> {
             ancestors,
             host,
             &format!("{}:{ops_sig}", kind.tag()),
-            Some(&use_id),
+            Some(&use_id.0),
+            ParsedFacts {
+                node: id,
+                references: expr_references,
+            },
         );
-        let operations = self.materialize_ops(drafts, env, ancestors, host, &use_id);
+        let operations = self.materialize_ops(id, drafts, env, ancestors, host, &use_id.0);
         let provided_slots =
-            self.materialize_slots(slot_drafts, oxc_el, env, ancestors, host, &use_id);
+            self.materialize_slots(id, slot_drafts, oxc_el, env, ancestors, host, &use_id.0);
         let generic_binders = vec![mint_binder(&use_id, "T", 0), mint_binder(&use_id, "U", 1)];
         self.obligations.push(SyntaxObligation {
             use_id: Some(use_id.clone()),
@@ -1338,14 +1628,19 @@ impl<'a> PlanBuilder<'a> {
             ],
             generic_binders,
             expose_participation: true,
+            static_ref: static_ref(el, self.source),
+            syntax_node: syntax_node(id),
         });
     }
 
+    /// The component expression of a use and its context references. A
+    /// static tag or static `is` names a component, not a context value.
     fn component_expression(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         oxc_el: Option<&OxcParsedElement<'a>>,
-    ) -> (ExpressionKind, String, u32, u32) {
+    ) -> (ExpressionKind, String, u32, u32, Vec<ContextReference>) {
         let (tag_start, tag_end, tag_name) = open_tag_name_span(&el.tag_open, self.source);
         if is_dynamic_component(el, self.source) {
             if let Some((index, is_prop)) = el
@@ -1356,10 +1651,10 @@ impl<'a> PlanBuilder<'a> {
             {
                 if is_prop.is_directive {
                     if let Some(val) = prop_value(self.source, is_prop) {
-                        let parsed = oxc_el.and_then(|parsed| parsed.prop(index));
-                        if oxc_unadmitted(parsed.and_then(|p| p.exp.as_ref()), val)
-                            || val.trim().is_empty()
-                        {
+                        let parsed = oxc_el
+                            .and_then(|parsed| parsed.prop(index))
+                            .and_then(|p| p.exp.as_ref());
+                        if oxc_unadmitted(parsed, val) || val.trim().is_empty() {
                             self.reasons.push(Incompleteness::UnadmittedExpression {
                                 kind: ExpressionKind::ComponentIs,
                             });
@@ -1371,12 +1666,22 @@ impl<'a> PlanBuilder<'a> {
                             val.trim().to_string(),
                             start,
                             end,
+                            parsed_references(parsed),
                         );
                     }
                     if let Some(arg) = arg_name(is_prop, self.source) {
                         let start = is_prop.arg_start.unwrap_or(is_prop.start);
                         let end = is_prop.arg_end.unwrap_or(is_prop.name_end);
-                        return (ExpressionKind::ComponentIs, kebab_to_camel(arg), start, end);
+                        let spelling = kebab_to_camel(arg);
+                        let references =
+                            self.shorthand_references(id, oxc_el, &spelling, start, end);
+                        return (
+                            ExpressionKind::ComponentIs,
+                            spelling,
+                            start,
+                            end,
+                            references,
+                        );
                     }
                 } else if let Some(val) = prop_value(self.source, is_prop) {
                     let start = is_prop.value_start.unwrap_or(is_prop.start);
@@ -1386,6 +1691,7 @@ impl<'a> PlanBuilder<'a> {
                         val.trim().to_string(),
                         start,
                         end,
+                        Vec::new(),
                     );
                 }
             }
@@ -1397,6 +1703,7 @@ impl<'a> PlanBuilder<'a> {
                 tag_name.to_string(),
                 tag_start,
                 tag_end,
+                Vec::new(),
             );
         }
         (
@@ -1404,29 +1711,101 @@ impl<'a> PlanBuilder<'a> {
             tag_name.to_string(),
             tag_start,
             tag_end,
+            Vec::new(),
         )
     }
 
-    fn scan_unadmitted_props(&mut self, el: &ElementNode, oxc_el: Option<&OxcParsedElement<'a>>) {
-        for (index, prop) in el.props.iter().enumerate() {
-            if classify_op(prop, self.source).is_none() {
-                continue;
-            }
-            let parsed = oxc_el.and_then(|el| el.prop(index));
-            let value = prop_value(self.source, prop).unwrap_or("");
-            let arg = arg_parse_slice(self.source, prop);
-            if oxc_unadmitted(parsed.and_then(|p| p.exp.as_ref()), value)
-                || oxc_unadmitted(parsed.and_then(|p| p.arg.as_ref()), arg)
-            {
-                self.reasons.push(Incompleteness::UnadmittedExpression {
-                    kind: ExpressionKind::AttributeValue,
-                });
-            }
+    /// Context references of a value-less shorthand (`:foo` reads `foo`):
+    /// the one identifier it reads, at its argument token, unless a
+    /// template scope visible to the element's props binds it or binding
+    /// extraction ignores the name (a keyword, a global Vue allows, `$event`).
+    fn shorthand_references(
+        &self,
+        id: NodeId,
+        oxc_el: Option<&OxcParsedElement<'a>>,
+        spelling: &str,
+        start: u32,
+        end: u32,
+    ) -> Vec<ContextReference> {
+        let scope = oxc_el.map_or_else(|| self.oxc.scope_of(id, self.ast), |el| el.props_scope);
+        if self.oxc.scopes.declares(scope, spelling)
+            || BindingContext::default().should_ignore(spelling)
+        {
+            return Vec::new();
         }
+        vec![ContextReference {
+            start,
+            end,
+            shorthand: false,
+        }]
+    }
+
+    /// Admit a non-component element that carries checked operations, in the
+    /// same op shape as a component use. Operations are collected for every
+    /// non-component element, so an expression that cannot be admitted still
+    /// makes the plan incomplete; only elements with operations are admitted.
+    fn record_element_use(
+        &mut self,
+        id: NodeId,
+        el: &ElementNode,
+        oxc_el: Option<&OxcParsedElement<'a>>,
+        env: &LexicalScopeId,
+        ancestors: &[String],
+        host: &str,
+    ) {
+        let drafts = self.collect_op_drafts(id, el, oxc_el);
+        let custom_element = el.tag_type.is_component()
+            && !is_dynamic_component(el, self.source)
+            && matches_custom_element(self.custom_elements, host);
+        let Some(kind) = element_use_kind(el, host, ancestors, custom_element) else {
+            return;
+        };
+        let static_ref = static_ref(el, self.source);
+        if drafts.is_empty() && static_ref.is_none() {
+            return;
+        }
+        let (tag_start, tag_end, _) = open_tag_name_span(&el.tag_open, self.source);
+        let ops_sig = op_signature(&drafts);
+        let occurrence = {
+            let slot = self
+                .element_counts
+                .entry(UseCountKey {
+                    env: env.digest(),
+                    spelling: host.to_string(),
+                    path: ancestors.join("/"),
+                    ops_sig: ops_sig.clone(),
+                    slots_sig: String::new(),
+                })
+                .or_insert(0);
+            let n = *slot;
+            *slot += 1;
+            n
+        };
+        let use_id = mint_element(
+            &self.template_unit,
+            env,
+            &kind,
+            host,
+            ancestors,
+            &ops_sig,
+            occurrence,
+        );
+        let operations = self.materialize_ops(id, drafts, env, ancestors, host, &use_id.0);
+        self.elements.push(ElementUse {
+            id: use_id,
+            kind,
+            tag_start,
+            tag_end,
+            lexical_env: env.clone(),
+            operations,
+            static_ref,
+            syntax_node: syntax_node(id),
+        });
     }
 
     fn collect_op_drafts(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         oxc_el: Option<&OxcParsedElement<'a>>,
     ) -> Vec<OpDraft> {
@@ -1450,39 +1829,74 @@ impl<'a> PlanBuilder<'a> {
                     kind: ExpressionKind::AttributeValue,
                 });
             }
-            let value = if kind == AttributeOpKind::Static {
-                raw_value.map(|val| {
+            // A static value is text, not an expression: it references nothing.
+            let (value, value_references) = if kind == AttributeOpKind::Static {
+                let value = raw_value.map(|val| {
                     (
                         val.to_string(),
                         prop.value_start.unwrap_or(prop.start),
                         prop.value_end.unwrap_or(prop.name_end),
                     )
-                })
+                });
+                (value, Vec::new())
             } else if let Some(val) = raw_value {
-                Some((
+                let value = (
                     val.trim().to_string(),
                     prop.value_start.unwrap_or(prop.start),
                     prop.value_end.unwrap_or(prop.name_end),
-                ))
+                );
+                (
+                    Some(value),
+                    parsed_references(parsed.and_then(|p| p.exp.as_ref())),
+                )
             } else {
-                shorthand_value(prop, self.source, kind)
+                match shorthand_value(prop, self.source, kind) {
+                    Some((spelling, start, end)) => {
+                        let references =
+                            self.shorthand_references(id, oxc_el, &spelling, start, end);
+                        (Some((spelling, start, end)), references)
+                    }
+                    None => (None, Vec::new()),
+                }
             };
             drafts.push(OpDraft {
                 index: dense,
                 kind,
-                name,
+                name: name.clone(),
                 value_spelling: value.as_ref().map(|(s, _, _)| s.clone()),
                 value_start: value.as_ref().map(|(_, s, _)| *s).unwrap_or(0),
                 value_end: value.as_ref().map(|(_, _, e)| *e).unwrap_or(0),
+                value_references,
                 arg_spelling: arg_inner.map(|(s, _, _)| s.to_string()),
                 arg_start: arg_inner.map(|(_, s, _)| s).unwrap_or(0),
                 arg_end: arg_inner.map(|(_, _, e)| e).unwrap_or(0),
+                arg_references: parsed_references(parsed.and_then(|p| p.arg.as_ref())),
                 modifiers: modifier_names(prop, self.source),
                 unadmitted: arg_unadmitted || exp_unadmitted,
                 handler: parsed
                     .and_then(|p| p.exp.as_ref())
-                    .filter(|_| kind == AttributeOpKind::VOn)
+                    .filter(|_| {
+                        kind == AttributeOpKind::VOn
+                            || (kind == AttributeOpKind::Bound && name == "ref")
+                    })
                     .map(HandlerShape::of),
+                asserted_target: parsed
+                    .and_then(|p| p.exp.as_ref())
+                    .and_then(|exp| exp.expression.as_ref())
+                    .filter(|expr| {
+                        kind == AttributeOpKind::Model
+                            && matches!(
+                                expr,
+                                oxc_ast::ast::Expression::TSAsExpression(_)
+                                    | oxc_ast::ast::Expression::TSSatisfiesExpression(_)
+                                    | oxc_ast::ast::Expression::TSTypeAssertion(_)
+                            )
+                    })
+                    .and_then(|_| {
+                        let authored = raw_value?;
+                        let leading = authored.len() - authored.trim_start().len();
+                        Some(prop.value_start? + leading as u32)
+                    }),
             });
             dense += 1;
         }
@@ -1491,14 +1905,17 @@ impl<'a> PlanBuilder<'a> {
 
     fn materialize_ops(
         &mut self,
+        id: NodeId,
         drafts: Vec<OpDraft>,
         env: &LexicalScopeId,
         ancestors: &[String],
         host: &str,
-        owner: &ComponentUseId,
+        owner: &Canonical,
     ) -> Vec<OrderedAttributeOp> {
         let mut ops = Vec::with_capacity(drafts.len());
-        for draft in drafts {
+        for mut draft in drafts {
+            let arg_references = std::mem::take(&mut draft.arg_references);
+            let value_references = std::mem::take(&mut draft.value_references);
             let argument = if !draft.unadmitted {
                 draft.arg_spelling.as_ref().map(|spelling| {
                     self.admit_expr(
@@ -1511,6 +1928,10 @@ impl<'a> PlanBuilder<'a> {
                         host,
                         &format!("arg:{}", draft.name),
                         Some(owner),
+                        ParsedFacts {
+                            node: id,
+                            references: arg_references,
+                        },
                     )
                 })
             } else {
@@ -1528,6 +1949,10 @@ impl<'a> PlanBuilder<'a> {
                         host,
                         &format!("value:{}", draft.name),
                         Some(owner),
+                        ParsedFacts {
+                            node: id,
+                            references: value_references,
+                        },
                     )
                 })
             } else {
@@ -1535,6 +1960,7 @@ impl<'a> PlanBuilder<'a> {
             };
             let participates = op_participates(draft.kind, expression.is_some());
             let handler = draft.handler.filter(|_| expression.is_some());
+            let asserted_target = draft.asserted_target.filter(|_| expression.is_some());
             ops.push(OrderedAttributeOp {
                 index: draft.index,
                 kind: draft.kind,
@@ -1542,6 +1968,7 @@ impl<'a> PlanBuilder<'a> {
                 expression,
                 argument,
                 handler,
+                asserted_target,
                 modifiers: draft.modifiers,
                 inference_participation: participates,
             });
@@ -1549,14 +1976,16 @@ impl<'a> PlanBuilder<'a> {
         ops
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn materialize_slots(
         &mut self,
+        host_id: NodeId,
         drafts: Vec<SlotDraft>,
         host_oxc: Option<&OxcParsedElement<'a>>,
         env: &LexicalScopeId,
         ancestors: &[String],
         host: &str,
-        owner: &ComponentUseId,
+        owner: &Canonical,
     ) -> Vec<ProvidedSlot> {
         let mut slots = Vec::with_capacity(drafts.len());
         for draft in drafts {
@@ -1589,6 +2018,7 @@ impl<'a> PlanBuilder<'a> {
                                 host,
                                 &format!("slot-name:{}", draft.name),
                                 Some(owner),
+                                ParsedFacts::of(draft.child_id.unwrap_or(host_id), parsed),
                             ))
                         }
                     } else {
@@ -1604,6 +2034,7 @@ impl<'a> PlanBuilder<'a> {
                 name: draft.name,
                 expression,
                 inference_participation: true,
+                sites: draft.nodes,
             });
         }
         slots
@@ -1644,6 +2075,7 @@ impl<'a> PlanBuilder<'a> {
             "",
             "interpolation",
             None,
+            ParsedFacts::of(id, parsed),
         );
     }
 
@@ -1658,7 +2090,8 @@ impl<'a> PlanBuilder<'a> {
         ancestors: &[String],
         host: &str,
         role: &str,
-        owner: Option<&ComponentUseId>,
+        owner: Option<&Canonical>,
+        facts: ParsedFacts,
     ) -> AdmittedExpressionId {
         let path = expr_path(ancestors, host);
         let occurrence = {
@@ -1670,7 +2103,7 @@ impl<'a> PlanBuilder<'a> {
                     spelling: spelling.to_string(),
                     path: path.clone(),
                     role: role.to_string(),
-                    owner: owner.map(ComponentUseId::digest),
+                    owner: owner.map(Canonical::digest),
                 })
                 .or_insert(0);
             let n = *slot;
@@ -1694,9 +2127,65 @@ impl<'a> PlanBuilder<'a> {
             start,
             end,
             lexical_env: env.clone(),
+            syntax_node: syntax_node(facts.node),
         });
+        self.references.push(facts.references);
         id
     }
+}
+
+/// What the template parse recorded for one admitted expression: the parser
+/// node that carries it and its context references. Neither is part of the
+/// expression's identity.
+struct ParsedFacts {
+    node: NodeId,
+    references: Vec<ContextReference>,
+}
+
+impl ParsedFacts {
+    fn of(node: NodeId, parsed: Option<&OxcParsedExpression<'_>>) -> Self {
+        Self {
+            node,
+            references: parsed_references(parsed),
+        }
+    }
+}
+
+/// Context references of one parsed value: the identifier bindings its parse
+/// recorded and did not ignore. The parse already ignores keywords, the
+/// globals Vue allows, `$event`, names the expression binds and names an
+/// enclosing `v-for` or `v-slot` binds, and keeps bindings in source order.
+fn parsed_references(parsed: Option<&OxcParsedExpression<'_>>) -> Vec<ContextReference> {
+    inventory_references(parsed.and_then(|parsed| parsed.bindings.as_ref()))
+}
+
+/// Context references of one occurrence inventory from the shared collector.
+fn inventory_references(extraction: Option<&BindingExtractionResult<'_>>) -> Vec<ContextReference> {
+    extraction
+        .map(|extraction| {
+            extraction
+                .bindings
+                .iter()
+                .filter(|binding| !binding.ignore)
+                .map(|binding| ContextReference {
+                    start: binding.pos,
+                    end: binding.pos + binding.span.len(),
+                    shorthand: binding.is_shorthand,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The parser node index the plan records (the topology's join key).
+fn syntax_node(id: NodeId) -> u32 {
+    id.0 as u32
+}
+
+/// Static `ref="name"` value. The parser keeps it out of the element's props.
+fn static_ref(el: &ElementNode, source: &str) -> Option<String> {
+    let name = prop_value(source, el.v_ref.as_ref()?)?.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn oxc_unadmitted(expr: Option<&OxcParsedExpression<'_>>, authored: &str) -> bool {
@@ -1739,7 +2228,7 @@ fn is_is_attr(prop: &NodeProp, source: &str) -> bool {
     }
 }
 
-fn open_tag_name_span<'a>(tag: &NodeTag, source: &'a str) -> (u32, u32, &'a str) {
+pub(crate) fn open_tag_name_span<'a>(tag: &NodeTag, source: &'a str) -> (u32, u32, &'a str) {
     let bytes = source.as_bytes();
     let mut i = tag.start as usize + 1;
     let end = tag.name_end as usize;
@@ -1955,6 +2444,12 @@ fn push_descendant_use_sigs(
             .collect::<Vec<_>>()
             .join(",");
         parts.push(format!("{tag}|{}|{slots}", authored_ops_sig(el, source)));
+    } else {
+        let ops = authored_ops_sig(el, source);
+        if !ops.is_empty() {
+            let tag = open_tag_name(&el.tag_open, source);
+            parts.push(format!("{tag}|{ops}"));
+        }
     }
     let Some(content) = el.content.as_ref() else {
         return;
@@ -1973,6 +2468,13 @@ fn arg_name<'a>(prop: &NodeProp, source: &'a str) -> Option<&'a str> {
         return None;
     }
     Some(&source[s as usize..e as usize])
+}
+
+fn name_range(prop: &NodeProp) -> Option<(u32, u32)> {
+    match (prop.arg_start, prop.arg_end) {
+        (Some(start), Some(end)) if start < end => Some((start, end)),
+        _ => None,
+    }
 }
 
 fn slot_local_names(
@@ -1998,18 +2500,22 @@ struct OpDraft {
     value_spelling: Option<String>,
     value_start: u32,
     value_end: u32,
+    value_references: Vec<ContextReference>,
     arg_spelling: Option<String>,
     arg_start: u32,
     arg_end: u32,
+    arg_references: Vec<ContextReference>,
     modifiers: Vec<String>,
     unadmitted: bool,
     handler: Option<HandlerShape>,
+    asserted_target: Option<u32>,
 }
 
 struct SlotDraft {
     name: String,
     prop: Option<NodeProp>,
     child_id: Option<NodeId>,
+    nodes: Vec<ProvidedSlotSite>,
 }
 
 fn slot_drafts(
@@ -2023,6 +2529,7 @@ fn slot_drafts(
             name: arg_name(v_slot, source).unwrap_or("default").to_string(),
             prop: Some(v_slot.clone()),
             child_id: None,
+            nodes: Vec::new(),
         });
         // Component-level slot content belongs to that slot; it is not also
         // implicit default content.
@@ -2039,12 +2546,20 @@ fn slot_drafts(
             AstNodeKind::Element(child) if child.tag_type.is_template() => {
                 if let Some(v_slot) = child.v_slot.as_ref() {
                     let name = arg_name(v_slot, source).unwrap_or("default").to_string();
-                    if !slots.iter().any(|s| s.name == name) {
-                        slots.push(SlotDraft {
+                    match slots.iter_mut().find(|s| s.name == name) {
+                        Some(known) => known.nodes.push(ProvidedSlotSite {
+                            syntax_node: syntax_node(child_id),
+                            name_range: name_range(v_slot),
+                        }),
+                        None => slots.push(SlotDraft {
                             name,
                             prop: Some(v_slot.clone()),
                             child_id: Some(child_id),
-                        });
+                            nodes: vec![ProvidedSlotSite {
+                                syntax_node: syntax_node(child_id),
+                                name_range: name_range(v_slot),
+                            }],
+                        }),
                     }
                 } else {
                     has_default_child = true;
@@ -2059,6 +2574,7 @@ fn slot_drafts(
             name: "default".to_string(),
             prop: None,
             child_id: None,
+            nodes: Vec::new(),
         });
     }
     slots
@@ -2066,13 +2582,14 @@ fn slot_drafts(
 
 /// Parse helper for crate tests and the Vue projection backend.
 pub fn plan_from_source(canonical_id: &str, source: &str) -> ProjectionPlan {
-    let parsed = crate::compile::parse_sfc(source, None, None);
+    let parsed = verter_parser::parser::parse_sfc(source, None, None);
     build_projection_plan(PlanInput {
         canonical_id,
         source,
         parsed: &parsed,
         parse_key: None,
         syntax_profile: None,
+        custom_elements: None,
     })
 }
 
@@ -2251,9 +2768,10 @@ mod tests {
         let input = PlanInput {
             canonical_id: "file:///ids.vue",
             source: IDS_BASE,
-            parsed: &crate::compile::parse_sfc(IDS_BASE, None, None),
+            parsed: &verter_parser::parser::parse_sfc(IDS_BASE, None, None),
             parse_key: None,
             syntax_profile: None,
+            custom_elements: None,
         };
         let _ = build_projection_plan(input);
         let number = concat!(
@@ -2311,7 +2829,6 @@ mod tests {
         "crate::parser::types",
         "crate::template::oxc",
         "crate::types",
-        "crate::compile::parse_sfc",
     ];
 
     fn crate_path_allowed(path: &str) -> bool {
@@ -2412,13 +2929,14 @@ mod tests {
 
     #[test]
     fn stp9_determinism_fresh_matches_incremental() {
-        let parsed = crate::compile::parse_sfc(IDS_BASE, None, None);
+        let parsed = verter_parser::parser::parse_sfc(IDS_BASE, None, None);
         let input = PlanInput {
             canonical_id: "file:///ids.vue",
             source: IDS_BASE,
             parsed: &parsed,
             parse_key: None,
             syntax_profile: None,
+            custom_elements: None,
         };
         let fresh = build_projection_plan(input);
         let again = build_projection_plan(PlanInput {
@@ -2427,6 +2945,7 @@ mod tests {
             parsed: &parsed,
             parse_key: None,
             syntax_profile: None,
+            custom_elements: None,
         });
         let incremental = build_projection_plan_incremental(
             Some(&fresh),
@@ -2436,6 +2955,7 @@ mod tests {
                 parsed: &parsed,
                 parse_key: None,
                 syntax_profile: None,
+                custom_elements: None,
             },
         );
         assert_eq!(fresh.observation_key(), again.observation_key());
@@ -2450,16 +2970,18 @@ mod tests {
                 parsed: &parsed,
                 parse_key: None,
                 syntax_profile: None,
+                custom_elements: None,
             },
         );
         assert_eq!(fresh.observation_key(), from_none.observation_key());
-        let malformed_parsed = crate::compile::parse_sfc(MALFORMED, None, None);
+        let malformed_parsed = verter_parser::parser::parse_sfc(MALFORMED, None, None);
         let incomplete = build_projection_plan(PlanInput {
             canonical_id: "file:///malformed.vue",
             source: MALFORMED,
             parsed: &malformed_parsed,
             parse_key: None,
             syntax_profile: None,
+            custom_elements: None,
         });
         let incomplete_inc = build_projection_plan_incremental(
             Some(&incomplete),
@@ -2469,6 +2991,7 @@ mod tests {
                 parsed: &malformed_parsed,
                 parse_key: None,
                 syntax_profile: None,
+                custom_elements: None,
             },
         );
         assert_eq!(
@@ -3110,6 +3633,21 @@ mod tests {
         assert!(!crate_path_allowed("crate::ide::template::choose_answer"));
     }
 
+    #[test]
+    fn bound_ref_values_reuse_the_admitted_handler_shape() {
+        let source = sfc("<Child :ref=\"el => accept(el)\" /><input :ref=\"target\" />");
+        let plan = plan_from_source("file:///Refs.vue", &source);
+        assert!(plan.is_complete());
+        assert_eq!(
+            plan.uses[0].operations[0].handler,
+            Some(HandlerShape::Function)
+        );
+        assert_eq!(
+            plan.elements[0].operations[0].handler,
+            Some(HandlerShape::Reference)
+        );
+    }
+
     fn value_expr<'a>(
         plan: &'a ProjectionPlan,
         use_idx: usize,
@@ -3396,3 +3934,9 @@ mod tests {
         assert_eq!(plan.uses.len(), 32);
     }
 }
+
+#[cfg(test)]
+mod context_reference_tests;
+
+#[cfg(test)]
+mod element_use_tests;

@@ -2,6 +2,84 @@
 
 use super::*;
 
+/// A carrier's graph-only answer, or the standing walk and its first read.
+pub(in crate::project_semantic_dispatch) enum CarrierStep {
+    Settled(IdentityCarrierUnwrap),
+    Wait(Box<IdentityCarrierRead>, ReadWait),
+}
+
+impl CarrierStep {
+    pub(super) fn begin<C: crate::resolver_core::ResolverCapabilities>(
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        node: SemanticNodeId,
+    ) -> Self {
+        let mut walk =
+            IdentityCarrierRead::at(super::super::relation::CarrierWalkPoint { node, depth: 0 });
+        match dispatch.advance_identity_carrier_read(&mut walk) {
+            IdentityCarrierStep::Done(done) => Self::Settled(done),
+            IdentityCarrierStep::Read(key) => {
+                let wait = carrier_wait(dispatch, &walk, key);
+                Self::Wait(Box::new(walk), wait)
+            }
+        }
+    }
+}
+
+/// Preserve the carrier consumer's dispatch intent before requesting its read.
+/// The read is staged: a deferred evaluation the walk stands in makes it
+/// under its own tracer, so its proof names what the read observed.
+pub(super) fn carrier_wait<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    walk: &IdentityCarrierRead,
+    key: SemanticQueryKey,
+) -> ReadWait {
+    if walk.reads_for_carrier() && !matches!(key, SemanticQueryKey::TypeOf { .. }) {
+        dispatch.record_dispatch_intent_counters(&key);
+    }
+    dispatch.request(key, ReadShape::Staged, ReadOrigin::Carrier)
+}
+
+static_assertions::const_assert!(std::mem::size_of::<CarrierStep>() <= 32);
+
+/// A type lowering's node, or the lowering and the first read it waits on.
+/// A lowering always yields a node.
+pub(in crate::project_semantic_dispatch) enum LowerStart<'e> {
+    Done(SemanticNodeId),
+    Wait(Box<FlowLowering<'e>>, ReadWait),
+}
+
+/// A type lowering held between its reads, with what each step rebuilds its
+/// lowering context from.
+pub(in crate::project_semantic_dispatch) enum FlowLowering<'e> {
+    /// A body-position type under the evaluator's binder environment, shared
+    /// with the activation that owns it.
+    Body(super::super::lower::TypeLowerRead<'e>, Arc<FlowBinderEnv>),
+    /// A type in a file owner scope, with the scope context the owner-scope
+    /// entry builds.
+    Owner(super::super::lower::OwnerTypeLowerRead<'e>),
+}
+
+static_assertions::assert_impl_all!(FlowLowering<'_>: Send);
+static_assertions::assert_not_impl_any!(FlowLowering<'_>: Clone, Copy);
+static_assertions::const_assert!(std::mem::size_of::<LowerStart<'static>>() <= 32);
+
+/// Carry a lowering to its node where its caller cannot suspend: each read
+/// it waits on is answered at once, attributed to the lowering.
+pub(super) fn lowering_in_place(
+    dispatch: &impl FlowDemandDriver,
+    canonical: &str,
+    start: LowerStart<'_>,
+) -> SemanticNodeId {
+    match start {
+        LowerStart::Done(node) => node,
+        LowerStart::Wait(mut lowering, wait) => settle_now(
+            ReadStep::Wait(wait),
+            |wait| dispatch.read_in_place(wait, canonical),
+            |delivery| dispatch.deliver_lowering(&mut lowering, delivery),
+        ),
+    }
+}
+
 /// Answer every wait of an owned reading operation where its caller cannot suspend.
 pub(super) fn settle_now<T, W, V>(
     mut step: ReadStep<T, W>,
@@ -51,6 +129,75 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<(Vec<SemanticNodeId>, Vec<SemanticNodeId>)> {
         signature_buckets_in_place(self, canonical, subject)
     }
+
+    /// Check the carrier driver's graph-only completion without answering a read.
+    pub fn flow_carrier_without_read_for_tests(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        match self.request_carrier(node) {
+            CarrierStep::Settled(IdentityCarrierUnwrap::Concrete(node)) => Some(node),
+            CarrierStep::Settled(IdentityCarrierUnwrap::Unresolvable) => None,
+            CarrierStep::Wait(walk, _) => {
+                self.release_carrier(walk);
+                None
+            }
+        }
+    }
+
+    /// Act as a holder whose probe consumes a read it answered outside the
+    /// probe: request the type node of `key` under the current checking
+    /// site (marked observed when `observed`), answer it through
+    /// [`FlowReadDriver::answer_read`] for the body in `canonical`, then
+    /// open the answer inside a probe that `probe` consumes. Returns the
+    /// node the holder consumed and the partial reasons the enclosing build
+    /// holds afterwards (`None` when it is complete).
+    pub fn flow_holder_probe_read_for_tests(
+        &self,
+        canonical: &str,
+        key: SemanticQueryKey,
+        observed: bool,
+        probe: HolderProbeForTests,
+    ) -> (
+        Option<SemanticNodeId>,
+        Option<crate::semantic_query::PartialReasonSet>,
+    ) {
+        let enclosing = ProjectSemanticDispatch::observe_read(self, || {
+            let wait =
+                FlowReadDriver::request(self, key, ReadShape::Node, ReadOrigin::IndexedValue);
+            let wait = if observed { wait.observed() } else { wait };
+            let delivery = FlowReadDriver::answer_read(self, wait, canonical);
+            let read = ProjectSemanticDispatch::observe_read(self, || match delivery {
+                ReadDelivery::Observed(read) => match probe {
+                    HolderProbeForTests::DeclinedInFresh => {
+                        FlowDemandDriver::discard_observed(self, read)
+                    }
+                    HolderProbeForTests::Stale | HolderProbeForTests::Fresh => {
+                        FlowDemandDriver::adopt_observed(self, read)
+                    }
+                },
+                delivery => Ok(delivery),
+            });
+            let opened = match probe {
+                HolderProbeForTests::Stale => read.discard(),
+                HolderProbeForTests::Fresh | HolderProbeForTests::DeclinedInFresh => {
+                    FlowDemandDriver::adopt_read(self, read)
+                }
+            };
+            opened
+                .and_then(|delivery| delivery)
+                .expect("the holder's read observes no abort")
+                .node()
+        });
+        let completeness = enclosing.result_completeness();
+        let node = enclosing
+            .discard()
+            .expect("the enclosing build observes no abort");
+        (
+            node,
+            completeness.is_partial().then(|| completeness.reasons()),
+        )
+    }
 }
 
 /// A helper's own stack, kept at the read it requests.
@@ -59,6 +206,9 @@ pub(super) struct HelperRun<'e> {
 }
 
 pub(super) enum HelperFrame<'e> {
+    Carrier(Box<IdentityCarrierRead>),
+    Lower(Box<FlowLowering<'e>>),
+    TruthinessArms(Box<TruthinessArms>),
     MemberPath(MemberPathFrame<'e>),
     List(
         Box<super::super::continuation_stages::SignatureListRead>,
@@ -121,9 +271,23 @@ pub(super) struct NumericMember<'e> {
     rest: &'e [Arc<str>],
 }
 
+/// The arm cursor survives each carrier read; classification follows that
+/// walk's answer before the next arm begins.
+pub(super) struct TruthinessArms {
+    arms: Vec<SemanticNodeId>,
+    next: usize,
+    pub(super) survivors: Vec<SemanticNodeId>,
+    pub(super) dropped: bool,
+    pub(super) undecided: bool,
+    negated: bool,
+    split_boolean: bool,
+}
+
 pub(super) enum HelperValue {
     Node(Option<SemanticNodeId>),
     List(Option<Box<[SemanticNodeId]>>),
+    Carrier(IdentityCarrierUnwrap),
+    Truthiness(Box<TruthinessArms>),
     Indexed(Option<IndexedValue>),
 }
 
@@ -131,15 +295,35 @@ impl HelperValue {
     pub(super) fn node(self) -> Option<SemanticNodeId> {
         match self {
             Self::Node(node) => node,
-            Self::List(_) | Self::Indexed(_) => unreachable!("a member path answers a node"),
+            Self::List(_) | Self::Carrier(_) | Self::Truthiness(_) | Self::Indexed(_) => {
+                unreachable!("a member path answers a node")
+            }
         }
     }
 
     fn list(self) -> Option<Vec<SemanticNodeId>> {
         match self {
             Self::List(nodes) => nodes.map(|nodes| nodes.into_vec()),
-            Self::Node(_) | Self::Indexed(_) => {
+            Self::Node(_) | Self::Carrier(_) | Self::Truthiness(_) | Self::Indexed(_) => {
                 unreachable!("a signature list answers signature nodes")
+            }
+        }
+    }
+
+    fn carrier(self) -> IdentityCarrierUnwrap {
+        match self {
+            Self::Carrier(done) => done,
+            Self::Node(_) | Self::List(_) | Self::Truthiness(_) | Self::Indexed(_) => {
+                unreachable!("a carrier walk answers its settled node")
+            }
+        }
+    }
+
+    fn truthiness(self) -> Box<TruthinessArms> {
+        match self {
+            Self::Truthiness(arms) => arms,
+            Self::Node(_) | Self::List(_) | Self::Carrier(_) | Self::Indexed(_) => {
+                unreachable!("a truthiness loop answers its surviving arms")
             }
         }
     }
@@ -147,7 +331,7 @@ impl HelperValue {
     pub(super) fn indexed(self) -> Option<IndexedValue> {
         match self {
             Self::Indexed(value) => value,
-            Self::Node(_) | Self::List(_) => {
+            Self::Node(_) | Self::List(_) | Self::Carrier(_) | Self::Truthiness(_) => {
                 unreachable!("an indexed read answers an indexed value")
             }
         }
@@ -168,6 +352,9 @@ pub(super) enum AfterHelper<'e> {
         Box<CallInFlight<'e>>,
         Box<call_stack::IndexedArgumentRead<'e>>,
     ),
+    /// A type leaf whose lowering waits: the lowered carrier then takes the
+    /// leaf's closed-utility read.
+    TypeLeaf(&'e verter_session_query::flow::slice::GatedLeaf),
 }
 
 pub(super) struct HelperWait<'e> {
@@ -243,6 +430,19 @@ impl<'e> HelperWait<'e> {
         }
     }
 
+    pub(super) fn type_leaf(
+        lowering: Box<FlowLowering<'e>>,
+        leaf: &'e verter_session_query::flow::slice::GatedLeaf,
+    ) -> Self {
+        Self {
+            run: HelperRun {
+                frames: vec![HelperFrame::Lower(lowering)],
+            },
+            then: AfterHelper::TypeLeaf(leaf),
+            wait: None,
+        }
+    }
+
     pub(super) fn member_of(
         object: SemanticNodeId,
         member: &'e Arc<str>,
@@ -276,9 +476,15 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     ) -> ReadStep<HelperValue> {
         use MemberPathFrame as Frame;
         let mut delivered = delivered;
+        let mut carrier = None;
         let mut value = if matches!(
             run.frames.last(),
-            Some(HelperFrame::List(..) | HelperFrame::Indexed(_))
+            Some(
+                HelperFrame::List(..)
+                    | HelperFrame::Carrier(_)
+                    | HelperFrame::Indexed(_)
+                    | HelperFrame::Lower(_)
+            )
         ) {
             None
         } else {
@@ -291,6 +497,77 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                 ));
             };
             let frame = match frame {
+                HelperFrame::Carrier(mut walk) => {
+                    match self.dispatch.deliver_carrier(
+                        &mut walk,
+                        delivered
+                            .take()
+                            .expect("the carrier receives its requested read"),
+                        self.st.canonical,
+                    ) {
+                        ReadStep::Wait(wait) => {
+                            run.frames.push(HelperFrame::Carrier(walk));
+                            return ReadStep::Wait(wait);
+                        }
+                        ReadStep::Ready(done) => {
+                            self.dispatch.release_carrier(walk);
+                            if run.frames.is_empty() {
+                                return ReadStep::Ready(HelperValue::Carrier(done));
+                            }
+                            carrier = Some(done);
+                            continue;
+                        }
+                    }
+                }
+                HelperFrame::TruthinessArms(mut arms) => {
+                    if let Some(done) = carrier.take() {
+                        self.truthiness_arm_delivered(&mut arms, done);
+                    }
+                    while let Some(arm) = arms.arms.get(arms.next).copied() {
+                        arms.next += 1;
+                        if arms.split_boolean
+                            && matches!(
+                                self.dispatch.arena().node_data(arm).as_deref(),
+                                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+                            )
+                        {
+                            if arms.negated && !self.st.nullability.is_strict() {
+                                arms.survivors.push(arm);
+                            } else {
+                                arms.survivors.push(self.dispatch.graph().intern_node(
+                                    SemanticNodeData::Literal(
+                                        crate::semantic_query::LiteralValue::Boolean(!arms.negated),
+                                    ),
+                                ));
+                                arms.dropped = true;
+                            }
+                            continue;
+                        }
+                        match self.dispatch.request_carrier(arm) {
+                            CarrierStep::Settled(done) => {
+                                self.truthiness_arm_delivered(&mut arms, done)
+                            }
+                            CarrierStep::Wait(walk, wait) => {
+                                run.frames.push(HelperFrame::TruthinessArms(arms));
+                                run.frames.push(HelperFrame::Carrier(walk));
+                                return ReadStep::Wait(wait);
+                            }
+                        }
+                    }
+                    return ReadStep::Ready(HelperValue::Truthiness(arms));
+                }
+                HelperFrame::Lower(mut lowering) => {
+                    let delivery = delivered
+                        .take()
+                        .expect("the lowering receives its requested read");
+                    return match self.dispatch.deliver_lowering(&mut lowering, delivery) {
+                        ReadStep::Wait(wait) => {
+                            run.frames.push(HelperFrame::Lower(lowering));
+                            ReadStep::Wait(wait)
+                        }
+                        ReadStep::Ready(node) => ReadStep::Ready(HelperValue::Node(Some(node))),
+                    };
+                }
                 HelperFrame::Indexed(mut frame) => {
                     let step = match frame.wait.take() {
                         Some(wait) => ReadStep::Wait(wait),
@@ -520,6 +797,69 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         }
     }
 
+    fn truthiness_arm_delivered(&mut self, arms: &mut TruthinessArms, done: IdentityCarrierUnwrap) {
+        use crate::semantic_query::TruthinessInhabitance;
+        let arm = arms.arms[arms.next - 1];
+        match self.classify_truthiness_edge(done, arms.negated) {
+            TruthinessInhabitance::No => arms.dropped = true,
+            TruthinessInhabitance::Yes => arms.survivors.push(arm),
+            TruthinessInhabitance::Undecided => {
+                arms.undecided = true;
+                if arms.split_boolean {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
+                    ));
+                }
+                arms.survivors.push(arm);
+            }
+        }
+    }
+
+    pub(super) fn truthiness_arms_in_place(
+        &mut self,
+        arms: Vec<SemanticNodeId>,
+        negated: bool,
+        split_boolean: bool,
+    ) -> Box<TruthinessArms> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _stage = body_reads::enter_call_stage("truthiness_arms");
+        let survivors = Vec::with_capacity(arms.len() + usize::from(split_boolean));
+        let mut run = HelperRun {
+            frames: vec![HelperFrame::TruthinessArms(Box::new(TruthinessArms {
+                arms,
+                next: 0,
+                survivors,
+                dropped: false,
+                undecided: false,
+                negated,
+                split_boolean,
+            }))],
+        };
+        let first = self.run_helper(&mut run, None);
+        self.settle_now(first, |this, delivery| {
+            this.run_helper(&mut run, Some(delivery))
+        })
+        .truthiness()
+    }
+
+    pub(super) fn truthiness_carrier_in_place(
+        &mut self,
+        arm: SemanticNodeId,
+    ) -> IdentityCarrierUnwrap {
+        match self.dispatch.request_carrier(arm) {
+            CarrierStep::Settled(done) => done,
+            CarrierStep::Wait(walk, wait) => {
+                let mut run = HelperRun {
+                    frames: vec![HelperFrame::Carrier(walk)],
+                };
+                self.settle_now(ReadStep::Wait(wait), |this, delivery| {
+                    this.run_helper(&mut run, Some(delivery))
+                })
+                .carrier()
+            }
+        }
+    }
+
     pub(super) fn member_path_in_place(
         &mut self,
         frame: MemberPathFrame<'_>,
@@ -561,6 +901,20 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
             AfterHelper::ClassBase(mut frame, base) => {
                 let step = self.class_base_delivered(&mut frame, *base, value.list());
                 self.class_step_on_run(run, *frame, step, suspend)
+            }
+            AfterHelper::TypeLeaf(leaf) => {
+                let carrier = value.node().expect("a lowering yields a node");
+                let node = if suspend && body_requests_reads() {
+                    match self.type_leaf_lowered(run, leaf, carrier) {
+                        ReadStep::Ready(node) => node,
+                        ReadStep::Wait(wait) => return ResumedCall::Wait(BodyWait::Read(wait)),
+                    }
+                } else {
+                    self.settle_now(self.body_type_read(carrier), |_, delivery| {
+                        ReadStep::Ready(delivery.node().unwrap_or(carrier))
+                    })
+                };
+                ResumedCall::Value(self.finish_type_leaf(leaf, node))
             }
         }
     }

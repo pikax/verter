@@ -5,8 +5,14 @@
 
 use oxc_allocator::Allocator;
 
-use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
+use crate::compile::legacy_test_support::{
+    compile, compile_on, CodegenOptions, VerterCompileOptions,
+};
+use crate::compile::render_route::RenderRoute;
 use crate::compile::{VerterCompileResult, VueMacroSemanticInput};
+
+/// The route the compile helpers below render through.
+const ROUTE: RenderRoute = RenderRoute::EditInPlace;
 
 fn compile_sfc_ssr(source: &str) -> VerterCompileResult {
     compile_sfc_ssr_with_semantics(source, &VueMacroSemanticInput::Unavailable)
@@ -26,7 +32,14 @@ fn compile_sfc_ssr_with_semantics(
         ssr: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, macro_semantics, &alloc)
+    compile_on(
+        ROUTE,
+        source,
+        &options,
+        &verter_opts,
+        macro_semantics,
+        &alloc,
+    )
 }
 
 /// Helper: compile and return the template code, asserting no errors.

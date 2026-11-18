@@ -1,5 +1,5 @@
 use verter_compiler::framework_common::{
-    CarrierFrontend, CatalogCapability, CatalogIdentity, FrameworkEpochId, Present,
+    CarrierFrontend, CatalogCapability, CatalogIdentity, Present,
     TypedCapabilityRegistration,
 };
 use verter_language::{FrameworkAdapterId, LanguageId};
@@ -25,7 +25,6 @@ fn main() {
         CatalogIdentity::ordinary(
             FrameworkAdapterId::new("tooling"),
             LanguageId::new("html"),
-            FrameworkEpochId::new("html-v1"),
             CatalogCapability::Runtime,
         ),
         Present(ToolingFrontend),

@@ -2,9 +2,9 @@ use std::sync::Arc;
 use verter_compiler::diagnostics::{
     sort_diagnostics, Diagnostic, SyntaxPluginContext, SyntaxPluginOptions,
 };
-use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
+use verter_compiler::framework_common::{CarrierFrontend, VueCarrierFrontend};
 use verter_compiler::parser::Syntax;
-use verter_compiler::svelte::SvelteCarrierCompiler;
+use verter_compiler::svelte::SvelteCarrierFrontend;
 use verter_language::{sort_language_diagnostics, LanguageDiagnostic, ParseOptions};
 
 fn vue_diagnostics(source: &str) -> Vec<Diagnostic> {
@@ -92,8 +92,7 @@ fn malformed_vue_diagnostics_are_repeatable_mapped_and_permutation_stable() {
 #[test]
 fn registered_vue_parse_boundary_is_repeatable_and_source_bound() {
     use verter_language::carrier_grammar::{
-        CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-        FrameworkAdapterSemanticVersion,
+        CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
     };
     use verter_language::registered_source_authority::{
         CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -103,7 +102,12 @@ fn registered_vue_parse_boundary_is_repeatable_and_source_bound() {
     let source_authority = RegisteredSourceAuthority::new().unwrap();
     let grammar_authority = CarrierGrammarAuthority::new().unwrap();
     let language = verter_language::FileLanguage::vue();
-    let grammar = CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap();
+    let grammar = verter_compiler::framework_common::vue_grammar_config(
+        "{{",
+        "}}",
+        std::iter::empty::<&str>(),
+    )
+    .unwrap();
     grammar_authority
         .register_carrier_grammar(
             language.clone(),
@@ -124,11 +128,11 @@ fn registered_vue_parse_boundary_is_repeatable_and_source_bound() {
     let accepted = grammar_authority
         .accept_registered_source(&source_authority, &snapshot, &grammar)
         .unwrap();
-    let compiler = VueCarrierCompiler;
+    let frontend = VueCarrierFrontend;
     // Match the registered path's real standard `{{`/`}}` grammar —
     // `ParseOptions::default()` no longer means "Vue's standard
     // delimiters", it means "the caller supplied nothing."
-    let unregistered = compiler
+    let unregistered = frontend
         .parse(source, &ParseOptions::vue_standard())
         .unwrap();
     let registered = verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted(&accepted)
@@ -146,11 +150,11 @@ fn registered_vue_parse_boundary_is_repeatable_and_source_bound() {
 #[test]
 fn recoverable_svelte_diagnostics_are_repeatable_mapped_and_permutation_stable() {
     const CORPUS: &[&str] = &["{/if}", "{:else}"];
-    let compiler = SvelteCarrierCompiler;
+    let frontend = SvelteCarrierFrontend;
 
     for source in CORPUS {
-        let first = compiler.parse(source, &ParseOptions::default()).unwrap();
-        let second = compiler.parse(source, &ParseOptions::default()).unwrap();
+        let first = frontend.parse(source, &ParseOptions::default()).unwrap();
+        let second = frontend.parse(source, &ParseOptions::default()).unwrap();
         assert!(
             !first.diagnostics.is_empty(),
             "fixture must exercise recovery: {source}"

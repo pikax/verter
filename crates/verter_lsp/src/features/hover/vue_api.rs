@@ -210,8 +210,21 @@ fn format_binding_hover(binding: &verter_session_query::analysis::types::Analyze
             verter_session_query::analysis::types::BindingInitializer::Literal { kind } => {
                 lines.push(format!("Literal: {kind:?}"));
             }
+            verter_session_query::analysis::types::BindingInitializer::MemberCall {
+                object,
+                property,
+                ..
+            } => {
+                lines.push(format!("Initialized via `{object}.{property}()`"));
+            }
             verter_session_query::analysis::types::BindingInitializer::Reference { name } => {
                 lines.push(format!("References `{name}`"));
+            }
+            verter_session_query::analysis::types::BindingInitializer::MemberReference {
+                object,
+                property,
+            } => {
+                lines.push(format!("References `{object}.{property}`"));
             }
             verter_session_query::analysis::types::BindingInitializer::Other => {}
         }

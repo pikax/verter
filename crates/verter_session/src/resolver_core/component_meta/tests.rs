@@ -573,7 +573,6 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
                     define_slots: Vec::new(),
                     slot_bindings: Vec::new(),
                     bindings: Vec::new(),
-                    exposed: Vec::new(),
                 },
             ),
             tracked_dependencies: BTreeSet::new(),

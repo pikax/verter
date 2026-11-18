@@ -2,7 +2,8 @@
 //!
 //! 1. The generator and its typed seam compile in THIS crate, which links
 //!    `verter_compiler` as an external dependency: their only compiler input
-//!    is the public `CodeTransform`, supplied through a local `deps` module.
+//!    is the public `CodeTransform` and its mapped form, supplied through a
+//!    local `deps` module.
 //!    A generator that reached for any compiler-internal module (a parser,
 //!    scope, resolver or projection type) would not resolve here, so this
 //!    integration binary would fail to build. The standalone copy must also
@@ -18,7 +19,7 @@ use std::process::Command;
 
 mod deps {
     pub(super) use oxc_allocator::Allocator;
-    pub(super) use verter_compiler::code_transform::CodeTransform;
+    pub(super) use verter_compiler::code_transform::{CodeTransform, MappedTransform};
 }
 
 #[allow(dead_code)]

@@ -1793,7 +1793,7 @@ impl VerterHost {
 /// [`crate::session_view::EnvHashes`] carrier. Used by the
 /// `host_view_env_hashes*` accessors so the workspace-side layout and
 /// the session-side carrier stay in lockstep.
-fn env_hashes_from_array(
+pub(crate) fn env_hashes_from_array(
     arr: verter_workspace::ProjectEnvHashArray,
 ) -> crate::session_view::EnvHashes {
     crate::session_view::EnvHashes {

@@ -3,6 +3,39 @@ use super::*;
 use super::background_drain::resync_aliased_imports_for_open_files;
 use super::{drain_pending_snapshot_provider_sync_owned, PendingSyncDrain, PENDING_SYNC_REDRIVE};
 
+/// Releases initialization waiters even when the producer fails or is cancelled.
+pub(super) struct BackgroundInitSettlement {
+    server: VerterLanguageServer,
+    generation: u64,
+}
+
+impl BackgroundInitSettlement {
+    pub(super) fn new(server: &VerterLanguageServer, generation: u64) -> Self {
+        server
+            .initialization_progress
+            .send_replace((generation, true));
+        Self {
+            server: server.clone(),
+            generation,
+        }
+    }
+}
+
+impl Drop for BackgroundInitSettlement {
+    fn drop(&mut self) {
+        self.server
+            .initialization_progress
+            .send_if_modified(|state| {
+                if state.0 == self.generation {
+                    state.1 = false;
+                    true
+                } else {
+                    false
+                }
+            });
+    }
+}
+
 // ── Background initialization ───────────────────────────────────────────
 
 /// Spawn the heartbeat task when the client subscribed to it
@@ -389,6 +422,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     }
 
     ws.publish_snapshot(published_root);
+    server
+        .initialization_progress
+        .send_if_modified(|state| state.0 == my_gen);
     tracing::info!(
         "Published exact workspace snapshot with consumer views for {} roots",
         canonical_roots.len()
@@ -781,6 +817,29 @@ async fn announce_recovered_store_fills(tail: StoreFillTail, my_gen: u64) {
 }
 
 impl super::VerterLanguageServer {
+    /// Wait for the initial authoritative root while its producer is running.
+    /// A missing producer still fails closed; rebuilds keep the existing
+    /// generation fence and never make a stale ready root authoritative.
+    pub(super) async fn await_initial_ownership(&self) {
+        let mut progress = self.initialization_progress.subscribe();
+        loop {
+            let running = progress.borrow_and_update().1;
+            if self
+                .documents
+                .host()
+                .workspace_read()
+                .published_root()
+                .is_some_and(|root| root.ownership_ready)
+                || !running
+            {
+                return;
+            }
+            if progress.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
     /// Start the workspace scanner — idempotently — because the complete
     /// workspace inventory is demanded: either a request needs it (the owning
     /// project's carrier frontier for references/rename, or a workspace-wide

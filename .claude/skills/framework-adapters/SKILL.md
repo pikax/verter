@@ -33,21 +33,47 @@ module map + contract reference behind it.
 | `verter_semantic/.../framework_facts.rs` | The syntax-capture half: `ScriptFactProvider` trait, closed `ScriptFactSyntaxGate`, candidate set, the zero-cost dispatcher param. |
 | `typeinfo/framework_surface/{executor,plan,results,graph_export,vue_exec}.rs` | The executor entry, the closed plan/result vocabulary, the first `SemanticTypeGraph` encoder, and the relocated Vue resolution delegates. |
 | `typeinfo/adapters/vue/adapter.rs` | `VueFrameworkAdapter` — plan/normalize only. |
-| `verter_compiler/src/framework_common/carrier_compiler.rs` | The trait-free framework-neutral carrier-compile I/O vocabulary: `IdeCompileOptions`, `IdeOutput`, `RuntimeCompileOptions`, `RuntimeCompileOutput`/`CarrierCompileOutcome`, `CompileUnsupported`, the `RuntimeOutputDescriptor` family, and the block-content inputs. The combined `CarrierCompiler` trait is DELETED — parse options live on `verter_language::ParseOptions`; eval-source + template facts belong to the `FrameworkSemanticAuthority` rows in `capability.rs`. NO script-fact entry — script facts go through the one `ScriptFactProvider` seam. |
-| `verter_compiler/src/framework_common/registered_carrier_projection.rs` | `project_registered_accepted` — the SOLE production entry: catalog frontend parse (`built_in_frontend_catalog`/`registered_frontend_for`), then registered geometry. The combined `CarrierCompilerRegistry` is DELETED — no runtime registry lookup remains anywhere in this path. |
-| `verter_compiler/src/framework_common/vue_bridge.rs` | `VueCarrierCompiler` — parse/identity/downcast only in production (an INHERENT struct, no trait behind it): `parse` builds the framework-neutral artifact via `parse_sfc`, and the inherent carrier downcasts reach the parsed SFC back out. The registry `compile_ide` / `compile_bundle` shims are `cfg(any(test, feature = "test-support"))`-gated compatibility entries; production IDE projection and runtime-bundle emission belong to the typed `VueProjectionBackend` / `VueRuntimeBackend` / host-integration backends. ZERO edits to any Vue parser/codegen module. Also owns `open_vue_carrier`, the registered-projector opener installed on the Vue `CarrierLeg` (no capability token — the opener only ever opens a Vue-adapter artifact). |
-| `verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs` | Reusable (test-only) framework IDE sourcemap-correctness assertions every carrier vertical re-runs against its own `compile_ide` output. |
+| `verter_compiler/src/framework_common/carrier_compiler.rs` | The trait-free framework-neutral carrier-compile I/O vocabulary: `IdeOutput`, `RuntimeCompileOptions`, `RuntimeCompileOutput`/`CarrierCompileOutcome`, `CompileUnsupported`, the `RuntimeOutputDescriptor` family, and the block-content inputs. The combined `CarrierCompiler` trait is DELETED — parse options live on `verter_language::ParseOptions`; eval-source + template facts belong to the `FrameworkSemanticAuthority` rows in `capability.rs`. NO script-fact entry — script facts go through the one `ScriptFactProvider` seam. |
+| `verter_compiler/src/framework_common/catalog.rs` | The typed registration constructors (`register_*`), `CatalogTable` (one row type, unique by identity, sorted) and `CatalogSnapshot`: the ONE immutable catalog, with separate frontend, semantic, projection and compiler-backend tables and no row type spanning them. `CatalogSnapshot::compose(providers)` fails typed on a duplicate key, on a compiler backend whose runtime and native-host halves name different carriers, and on a compiler backend whose carrier (adapter × carrier language × epoch) has no frontend row. `product_capability` answers `Supported` / `Unsupported(capability)` per product kind — absence is a status, never an error. |
+| `verter_compiler/src/framework_common/profile.rs` | `FrameworkProfileManifest` (one exact release of one family, its admitted majors, its claimed carriers) and its `mint`, the descriptor and carrier-syntax schema epochs, and `CARRIER_PARSER_GRAMMAR_VERSION`. Every epoch type declares `FrameworkEpoch::MANIFEST` (`VUE_PROFILE_MANIFEST` beside `VueSfcV3`, `SVELTE_PROFILE_MANIFEST` beside `SvelteSfc5`). A catalog row is keyed by its `CarrierProfileId` × `FrameworkProfileId` (+ host epoch type); the adapter id and carrier language are classifier entry and display data, and `framework_family()` is a display spelling only. The session adapter registry mints its advertised profiles from the same manifests (`framework::descriptor` re-exports them). A registered `FrameworkParseArtifact` carries `carrier_profile()` / `framework_profile()` from the frontend row that parsed it. |
+| `verter_compiler/src/framework_common/carrier_registry.rs` | The two registries over the snapshot. `CarrierFrontendRegistry`: rows carry an object-safe `RegisteredCarrierFrontend` (parse + registered geometry) each framework implements beside its `CarrierFrontend`, so no neutral caller matches on a framework. `CarrierCompilerBackendRegistry`: one optional row per carrier grouping the runtime and native-host backends; a row records the backend TYPES it was registered from, and `row.runtime::<R>()` / `row.native_host::<H>()` hand out `R::registered()` only when the type matches (no erased payload, no fallback to another carrier's backend). `host_integration_for::<HostE>` selects the native-host row in one pass and names the first missing axis (`HostIntegrationMiss`). `CatalogSnapshot::built_in()` composes the providers `vue_catalog_rows` / `svelte_catalog_rows` (in each framework's host-integration module) — the composition root. Every keyed lookup counts one `RegistryDispatches` entry (test-support). |
+| `verter_compiler/src/framework_common/registered_carrier_projection.rs` | `project_registered_accepted` — the SOLE production entry: registry frontend parse (`CarrierFrontendRegistry::row_for`), then the row's registered geometry. Keeps the by-identity lookups `registered_frontend_for` / `registered_grammar_for` / `registered_semantic_for` / `registered_projection_for` over the snapshot. |
+| `verter_compiler/src/framework_common/vue_carrier_frontend.rs` (+ `svelte/carrier_frontend.rs`) | `VueCarrierFrontend` / `SvelteCarrierFrontend` — the sole carrier identity per framework: the `CarrierFrontend::parse` body (Vue via `parse_sfc`, Svelte via `parse_svelte`), the typed reject, the adapter/carrier-language identity, and the inherent downcasts (`parsed_sfc` / `parsed_svelte` and their unregistered twins) the typed backends use to reach the parsed carrier back out. There is no separate carrier-compiler struct. |
+| `verter_compiler/src/framework_common/vue_bridge.rs` (+ `svelte/carrier.rs`) | The frontend half of each carrier: the Vue SFC parse (`parse_sfc`), the carrier payload (`VueParseCarrier` / `SvelteParseCarrier`), the artifact builders and mapped parse diagnostics, and the openers `open_vue_carrier` / `open_svelte_carrier` installed on each `CarrierLeg` (no capability token — an opener only ever opens its own adapter's artifact). No runtime codegen. |
+| `verter_compiler/src/framework_common/vue_bundle.rs` (+ `svelte/carrier_bundle.rs`) | The runtime half: the crate-internal `vue_carrier_bundle` / `svelte_carrier_bundle` orchestrations the host-integration backends drive, the registered Vue compile and audit entries, custom-block staging, and the compile-result to neutral-bundle conversion; production IDE projection and runtime-bundle emission belong to the typed `VueProjectionBackend` / `VueRuntimeBackend` / host-integration backends. ZERO edits to any Vue parser/codegen module. |
+| `verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs` | Reusable (test-only) framework IDE sourcemap-correctness assertions every carrier vertical re-runs against its own IDE projection output. |
 
 ## Descriptor + virtual-file naming column
 
+The `checking_surface` column also participates in companion classification:
+the naming types, policies and forward/reverse dispatch live in compiler
+`framework_common::virtual_file_naming`; session `framework::descriptor`
+preserves its public paths with direct `pub use` imports of that same owner.
+`CheckingSurface::DialectSuffixes` is the authority for checking-only paths
+such as `App.vue.ts` and `App.vue.js`. `carrier_source_for_companion` tries
+the existing declaration, import, testing, sidecar and IDE families first,
+then those checking suffixes; checking surfaces use `CarrierCompanionKind::Ide`.
+`carrier_companion_identities` composes checking paths through
+`checking_module_identity` and includes an overlapping IDE path only once.
+The descriptor round-trip test covers every Vue checking dialect and a custom
+checking suffix with no IDE policy.
+`checking_module_identity` refuses an identity whose reverse owner belongs to
+another carrier: `Foo.d.vue` cannot claim `Foo.d.vue.ts`, the declaration
+companion owned by `Foo.vue`.
+The crate-private `classify_carrier_companion_reference` also recognizes the
+extensionless API/testing/helper module spellings emitted by producers. It
+derives those spellings from the same naming columns and sidecar constants,
+then delegates to the physical-path classifier. Bare carrier imports and
+standalone Svelte rune modules remain public source references.
+
 `FrameworkAdapterDescriptor` is a registry row's immutable identity half.
-`VirtualFileNaming { ide: Option<IdeSuffixPolicy>, api_suffix,
-testing_api_suffix, sidecar_suffixes }` is the SINGLE authority for an
-adapter's virtual-file suffixes (`IdeSuffixPolicy` is the closed
-`Fixed` / `JsxConditional` pair). The structural rule
-`testing_api_suffix.is_some() ⇒ api_suffix.is_some()` holds (a testing-API
+`VirtualFileNaming { ide, import_surface, testing_api_suffix,
+sidecar_suffixes, declaration_surface, checking_surface }` is the single
+authority for an adapter's virtual-file policies. `VirtualPathPolicy` is
+`None` / `SelfFile` / `Suffix` / `JsxConditional`. The structural rule
+`testing_api_suffix.is_some() ⇒ api_surface_suffix().is_some()` holds (a testing-API
 file is a mode of the API file). The committed TS mirror
-`packages/typescript-plugin/src/generated/virtual-file-naming.ts` is
+`packages/language-shared/src/virtual-file-naming.generated.ts` is
 RENDERED from this column (`render_virtual_file_naming_ts`) and BYTE-PINNED
 by `virtual_file_naming_ts_freshness` (regen path under
 `VERTER_UPDATE_VIRTUAL_FILE_NAMING_TS`). The LSP / ts-plugin naming
@@ -230,8 +256,8 @@ It never resolves types, indexes a file, runs OXC, calls
 
 The compiler-domain mirror of the session registry: where the session
 registry owns the carrier ACCESS token + the semantic legs, the
-compiler-side immutable per-capability catalog (`built_in_frontend_catalog`
-and friends, dispatched through `project_registered_accepted`) owns the
+compiler-side `CatalogSnapshot` and its two registries (dispatched through
+`project_registered_accepted` and the runtime / host routes) own the
 carrier COMPILER selection per adapter — the combined `CarrierCompilerRegistry`
 is deleted. The combined `CarrierCompiler` trait is deleted too (CCA1T3):
 compiler authority is the FIVE typed capability interfaces in
@@ -284,17 +310,12 @@ row keyed adapter × epoch × capability:
 
 The retained CCA1T4 option/output bucket is NOT part of these typed
 contracts: `RuntimeCompileOptions` in, `RuntimeCompileOutput` /
-`CarrierCompileOutcome` out belongs to the compatibility entries — the
-`VueCarrierCompiler::compile_ide` / `compile_bundle` registry shims
-(`cfg(any(test, feature = "test-support"))`-gated, NOT production
-surface; the typed `VueProjectionBackend` /
-`VueHostIntegrationBackend` own the production routes) and the
-crate-internal bundle orchestrations
-(`vue_carrier_bundle` / `svelte_carrier_bundle`) shared with the
-host-integration backends. No registry route serves production: these
-shim routes carry no host-issued admission, so they mint their leg grants
-crate-privately at the route boundary (`ProductExecutionGrant`'s
-crate-private mint) and drive the SAME catalog backends. The neutral
+`CarrierCompileOutcome` out belongs to the crate-internal bundle
+orchestrations (`vue_carrier_bundle` / `svelte_carrier_bundle`) the
+host-integration backends drive. The host route carves each leg's
+`ProductExecutionGrant` off the consumed admission; only test code mints
+leg grants directly (the `#[cfg(test)]` `direct_bundle_execution_grants`),
+and it drives the SAME catalog backends. The neutral
 bundle is an `Option<StagedCompileArtifacts>` main handoff + neutral
 script/template/style blocks + custom-block descriptors + scope id +
 optional IDE `tsx`
@@ -305,7 +326,7 @@ carries `custom_block_artifacts: Option<CompileArtifactSet>`: source-backed
 descriptors (role, `lang`,
 `src`, ordered attrs, source order, SFC-absolute region, content state,
 provenance) minted once per runtime compile by the Vue bridge
-(`stage_custom_block_artifacts` in `framework_common/vue_bridge.rs`),
+(`stage_custom_block_artifacts` in `framework_common/vue_bundle.rs`),
 whether or not Main is demanded. The set holds one `"sfc"` source unit
 over the admitted artifact's registered carrier bytes — lineage from the
 registered canonical file and incarnation (never a host filename or the
@@ -359,13 +380,13 @@ framework goes through the one `ScriptFactProvider` seam; the carrier
 compiler surface is parse / eval / IDE / template / runtime-bundle only.
 
 The host's carrier PARSE dispatch is rehoused through the catalog: every
-carrier parse routes through the immutable frontend catalog
-(`built_in_frontend_catalog` / `registered_frontend_for`, executed under
+carrier parse routes through the frontend registry
+(`CarrierFrontendRegistry` / `registered_frontend_for`, executed under
 `project_registered_accepted` — Vue through its `vue_carrier_frontend`
 row, Svelte through `svelte/carrier_frontend.rs`) — a single dispatch
 path, no `is_vue` branch, no dual Vue direct-parse path. A carrier row
 whose adapter has no registered catalog frontend is the typed
-unsupported-language state. `VueCarrierCompiler::parse` delegates
+unsupported-language state. `VueCarrierFrontend::parse` delegates
 call-for-call to `parse_sfc` with ZERO edits to any Vue
 parser/codegen module, so Vue compile output stays byte-identical
 pre/post the rehousing (pinned by
@@ -412,7 +433,7 @@ members use protobuf kind 6 for spread (`OBJECT_MEMBER_KIND_SPREAD`). Vue keeps
 its two-way bindings in `v_models` and leaves these empty. Pinned by
 `svelte_template_data_producer_is_typed_ir_only` and the carrier unit tests.
 
-Each adapter's own bridge module (`vue_bridge.rs`, `svelte/carrier.rs`) calls
+Each adapter's own frontend (`vue_carrier_frontend.rs`, `svelte/carrier_frontend.rs`) calls
 the raw `verter_language::__carrier_downcast_ref`/`__carrier_downcast_arc`
 helpers directly to reach its own typed carrier back out of the type-erased
 artifact — no capability token: a foreign artifact's erased payload is a
@@ -424,8 +445,10 @@ structurally for it.
 The host's RUNTIME compile (`virtual_file_pipeline::compile_entry`) executes
 through the request-scoped BOUND framework host-integration backend, the same
 topology as the runtime-render lane: the request's `BoundNativeHostRequest`
-(catalog-selected from the registered artifact identity, one binding per
-compile attempt) is consumed by value; its catalog arm yields the backend,
+(selected from the registered artifact identity through
+`CarrierCompilerBackendRegistry::host_integration_for`, one binding per
+compile attempt) is consumed by value; the row's typed native-host access
+chose its arm, and the arm yields the backend,
 which issues the demand-specific multi-product admission
 (`admit_host_products` over the session-built demand — requested products +
 typed option attempt, `host_resolve::compile_request_build`) and executes it

@@ -1,0 +1,94 @@
+{
+  "schema": 2,
+  "caseId": "ssr/scoped-slot-branches",
+  "backend": "vdom",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/scoped-slot-branches.vue",
+    "sha256": "e58468ed5605826894dfa6bd13af9735cc2059631111530a32eadcbe12f57b91"
+  },
+  "options": {
+    "sha256": "700d2ab28b8664ec131b4143aed232ce402f365debc31b0b9b862902d1cec042",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/ssr/scoped-slot-branches.vue",
+      "id": "ssr/scoped-slot-branches",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vdom/ssr/scoped-slot-branches.js",
+      "sha256": "6d0380db31643c5a2c10419cf12c38e09db0dd6caaef26bf6292d4b2b1ca4992",
+      "bytes": 1254
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vdom/ssr/scoped-slot-branches.map.json",
+      "sha256": "3743d9500b11737d5c9f91357c3b780fe6522079c12889a1912db0bce25faf99"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createBlock",
+      "alias": "_createBlock"
+    },
+    {
+      "imported": "createCommentVNode",
+      "alias": "_createCommentVNode"
+    },
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "createTextVNode",
+      "alias": "_createTextVNode"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "Fragment",
+      "alias": "_Fragment"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "withCtx",
+      "alias": "_withCtx"
+    }
+  ]
+}

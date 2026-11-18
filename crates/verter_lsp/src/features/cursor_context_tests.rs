@@ -1837,22 +1837,25 @@ fn analysis_absent_fallback_requires_parser_facts_not_a_source_scan() {
 fn analysis_absent_fallback_classifies_tag_name_from_facts() {
     // Mid-typed `<Dra` at EOF: the still-typed opening tag classifies as a
     // TagName position with the typed partial, from parser-bounded geometry.
-    let source = "<template><Dra";
-    let structure = test_structure(source, false);
-    let blocks = project_carrier_blocks(&structure);
-    let ctx = classify_cursor_context_for_language(
-        source.len() as u32,
-        source,
-        &blocks,
-        None,
-        Some(CarrierTemplateLanguage::Vue),
-        Some(&structure),
-    );
-    match ctx {
-        CursorContext::Template(TemplateCursorContext::TagName { partial }) => {
-            assert_eq!(partial, "Dra");
+    // Recovery extends the unclosed template (and an unclosed parent element)
+    // to EOF; that recovered extent must not swallow the typed fragment.
+    for source in ["<template><Dra", "<template><div><Dra"] {
+        let structure = test_structure(source, false);
+        let blocks = project_carrier_blocks(&structure);
+        let ctx = classify_cursor_context_for_language(
+            source.len() as u32,
+            source,
+            &blocks,
+            None,
+            Some(CarrierTemplateLanguage::Vue),
+            Some(&structure),
+        );
+        match ctx {
+            CursorContext::Template(TemplateCursorContext::TagName { partial }) => {
+                assert_eq!(partial, "Dra", "{source}");
+            }
+            other => panic!("expected TagName for mid-typed `{source}|`, got: {other:?}"),
         }
-        other => panic!("expected TagName for mid-typed `<Dra|`, got: {other:?}"),
     }
 }
 

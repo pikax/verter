@@ -28,9 +28,9 @@
 //!    through the `open_vue_carrier` / `open_svelte_carrier` openers
 //!    instead) appear ONLY in `verter_language::parse_artifact` (the
 //!    definition), `verter_language::lib` (the re-export), and each
-//!    adapter's own bridge module
-//!    (`verter_compiler/src/framework_common/vue_bridge.rs`,
-//!    `verter_compiler/src/svelte/carrier.rs`); typed carrier use
+//!    adapter's own bridge module and frontend
+//!    (`verter_compiler/src/framework_common/{vue_bridge,vue_carrier_frontend}.rs`,
+//!    `verter_compiler/src/svelte/{carrier,carrier_frontend}.rs`); typed carrier use
 //!    (`VueParseCarrier`) only inside the owning adapter/compiler
 //!    paths.
 //!
@@ -72,13 +72,16 @@ const RAW_DOWNCAST_ALLOWLIST: &[&str] = &[
     "crates/verter_language/src/parse_artifact.rs",
     "crates/verter_language/src/lib.rs",
     "crates/verter_compiler/src/framework_common/vue_bridge.rs",
+    "crates/verter_compiler/src/framework_common/vue_carrier_frontend.rs",
     "crates/verter_compiler/src/svelte/carrier.rs",
+    "crates/verter_compiler/src/svelte/carrier_frontend.rs",
 ];
 
 /// Typed Vue carrier (`VueParseCarrier`) use is confined to the owning
 /// adapter/compiler paths.
 const TYPED_CARRIER_ALLOWLIST: &[&str] = &[
     "crates/verter_compiler/src/framework_common/vue_bridge.rs",
+    "crates/verter_compiler/src/framework_common/vue_carrier_frontend.rs",
     "crates/verter_session/src/typeinfo/adapters/vue/",
 ];
 
@@ -147,7 +150,7 @@ fn scanner_detects_misplaced_bare_parse_sfc_call() {
     // token itself.
     let synthetic = "\
 pub(crate) fn misplaced(source: &str) {\n\
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);\n\
+    let parsed = verter_compiler::framework_common::vue_bridge::parse_sfc(source, None, None);\n\
     let _ = parsed;\n\
 }\n";
     let processed = preprocess(synthetic);

@@ -1,0 +1,2359 @@
+//! VDOM element code generation.
+//!
+//! Handles element open/close tag transformation, props object generation
+//! and patch flag emission. Event handler wrapping and merging live in
+//! [`super::events`]. Children separators and
+//! text-run wrapping live in [`super::children`]; component tag resolution
+//! and dynamic component handling live in [`super::component`].
+//!
+//! The main entry point is [`process_element_leave`], called from
+//! `VdomState::leave_element` after all children have been visited.
+
+use crate::ast::types::{AstNodeKind, ChildrenMode, ElementNode, TemplateAst};
+use crate::code_transform::{AnchorKind, SegmentAnchor};
+use crate::framework::vue::semantic::{BindingAccess, VueBindingView, VueComponentTagFacts};
+use crate::template::binding::prefixed_expr::find_prop_oxc_exp;
+use crate::template::binding::prefixed_expr::resolve_expr;
+use crate::template::oxc::types::{
+    Dynamism, ExpressionFlag, ExpressionFlags, OxcNodeData, OxcParsedAst, OxcParsedElement,
+};
+use crate::types::BindingType;
+use rustc_hash::{FxHashMap, FxHashSet};
+
+use super::children::add_children_separators;
+use super::component::{resolve_component_tag, resolve_dynamic_component, vnode_helper};
+use super::events::{
+    emit_merged_event_handler_value, pre_scan_event_handler_merge, push_event_handler,
+    EventHandlerMerge,
+};
+use super::model::{self, determine_native_vmodel_directive, pre_scan_vmodel_handler_merge};
+use super::plan::HandlerPlan;
+use super::props;
+use super::state::VdomOptions;
+use super::state::VdomOut;
+use crate::template::code_gen::shared::helpers::{self, VdomHelper};
+use crate::template::code_gen::types::{ChildKind, ChildRecord};
+use crate::template::vue_syntax::{classify_event_modifier, EventModifierKind};
+
+// ======================== VNode construction ========================
+
+/// Extract and resolve the `v-memo="[deps]"` dependency expression on an
+/// element, returning the resolved deps array text (e.g. `[$setup.x]`).
+///
+/// Returns `None` when the element has no `v-memo` directive with a value.
+/// Identifiers inside the array are resolved through the binding resolver, so
+/// the emitted deps carry the correct `$setup.` / `$props.` / `_ctx.` prefixes.
+pub(crate) fn resolve_v_memo_deps<'a>(
+    el: &ElementNode,
+    source: &str,
+    oxc_el: Option<&OxcParsedElement<'a>>,
+    resolver: &VueBindingView<'a>,
+    force_js: bool,
+) -> Option<String> {
+    for (i, prop) in el.props.iter().enumerate() {
+        if !prop.is_directive {
+            continue;
+        }
+        if &source[prop.start as usize..prop.name_end as usize] != "v-memo" {
+            continue;
+        }
+        let (vs, ve) = (prop.value_start?, prop.value_end?);
+        let value = &source[vs as usize..ve as usize];
+        let oxc_exp = find_prop_oxc_exp(oxc_el, i);
+        return Some(resolve_expr(value, vs, oxc_exp, resolver, force_js));
+    }
+    None
+}
+
+/// Resolve the `:key` / `v-bind:key` expression of a `v-for` item, used by
+/// v-memo's per-item `_cached.key === KEY` short-circuit. Returns `None` when
+/// the element has no keyed binding.
+pub(crate) fn resolve_v_for_key<'a>(
+    el: &ElementNode,
+    source: &str,
+    oxc_el: Option<&OxcParsedElement<'a>>,
+    resolver: &VueBindingView<'a>,
+    force_js: bool,
+) -> Option<String> {
+    for (i, prop) in el.props.iter().enumerate() {
+        if !prop.is_directive {
+            continue;
+        }
+        if let (Some(as_), Some(ae), Some(vs), Some(ve)) = (
+            prop.arg_start,
+            prop.arg_end,
+            prop.value_start,
+            prop.value_end,
+        ) {
+            if &source[as_ as usize..ae as usize] == "key" {
+                let value = &source[vs as usize..ve as usize];
+                let oxc_exp = find_prop_oxc_exp(oxc_el, i);
+                return Some(resolve_expr(value, vs, oxc_exp, resolver, force_js));
+            }
+        }
+    }
+    None
+}
+
+/// Result from [`build_props_object_into`].
+/// Info about a v-model directive on a native element that needs
+/// `_withDirectives()` wrapping in the final output.
+pub struct NativeVModel {
+    /// The resolved expression (e.g. `$setup.msg`)
+    pub resolved_value: String,
+    /// The Vue runtime directive helper (e.g. `_vModelText`, `_vModelCheckbox`)
+    pub directive_helper: VdomHelper,
+    /// Modifier object string (e.g. `{ trim: true, number: true }`), empty if none
+    pub modifiers: String,
+}
+
+/// A runtime directive entry for `_withDirectives()` wrapping.
+///
+/// Represents v-show, custom directives (v-focus, v-loading, etc.), or
+/// any directive that needs runtime wrapping beyond the props object.
+pub struct DirectiveEntry {
+    /// The directive reference: either a VdomHelper name (e.g. `_vShow`)
+    /// or a `_resolveDirective("name")` call string.
+    pub directive_ref: String,
+    /// The resolved value expression (empty if no value)
+    pub value: String,
+    /// The arg expression as a quoted string (empty if no arg)
+    pub arg: String,
+    /// The modifier object string (empty if no modifiers)
+    pub modifiers: String,
+    /// VdomHelper import needed for the directive itself (e.g. VShow)
+    pub helper_import: Option<VdomHelper>,
+}
+
+/// Build a modifier object string from a prop's modifiers: `{ trim: true, number: true }`.
+/// Returns empty string if no modifiers.
+fn build_modifier_object(prop: &crate::types::NodeProp, source: &str) -> String {
+    if prop.modifiers.is_empty() {
+        return String::new();
+    }
+    let mut mods = String::from("{ ");
+    for (mi, modifier) in prop.modifiers.iter().enumerate() {
+        if mi > 0 {
+            mods.push_str(", ");
+        }
+        let mod_name = &source[modifier.start as usize..modifier.end as usize];
+        mods.push_str(mod_name);
+        mods.push_str(": true");
+    }
+    mods.push_str(" }");
+    mods
+}
+
+pub struct PropsResult {
+    pub dynamic_props: Vec<String>,
+    pub uses_merge: bool,
+    pub uses_normalize_class: bool,
+    pub uses_normalize_style: bool,
+    pub uses_with_modifiers: bool,
+    pub uses_with_keys: bool,
+    /// A model update handler writes through the runtime `isRef`.
+    pub uses_is_ref: bool,
+    pub uses_normalize_props: bool,
+    pub uses_guard_reactive_props: bool,
+    pub uses_to_handlers: bool,
+    /// True when a vnode `key` / `:key` is present. The key is not listed in
+    /// `dynamic_props` (vnode special), but the props object still embeds the
+    /// key expression and must not be hoisted to module scope — hoisting
+    /// `{ key: item.name }` evaluates `item` outside the v-for (reka-ui
+    /// CheckboxGroup `item is not defined`).
+    pub has_vnode_key: bool,
+    /// True when a `ref` needs dynamic handling: an inline static `ref="el"`
+    /// naming a setup binding (emits `ref_key` + `ref: el`) or a dynamic
+    /// `:ref="expr"` with a non-literal value. Like [`Self::has_vnode_key`],
+    /// the props object embeds a scope-bound reference and must not be
+    /// hoisted to module scope — hoisting `{ ref: $setup.elRef }` /
+    /// `{ ref: elRef.value }` evaluates it outside the render function /
+    /// `setup()` (a plain ReferenceError at module load).
+    pub has_dynamic_ref: bool,
+    /// True when the props object embeds an event-handler value (`@click`,
+    /// `v-model`'s `onUpdate:X`, ...). Handler keys are intentionally NOT
+    /// listed in `dynamic_props` (stable invoker caching means they never
+    /// need a PATCH_PROPS re-patch), but their VALUES still reference
+    /// `_ctx`/`$setup` — like [`Self::has_vnode_key`] and
+    /// [`Self::has_dynamic_ref`], the props object must not be hoisted to
+    /// module scope on that basis alone (hoisting `{ onClick: _ctx.a }`
+    /// evaluates `_ctx` outside `render()`, a ReferenceError at module load).
+    pub has_event_handler: bool,
+    /// v-model on a native element (input/textarea/select) that needs
+    /// `_withDirectives()` wrapping after the element VNode is created.
+    pub native_vmodel: Option<NativeVModel>,
+    /// Runtime directive entries (v-show, custom directives) for `_withDirectives()`.
+    pub directive_entries: Vec<DirectiveEntry>,
+    /// True when a `v-text` binding emitted a `_toDisplayString(...)`-wrapped
+    /// `textContent` prop, so the caller must import `toDisplayString`.
+    pub uses_to_display_string: bool,
+    /// True when any event-listener key is NOT exactly `onClick` — official
+    /// Vue's NEED_HYDRATION (32) flag for eager listener attachment. See
+    /// the local `has_hydration_binding` doc comment.
+    pub has_hydration_binding: bool,
+    /// True when a `:[expr]` dynamic BIND KEY is present (`v-bind`'s
+    /// argument itself is dynamic, not just its value) — official Vue's
+    /// FULL_PROPS (16): the key set itself can change, so a full diff is
+    /// always needed to remove a stale key. See the local
+    /// `has_dynamic_key` variable.
+    pub has_dynamic_key: bool,
+}
+
+// ── Pre-scan helpers for build_props_object_into ──────────────────
+
+/// Result of pre-scanning for class/style merge requirements.
+struct ClassStyleMerge<'a> {
+    /// Static class value when both static `class` and dynamic `:class` exist.
+    merge_class: Option<&'a str>,
+    /// Static style value when both static `style` and dynamic `:style` exist.
+    merge_style: Option<&'a str>,
+}
+
+/// Pre-scan element props to detect if both static and dynamic class/style exist.
+/// When both exist, they must be merged via `_normalizeClass()`/`_normalizeStyle()`.
+fn pre_scan_class_style_merge<'a>(
+    element_props: &[crate::types::NodeProp],
+    source: &'a str,
+) -> ClassStyleMerge<'a> {
+    let mut static_class_value: Option<&str> = None;
+    let mut has_dynamic_class = false;
+    let mut static_style_value: Option<&str> = None;
+    let mut has_dynamic_style = false;
+    for prop in element_props {
+        if prop.is_directive {
+            let directive_name = &source[prop.start as usize..prop.name_end as usize];
+            let is_bind = super::is_v_bind(directive_name);
+            if is_bind {
+                if let (Some(arg_s), Some(arg_e)) = (prop.arg_start, prop.arg_end) {
+                    let arg = &source[arg_s as usize..arg_e as usize];
+                    if arg == "class" {
+                        has_dynamic_class = true;
+                    } else if arg == "style" {
+                        has_dynamic_style = true;
+                    }
+                }
+            }
+        } else {
+            let name = &source[prop.start as usize..prop.name_end as usize];
+            if name == "class" {
+                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                    static_class_value = Some(&source[vs as usize..ve as usize]);
+                }
+            } else if name == "style" {
+                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                    static_style_value = Some(&source[vs as usize..ve as usize]);
+                }
+            }
+        }
+    }
+    ClassStyleMerge {
+        merge_class: if has_dynamic_class {
+            static_class_value
+        } else {
+            None
+        },
+        merge_style: if has_dynamic_style {
+            static_style_value
+        } else {
+            None
+        },
+    }
+}
+
+/// Build the static props object into a buffer.
+///
+/// Handles static attributes and directive values with binding resolution.
+/// Wraps `:class` values with `_normalizeClass()` and `:style` with `_normalizeStyle()`.
+/// When `skip_prop_index` is `Some(i)`, prop at index `i` is excluded
+/// (used for `:is` on `<component>` elements).
+/// `anchors` accumulates authored anchors for static object-key text this
+/// call writes into `buf`, at their ABSOLUTE `buf`-relative offset (the
+/// caller shifts them into whatever coordinate space the props text ends up
+/// in — a hoisted constant, or the element's own inline overwrite). Only a
+/// plain static `class` KEY (no merge with a dynamic `:class`) is anchored
+/// today — the shape the current test corpus requires; every other key
+/// stays unanchored, matching this function's pre-existing behavior
+/// exactly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_props_object_into(
+    buf: &mut String,
+    element: &ElementNode,
+    source: &str,
+    resolver: &VueBindingView<'_>,
+    oxc_el: Option<&OxcParsedElement<'_>>,
+    skip_prop_index: Option<usize>,
+    force_js: bool,
+    anchors: &mut Vec<SegmentAnchor>,
+    handler_plans: Option<&FxHashMap<usize, HandlerPlan>>,
+    listeners_are_dynamic: bool,
+) -> PropsResult {
+    let handler_plan = |prop_idx: usize| handler_plans.and_then(|plans| plans.get(&prop_idx));
+    // A listener whose handler is created on every render is a dynamic prop:
+    // every listener when handlers are not cached, a scope-bound one always.
+    let listener_is_dynamic = |prop_idx: usize| {
+        listeners_are_dynamic || handler_plan(prop_idx) == Some(&HandlerPlan::ScopeBound)
+    };
+    let cache_slot = |prop_idx: usize| match handler_plan(prop_idx) {
+        Some(&HandlerPlan::Cached(idx)) => Some(idx),
+        _ => None,
+    };
+    // A bound value changes between renders unless it is a pure literal (no
+    // bindings at all, e.g. `:value="200"`) or reads only props proven
+    // constant across call sites.
+    let bound_value_is_dynamic = |prop_idx: usize| {
+        let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+        let is_pure_literal = oxc_exp.is_some_and(|e| {
+            e.dynamism == Dynamism::Static
+                && e.bindings
+                    .as_ref()
+                    .is_some_and(|b| b.non_ignored_binding_names().is_empty())
+        });
+        !is_pure_literal
+            && !resolver.all_bindings_const_props(oxc_exp.and_then(|e| e.bindings.as_ref()))
+    };
+    // A listener key whose duplicates merge into one array is a dynamic prop
+    // when any member is: a listener created on every render, or a bound
+    // `:onX` value that changes between renders.
+    let merged_member_is_dynamic = |prop_idx: usize| {
+        let prop = &element.props[prop_idx];
+        if super::is_v_on(&source[prop.start as usize..prop.name_end as usize]) {
+            listener_is_dynamic(prop_idx)
+        } else {
+            bound_value_is_dynamic(prop_idx)
+        }
+    };
+    let mut dynamic_props: Vec<String> = Vec::with_capacity(4);
+    // Collect spread expressions from v-bind/v-on without args.
+    // These need _mergeProps() wrapping when mixed with regular props.
+    // Bool flag: true = v-on spread (needs _toHandlers), false = v-bind spread.
+    let mut spreads: Vec<(String, bool)> = Vec::with_capacity(2);
+    let mut has_regular_props = false;
+    let mut has_dynamic_key = false;
+    // True when a vnode `key` / `:key` is present. Blocks props-object
+    // hoisting so loop-scoped keys like `item.name` are not evaluated at
+    // module scope.
+    let mut has_vnode_key = false;
+    // True when the props object embeds an event-handler value. Blocks
+    // props-object hoisting — see `PropsResult::has_event_handler`.
+    let mut has_event_handler = false;
+    // True when NEED_HYDRATION (32) applies: any event-listener key that is
+    // NOT exactly `onClick` (bare, no Capture/Once/Passive option-modifier
+    // suffix — a plain `onClick` is exempt), or a `.prop`/`.attr`-forced
+    // DOM binding. Official Vue sets this so async/lazy hydration compares
+    // or attaches these eagerly rather than waiting for a later patch.
+    let mut has_hydration_binding = false;
+    // True when a `ref` needs dynamic handling (inline static ref naming a
+    // setup binding, or a dynamic `:ref` with a non-literal value). Blocks
+    // props-object hoisting so the scope-bound reference is not evaluated at
+    // module scope (same failure class as `has_vnode_key`).
+    let mut has_dynamic_ref = false;
+    let mut uses_normalize_class = false;
+    let mut uses_normalize_style = false;
+    let mut uses_with_modifiers = false;
+    let mut uses_with_keys = false;
+    let mut uses_is_ref = false;
+    let mut uses_to_display_string = false;
+    let mut native_vmodel: Option<NativeVModel> = None;
+    let mut directive_entries: Vec<DirectiveEntry> = Vec::new();
+
+    let ClassStyleMerge {
+        merge_class,
+        merge_style,
+    } = pre_scan_class_style_merge(&element.props, source);
+
+    for (prop_idx, prop) in element.props.iter().enumerate() {
+        if skip_prop_index == Some(prop_idx) {
+            continue;
+        }
+        if prop.is_directive {
+            let directive_name = &source[prop.start as usize..prop.name_end as usize];
+            let is_bind = super::is_v_bind(directive_name);
+            let is_on = super::is_v_on(directive_name);
+
+            if (is_bind || is_on) && prop.arg_start.is_none() {
+                // v-bind="expr" or v-on="expr" without arg → spread
+                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                    let raw = &source[vs as usize..ve as usize];
+                    let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                    spreads.push((resolve_expr(raw, vs, oxc_exp, resolver, force_js), is_on));
+                }
+                continue;
+            }
+
+            if prop.arg_start.is_some() {
+                has_regular_props = true;
+                if prop.is_dynamic == Some(true) {
+                    has_dynamic_key = true;
+                }
+                // `:key="expr"` / `v-bind:key="expr"`
+                if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+                    if &source[as_ as usize..ae as usize] == "key" {
+                        has_vnode_key = true;
+                    }
+                }
+            }
+            // v-model on components or native elements expands to props
+            if directive_name == "v-model" {
+                has_regular_props = true;
+            }
+            // Directives with no arg and not v-bind/v-on (e.g., v-ripple, v-show)
+            // are not rendered as props — they use withDirectives() wrapping.
+            // (v-model is handled in the second pass below)
+        } else {
+            // Skip static class/style when it will be merged with dynamic `:class`/`:style`
+            let name = &source[prop.start as usize..prop.name_end as usize];
+            if name == "key" {
+                has_vnode_key = true;
+            }
+            if (name == "class" && merge_class.is_some())
+                || (name == "style" && merge_style.is_some())
+            {
+                continue;
+            }
+            has_regular_props = true;
+        }
+    }
+
+    // Include v_ref in regular props count
+    let has_ref = element.v_ref.is_some();
+    if has_ref {
+        has_regular_props = true;
+    }
+
+    // If we have spreads and regular props, use _mergeProps.
+    // Vue mergeProps is left-to-right (later wins). Attribute source order must
+    // be preserved: `v-bind="obj" :name="x"` → `_mergeProps(obj, { name: x })`
+    // so the explicit `:name` overrides `obj.name` (reka-ui VisuallyHiddenInput
+    // emits `name="slider[0]"` from the v-for alias, not bare `props.name`).
+    let use_merge = !spreads.is_empty() && has_regular_props;
+    // Heuristic source order: if the first spread prop appears before the first
+    // regular prop in the element, emit spreads first; otherwise regular first.
+    let first_spread_start = element
+        .props
+        .iter()
+        .find(|p| {
+            if !p.is_directive {
+                return false;
+            }
+            let dname = &source[p.start as usize..p.name_end as usize];
+            (dname == "v-bind" || dname == "v-on" || dname == ":" || dname == "@")
+                && p.arg_start.is_none()
+                && p.value_start.is_some()
+        })
+        .map(|p| p.start);
+    // First non-key regular prop (key is often hoisted first and should not
+    // force regulars-before-spreads — VisuallyHidden: `:key` then `v-bind`
+    // then `:name` must still treat spreads as before the overriding `:name`).
+    let first_regular_start = element
+        .props
+        .iter()
+        .find(|p| {
+            if p.is_directive {
+                let dname = &source[p.start as usize..p.name_end as usize];
+                // Skip spreads
+                if (dname == "v-bind" || dname == "v-on" || dname == ":" || dname == "@")
+                    && p.arg_start.is_none()
+                    && p.value_start.is_some()
+                {
+                    return false;
+                }
+                // Skip :key / v-bind:key — special vnode key, not merge override
+                if let (Some(as_), Some(ae)) = (p.arg_start, p.arg_end) {
+                    let arg = &source[as_ as usize..ae as usize];
+                    if arg == "key" {
+                        return false;
+                    }
+                }
+            } else {
+                let name = &source[p.start as usize..p.name_end as usize];
+                if name == "key" {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|p| p.start);
+    let spreads_first = match (first_spread_start, first_regular_start) {
+        (Some(s), Some(r)) => s < r,
+        (Some(_), None) => true,
+        _ => false,
+    };
+
+    if use_merge {
+        buf.push_str("_mergeProps(");
+        if spreads_first {
+            // Emit spreads first as leading mergeProps args.
+            for (i, spread) in spreads.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str(", ");
+                }
+                let (expr, is_von) = spread;
+                if *is_von {
+                    buf.push_str("_toHandlers(");
+                    buf.push_str(expr);
+                    if !element.tag_type.is_component() {
+                        buf.push_str(", true");
+                    }
+                    buf.push(')');
+                } else {
+                    buf.push_str(expr);
+                }
+            }
+            if has_regular_props {
+                buf.push_str(", ");
+            }
+        }
+    }
+
+    // Dynamic key names (:[expr]) need _normalizeProps wrapping when not using _mergeProps
+    let wrap_normalize_for_dynamic_key = has_dynamic_key && !use_merge;
+
+    // Emit regular props object
+    if has_regular_props || spreads.is_empty() {
+        if wrap_normalize_for_dynamic_key {
+            buf.push_str("_normalizeProps(");
+        }
+        buf.push_str("{ ");
+        let mut first = true;
+
+        // Emit ref prop first (cached in v_ref, not in props vec)
+        if let Some(ref_prop) = &element.v_ref {
+            if let (Some(vs), Some(ve)) = (ref_prop.value_start, ref_prop.value_end) {
+                let ref_value = &source[vs as usize..ve as usize];
+                // Official inline (compileScript({ inlineTemplate: true })): a
+                // static `ref="el"` naming a setup-let/setup-ref/setup-maybe-ref
+                // binding compiles to `{ ref_key: "el", ref: el }` so the setup
+                // binding receives the element (the props object becomes dynamic
+                // and is never hoisted). Non-inline keeps the runtime string ref.
+                // Official also binds maybe-ref USER IMPORTS (named imports from
+                // any source + default imports from non-vue non-.vue sources);
+                // vue-source, default-.vue-source, and namespace imports stay
+                // string refs.
+                let inline_binding = resolver.is_inline() && {
+                    matches!(
+                        resolver.get(ref_value),
+                        Some(
+                            crate::types::BindingType::SetupLet
+                                | crate::types::BindingType::SetupRef
+                                | crate::types::BindingType::SetupMaybeRef
+                        )
+                    ) || (matches!(
+                        resolver.get(ref_value),
+                        Some(crate::types::BindingType::SetupImport)
+                    ) && resolver.is_ref_bindable_import(ref_value))
+                };
+                if inline_binding {
+                    buf.push_str("ref_key: \"");
+                    crate::template::vue_syntax::escape_js_string_into(buf, ref_value);
+                    buf.push_str("\", ref: ");
+                    buf.push_str(ref_value);
+                    has_dynamic_ref = true;
+                } else {
+                    buf.push_str("ref: ");
+                    buf.push('"');
+                    crate::template::vue_syntax::escape_js_string_into(buf, ref_value);
+                    buf.push('"');
+                }
+            } else {
+                // ref without value (rare, but handle gracefully)
+                buf.push_str("ref: \"\"");
+            }
+            first = false;
+        }
+
+        let vmodel_merge_targets = pre_scan_vmodel_handler_merge(element, source);
+        let merged_handler_indices: FxHashSet<usize> =
+            vmodel_merge_targets.iter().map(|&(_, hi)| hi).collect();
+
+        let EventHandlerMerge {
+            first_to_group: event_merge_first_to_group,
+            secondary: event_merge_secondary,
+        } = pre_scan_event_handler_merge(element, source, skip_prop_index, &merged_handler_indices);
+
+        for (prop_idx, prop) in element.props.iter().enumerate() {
+            if skip_prop_index == Some(prop_idx) {
+                continue;
+            }
+            // Skip explicit @update handlers that have been merged into a v-model array
+            if merged_handler_indices.contains(&prop_idx) {
+                continue;
+            }
+            // Skip secondary event handlers — they'll be merged into the first handler's array
+            if event_merge_secondary.contains(&prop_idx) {
+                continue;
+            }
+            // Track prop kind for value wrapping decisions.
+            let mut prop_is_event = false;
+            let mut prop_is_class = false;
+            let mut prop_is_style = false;
+            let mut is_static_style = false;
+            // Vue 3.4+ same-name shorthand: `:prop` with no value.
+            // When true, the value should be the resolved binding for the arg name.
+            let mut bind_shorthand_arg: Option<&str> = None;
+            // Event modifier categories (populated when prop_is_event is true)
+            let mut event_runtime_modifiers: Vec<&str> = Vec::new();
+            let mut event_key_modifiers: Vec<&str> = Vec::new();
+
+            if prop.is_directive {
+                let directive_name = &source[prop.start as usize..prop.name_end as usize];
+                let is_bind = super::is_v_bind(directive_name);
+                let is_on = super::is_v_on(directive_name);
+
+                if (is_bind || is_on) && prop.arg_start.is_none() {
+                    continue; // Handled as spread above
+                }
+
+                if let (Some(arg_start), Some(arg_end)) = (prop.arg_start, prop.arg_end) {
+                    let arg_name = &source[arg_start as usize..arg_end as usize];
+
+                    // Custom directive with arg: v-my-dir:arg.mod="val"
+                    // These need _withDirectives(), not regular props.
+                    if !is_bind && !is_on && directive_name != "v-model" {
+                        let directive_name_stripped =
+                            directive_name.strip_prefix("v-").unwrap_or(directive_name);
+                        let directive_ref =
+                            format!("_resolveDirective(\"{}\")", directive_name_stripped);
+                        let value = if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end)
+                        {
+                            let raw = &source[vs as usize..ve as usize];
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            resolve_expr(raw, vs, oxc_exp, resolver, force_js)
+                        } else {
+                            String::new()
+                        };
+
+                        let arg = format!("\"{}\"", arg_name);
+                        let modifiers = build_modifier_object(prop, source);
+
+                        directive_entries.push(DirectiveEntry {
+                            directive_ref,
+                            value,
+                            arg,
+                            modifiers,
+                            helper_import: None,
+                        });
+                        continue;
+                    }
+
+                    if !first {
+                        buf.push_str(", ");
+                    }
+                    first = false;
+
+                    // v-model:arg on a component: expand to named model prop + update handler
+                    if directive_name == "v-model" && element.tag_type.is_component() {
+                        let model_name = crate::template::vue_syntax::camelize(arg_name);
+                        let needs_quote =
+                            crate::template::vue_syntax::needs_quoted_key(&model_name);
+                        if needs_quote {
+                            buf.push('"');
+                        }
+                        buf.push_str(&model_name);
+                        if needs_quote {
+                            buf.push('"');
+                        }
+                        buf.push_str(": ");
+
+                        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                            let raw_value = &source[vs as usize..ve as usize];
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            let resolved = resolve_expr(raw_value, vs, oxc_exp, resolver, force_js);
+                            buf.push_str(&resolved);
+
+                            // Emit: "onUpdate:<name>": ...
+                            buf.push_str(", \"onUpdate:");
+                            buf.push_str(&model_name);
+                            buf.push_str("\": ");
+
+                            // Check if an explicit @update:<name> handler needs merging
+                            let merge_handler_idx = vmodel_merge_targets
+                                .iter()
+                                .find(|&&(vi, _)| vi == prop_idx)
+                                .map(|&(_, hi)| hi);
+
+                            if let Some(hi) = merge_handler_idx {
+                                // Merge: emit as array [vmodelHandler, explicitHandler]
+                                buf.push('[');
+                                uses_is_ref |=
+                                    model::push_model_update(buf, raw_value, &resolved, resolver);
+                                buf.push_str(", ");
+                                let handler_prop = &element.props[hi];
+                                if let (Some(hvs), Some(hve)) =
+                                    (handler_prop.value_start, handler_prop.value_end)
+                                {
+                                    let handler_raw = &source[hvs as usize..hve as usize];
+                                    let handler_oxc = find_prop_oxc_exp(oxc_el, hi);
+                                    let handler_resolved = resolve_expr(
+                                        handler_raw,
+                                        hvs,
+                                        handler_oxc,
+                                        resolver,
+                                        force_js,
+                                    );
+                                    push_event_handler(
+                                        buf,
+                                        handler_raw,
+                                        &handler_resolved,
+                                        handler_oxc,
+                                    );
+                                } else {
+                                    buf.push_str("() => {}");
+                                }
+                                buf.push(']');
+                            } else {
+                                // No merge needed — single handler
+                                uses_is_ref |=
+                                    model::push_model_update(buf, raw_value, &resolved, resolver);
+                            }
+
+                            // The model VALUE prop name always goes in
+                            // dynamicProps. `onUpdate:X` is a listener key: it
+                            // joins only when a handler in it is created on
+                            // every render (a merged one included).
+                            dynamic_props.push(model_name.to_string());
+                            if listener_is_dynamic(prop_idx)
+                                || merge_handler_idx.is_some_and(&merged_member_is_dynamic)
+                            {
+                                dynamic_props.push(format!("onUpdate:{model_name}"));
+                            }
+                            has_event_handler = true;
+
+                            // Emit modifiers prop if present
+                            if !prop.modifiers.is_empty() {
+                                let mods_prop = if model_name == "modelValue" {
+                                    "modelModifiers".to_string()
+                                } else {
+                                    format!("{}Modifiers", model_name)
+                                };
+                                buf.push_str(", ");
+                                buf.push_str(&mods_prop);
+                                buf.push_str(": { ");
+                                for (mi, modifier) in prop.modifiers.iter().enumerate() {
+                                    if mi > 0 {
+                                        buf.push_str(", ");
+                                    }
+                                    let mod_name =
+                                        &source[modifier.start as usize..modifier.end as usize];
+                                    buf.push_str(mod_name);
+                                    buf.push_str(": true");
+                                }
+                                buf.push_str(" }");
+                            }
+                        } else {
+                            buf.push_str("true");
+                        }
+                        continue;
+                    }
+
+                    if is_on || directive_name == "@" {
+                        prop_is_event = true;
+                        has_event_handler = true;
+                        // Event directive: @click → onClick, @update:modelValue → "onUpdate:modelValue"
+                        // Build key in temp position, then check if quoting is needed
+                        let key_start = buf.len();
+                        crate::template::vue_syntax::format_event_handler_key_into(buf, arg_name);
+
+                        // Classify modifiers into option (key suffix), runtime, and key categories
+                        // matching @vue/compiler-dom: keyboard-event unknown mods are
+                        // key filters (`_withKeys`), not runtime guards. Misrouting
+                        // `@keydown.backspace` into `_withModifiers` makes the handler
+                        // fire for every key (reka-ui PinInput typing regression).
+                        let mut runtime_modifiers: Vec<&str> = Vec::new();
+                        let mut key_modifiers: Vec<&str> = Vec::new();
+                        for modifier in &prop.modifiers {
+                            let mod_name = &source[modifier.start as usize..modifier.end as usize];
+                            match classify_event_modifier(mod_name, arg_name) {
+                                EventModifierKind::Option => {
+                                    // Capitalize and append to key name (e.g., onClick → onClickCapture)
+                                    let first_char =
+                                        mod_name.as_bytes()[0].to_ascii_uppercase() as char;
+                                    buf.push(first_char);
+                                    buf.push_str(&mod_name[1..]);
+                                }
+                                EventModifierKind::Runtime => {
+                                    runtime_modifiers.push(mod_name);
+                                }
+                                EventModifierKind::Key => {
+                                    key_modifiers.push(mod_name);
+                                }
+                            }
+                        }
+
+                        // Event-handler keys never enter dynamicProps: Vue relies
+                        // on stable invoker caching for listeners, so a handler
+                        // binding never needs a PATCH_PROPS re-patch. Official
+                        // `genEventHandler`/`buildProps` never adds the `on*`
+                        // key to `dynamicPropNames`.
+                        // Component listeners are attached by the child's
+                        // OWN render, not the parent's hydration pass — the
+                        // NEED_HYDRATION flag is native-element-only.
+                        if &buf[key_start..] != "onClick" && !element.tag_type.is_component() {
+                            has_hydration_binding = true;
+                        }
+                        // An uncached listener is a dynamic prop; a key whose
+                        // duplicates merge into one array is dynamic when any
+                        // of its handlers is.
+                        let dynamic = match event_merge_first_to_group.get(&prop_idx) {
+                            Some(group) => group.iter().copied().any(&merged_member_is_dynamic),
+                            None => listener_is_dynamic(prop_idx),
+                        };
+                        if dynamic {
+                            dynamic_props.push(buf[key_start..].to_string());
+                        }
+                        if crate::template::vue_syntax::needs_quoted_key(&buf[key_start..]) {
+                            buf.insert(key_start, '"');
+                            buf.push('"');
+                        }
+
+                        // Store modifier info for use during value emission
+                        event_runtime_modifiers = runtime_modifiers;
+                        event_key_modifiers = key_modifiers;
+                    } else if prop.is_dynamic == Some(true) && is_bind {
+                        // Dynamic bind key: :[attrName]="value"
+                        // Emit as computed property key: [resolvedExpr || ""]
+                        // Strip brackets from arg_name
+                        let inner = if arg_name.starts_with('[') && arg_name.ends_with(']') {
+                            &arg_name[1..arg_name.len() - 1]
+                        } else {
+                            arg_name
+                        };
+                        let resolved = resolver.simple_expr(inner, BindingAccess::Read);
+                        buf.push('[');
+                        buf.push_str(&resolved);
+                        buf.push_str(" || \"\"");
+                        buf.push(']');
+                    } else {
+                        // Track :class and :style for _normalizeClass/_normalizeStyle wrapping
+                        if is_bind && arg_name == "class" {
+                            prop_is_class = true;
+                        } else if is_bind && arg_name == "style" {
+                            prop_is_style = true;
+                        }
+                        // `.prop`/`.attr` modifiers force DOM-property vs
+                        // HTML-attribute binding by prefixing the key with a
+                        // `.`/`^` marker the runtime's `patchProp` reads —
+                        // the key stays EXACTLY as authored (hyphens kept,
+                        // never camelized) with that marker prepended.
+                        let dom_prop_marker = prop.modifiers.iter().find_map(|m| {
+                            match &source[m.start as usize..m.end as usize] {
+                                "prop" => Some('.'),
+                                "attr" => Some('^'),
+                                _ => None,
+                            }
+                        });
+                        // A forced DOM-property/attribute binding also gets
+                        // NEED_HYDRATION, same as a non-click event listener
+                        // — the hydration mismatch check needs to compare it
+                        // eagerly rather than waiting for a later patch.
+                        if dom_prop_marker.is_some() {
+                            has_hydration_binding = true;
+                        }
+                        // data-* and aria-* attributes must NOT be camelized —
+                        // they are standard HTML attributes that preserve hyphens.
+                        let skip_camelize = dom_prop_marker.is_some()
+                            || arg_name.starts_with("data-")
+                            || arg_name.starts_with("aria-");
+                        let key: std::borrow::Cow<'_, str> = if let Some(marker) = dom_prop_marker {
+                            std::borrow::Cow::Owned(format!("{marker}{arg_name}"))
+                        } else if skip_camelize {
+                            std::borrow::Cow::Borrowed(arg_name)
+                        } else {
+                            crate::template::vue_syntax::camelize(arg_name)
+                        };
+                        // For plain elements, :class and :style have dedicated
+                        // patch flags (PATCH_CLASS / PATCH_STYLE) and must NOT
+                        // appear in dynamic_props (which triggers PATCH_PROPS).
+                        // Components need them in dynamic_props for
+                        // shouldUpdateComponent checking.
+                        //
+                        // `key` is a vnode special prop (reconciliation only) —
+                        // never list it in dynamicProps. Official Vue omits it;
+                        // including `"key"` breaks keyed fragment reuse so
+                        // calendar cells remount on every placeholder change
+                        // and keyboard focus is lost (reka-ui Calendar).
+                        //
+                        // `ref` is also a vnode special prop (not a DOM attr).
+                        // Listing it in dynamicProps makes the patcher treat it
+                        // as a HTML attribute, so function refs serialize as
+                        // `ref="(el) => …"` in the DOM (reka-ui PopperArrow).
+                        let is_class_or_style =
+                            is_bind && (arg_name == "class" || arg_name == "style");
+                        let is_vnode_key = arg_name == "key";
+                        let is_vnode_ref = arg_name == "ref";
+                        if (!is_class_or_style || element.tag_type.is_component())
+                            && !is_vnode_key
+                            && !is_vnode_ref
+                        {
+                            // A bound `:onX` that merges with duplicate listeners
+                            // is dynamic when any member of the group is.
+                            let dynamic = match event_merge_first_to_group.get(&prop_idx) {
+                                Some(group) => group.iter().copied().any(&merged_member_is_dynamic),
+                                None => bound_value_is_dynamic(prop_idx),
+                            };
+                            if dynamic {
+                                dynamic_props.push(key.to_string());
+                            }
+                        }
+                        // A dynamic `:ref` (non-literal value) embeds a
+                        // scope-bound reference in the props object — it must
+                        // not be hoisted to module scope (evaluated outside
+                        // the render fn / setup(): `$setup.elRef` / `elRef.value`
+                        // are not module-scope names). Pure literals
+                        // (`:ref="'el'"`) and const-prop values stay hoistable.
+                        if is_vnode_ref && bound_value_is_dynamic(prop_idx) {
+                            has_dynamic_ref = true;
+                        }
+                        if crate::template::vue_syntax::needs_quoted_key(&key) {
+                            buf.push('"');
+                            crate::template::vue_syntax::escape_js_string_into(buf, &key);
+                            buf.push('"');
+                        } else {
+                            buf.push_str(&key);
+                        }
+                        // Vue 3.4+ same-name shorthand: `:disabled` (no value)
+                        // Save the camelized arg name so the value branch can
+                        // emit the resolved binding instead of `""`.
+                        if is_bind && prop.value_start.is_none() {
+                            bind_shorthand_arg = Some(arg_name);
+                        }
+                    }
+                } else {
+                    // v-model on a component: expand to modelValue + onUpdate:modelValue props
+                    let is_vmodel = directive_name == "v-model";
+                    if is_vmodel && element.tag_type.is_component() {
+                        // Plain v-model (no arg) uses "modelValue" as the model name
+                        let model_name = "modelValue";
+
+                        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                            let raw_value = &source[vs as usize..ve as usize];
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            let resolved = resolve_expr(raw_value, vs, oxc_exp, resolver, force_js);
+
+                            if !first {
+                                buf.push_str(", ");
+                            }
+                            first = false;
+
+                            // Emit: modelValue: <resolved>
+                            buf.push_str(model_name);
+                            buf.push_str(": ");
+                            buf.push_str(&resolved);
+
+                            // Emit: "onUpdate:modelValue": ...
+                            buf.push_str(", \"onUpdate:");
+                            buf.push_str(model_name);
+                            buf.push_str("\": ");
+
+                            // Check if an explicit @update:modelValue handler needs merging
+                            let merge_handler_idx = vmodel_merge_targets
+                                .iter()
+                                .find(|&&(vi, _)| vi == prop_idx)
+                                .map(|&(_, hi)| hi);
+
+                            if let Some(hi) = merge_handler_idx {
+                                // Merge: emit as array [vmodelHandler, explicitHandler]
+                                buf.push('[');
+                                uses_is_ref |=
+                                    model::push_model_update(buf, raw_value, &resolved, resolver);
+                                buf.push_str(", ");
+                                let handler_prop = &element.props[hi];
+                                if let (Some(hvs), Some(hve)) =
+                                    (handler_prop.value_start, handler_prop.value_end)
+                                {
+                                    let handler_raw = &source[hvs as usize..hve as usize];
+                                    let handler_oxc = find_prop_oxc_exp(oxc_el, hi);
+                                    let handler_resolved = resolve_expr(
+                                        handler_raw,
+                                        hvs,
+                                        handler_oxc,
+                                        resolver,
+                                        force_js,
+                                    );
+                                    push_event_handler(
+                                        buf,
+                                        handler_raw,
+                                        &handler_resolved,
+                                        handler_oxc,
+                                    );
+                                } else {
+                                    buf.push_str("() => {}");
+                                }
+                                buf.push(']');
+                            } else {
+                                // No merge needed — single handler
+                                uses_is_ref |=
+                                    model::push_model_update(buf, raw_value, &resolved, resolver);
+                            }
+
+                            // The model VALUE prop name always goes in
+                            // dynamicProps. `onUpdate:X` is a listener key: it
+                            // joins only when a handler in it is created on
+                            // every render (a merged one included).
+                            dynamic_props.push(model_name.to_string());
+                            if listener_is_dynamic(prop_idx)
+                                || merge_handler_idx.is_some_and(&merged_member_is_dynamic)
+                            {
+                                dynamic_props.push(format!("onUpdate:{model_name}"));
+                            }
+                            has_event_handler = true;
+
+                            // Emit modifiers prop if present
+                            if !prop.modifiers.is_empty() {
+                                let mods_prop = if model_name == "modelValue" {
+                                    "modelModifiers".to_string()
+                                } else {
+                                    format!("{}Modifiers", model_name)
+                                };
+                                buf.push_str(", ");
+                                buf.push_str(&mods_prop);
+                                buf.push_str(": { ");
+                                for (mi, modifier) in prop.modifiers.iter().enumerate() {
+                                    if mi > 0 {
+                                        buf.push_str(", ");
+                                    }
+                                    let mod_name =
+                                        &source[modifier.start as usize..modifier.end as usize];
+                                    buf.push_str(mod_name);
+                                    buf.push_str(": true");
+                                }
+                                buf.push_str(" }");
+                            }
+                        }
+                        continue;
+                    }
+
+                    // v-model on native element: emit "onUpdate:modelValue" prop
+                    // and collect directive info for _withDirectives() wrapping.
+                    if is_vmodel && !element.tag_type.is_component() {
+                        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                            let raw_value = &source[vs as usize..ve as usize];
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            let resolved = resolve_expr(raw_value, vs, oxc_exp, resolver, force_js);
+
+                            if !first {
+                                buf.push_str(", ");
+                            }
+                            first = false;
+
+                            // Emit: "onUpdate:modelValue": $event => ((<resolved>) = $event),
+                            // cache-wrapped when a `_cache[N]` slot was
+                            // reserved for it (stable handler identity —
+                            // official `cacheHandlers`).
+                            buf.push_str("\"onUpdate:modelValue\": ");
+                            if listener_is_dynamic(prop_idx) {
+                                dynamic_props.push("onUpdate:modelValue".to_string());
+                            }
+                            let cache_idx = cache_slot(prop_idx);
+                            if let Some(idx) = cache_idx {
+                                buf.push_str("_cache[");
+                                buf.push_str(&idx.to_string());
+                                buf.push_str("] || (_cache[");
+                                buf.push_str(&idx.to_string());
+                                buf.push_str("] = ");
+                            }
+                            uses_is_ref |=
+                                model::push_model_update(buf, raw_value, &resolved, resolver);
+                            if cache_idx.is_some() {
+                                buf.push(')');
+                            }
+
+                            // Determine the directive helper based on tag and type attribute
+                            let tag_name = &source[element.tag_open.start as usize + 1
+                                ..element.tag_open.name_end as usize];
+                            let directive_helper =
+                                determine_native_vmodel_directive(element, source, tag_name);
+
+                            // Build modifiers object string
+                            let modifiers = if prop.modifiers.is_empty() {
+                                String::new()
+                            } else {
+                                let mut mods = String::from("{ ");
+                                for (mi, modifier) in prop.modifiers.iter().enumerate() {
+                                    if mi > 0 {
+                                        mods.push_str(", ");
+                                    }
+                                    let mod_name =
+                                        &source[modifier.start as usize..modifier.end as usize];
+                                    mods.push_str(mod_name);
+                                    mods.push_str(": true");
+                                }
+                                mods.push_str(" }");
+                                mods
+                            };
+
+                            native_vmodel = Some(NativeVModel {
+                                resolved_value: resolved,
+                                directive_helper,
+                                modifiers,
+                            });
+                        }
+                        continue;
+                    }
+
+                    // v-text / v-html: lower to a `textContent`/`innerHTML` prop
+                    // (v-text wraps the value in `_toDisplayString()`; v-html
+                    // does not). Both enter `dynamic_props` so PATCH_PROPS +
+                    // the hoisted keys array are emitted, matching official.
+                    if directive_name == "v-text" || directive_name == "v-html" {
+                        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                            let raw = &source[vs as usize..ve as usize];
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            let resolved = resolve_expr(raw, vs, oxc_exp, resolver, force_js);
+
+                            if !first {
+                                buf.push_str(", ");
+                            }
+                            first = false;
+                            has_regular_props = true;
+
+                            let key = if directive_name == "v-text" {
+                                "textContent"
+                            } else {
+                                "innerHTML"
+                            };
+                            buf.push_str(key);
+                            buf.push_str(": ");
+                            if directive_name == "v-text" {
+                                buf.push_str("_toDisplayString(");
+                                buf.push_str(&resolved);
+                                buf.push(')');
+                                uses_to_display_string = true;
+                            } else {
+                                buf.push_str(&resolved);
+                            }
+
+                            dynamic_props.push(key.to_string());
+                        }
+                        continue;
+                    }
+
+                    // Other directives with no arg: v-show, v-focus, v-loading, etc.
+                    // These are collected as directive entries for _withDirectives() wrapping.
+                    let is_vshow = directive_name == "v-show";
+                    // Skip codegen-only directives that don't need runtime wrapping
+                    let is_codegen_only = matches!(directive_name, "v-cloak" | "v-memo" | "v-pre");
+                    if !is_codegen_only {
+                        let directive_ref = if is_vshow {
+                            "_vShow".to_string()
+                        } else {
+                            // Custom directive: will use _resolveDirective("name")
+                            let name = directive_name.strip_prefix("v-").unwrap_or(directive_name);
+                            format!("_resolveDirective(\"{}\")", name)
+                        };
+
+                        let value = if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end)
+                        {
+                            let raw = &source[vs as usize..ve as usize];
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            resolve_expr(raw, vs, oxc_exp, resolver, force_js)
+                        } else {
+                            String::new()
+                        };
+
+                        let modifiers = build_modifier_object(prop, source);
+
+                        directive_entries.push(DirectiveEntry {
+                            directive_ref,
+                            value,
+                            arg: String::new(),
+                            modifiers,
+                            helper_import: if is_vshow {
+                                Some(VdomHelper::VShow)
+                            } else {
+                                None
+                            },
+                        });
+                    }
+                    continue;
+                }
+            } else {
+                // Static attribute — skip if being merged with dynamic `:class`/`:style`
+                let name = &source[prop.start as usize..prop.name_end as usize];
+                if (name == "class" && merge_class.is_some())
+                    || (name == "style" && merge_style.is_some())
+                {
+                    continue;
+                }
+
+                is_static_style = name == "style";
+
+                if !first {
+                    buf.push_str(", ");
+                }
+                first = false;
+
+                let quoted = crate::template::vue_syntax::needs_quoted_key(name);
+                let key_offset = buf.len() as u32 + u32::from(quoted);
+                if quoted {
+                    buf.push('"');
+                    buf.push_str(name);
+                    buf.push('"');
+                } else {
+                    buf.push_str(name);
+                }
+                // Only the static "class" key is anchored; every other
+                // static attribute name's own key offset is computed above
+                // but never pushed into `anchors`.
+                if name == "class" {
+                    anchors.push(SegmentAnchor {
+                        content_offset: key_offset,
+                        length: name.len() as u32,
+                        source_pos: prop.start,
+                        kind: AnchorKind::Exact,
+                    });
+                }
+            }
+
+            buf.push_str(": ");
+
+            // Track position before the value for potential array merge wrapping
+            let handler_value_start = buf.len();
+
+            // Track whether this event handler needs modifier wrapping
+            let has_event_modifiers = prop_is_event
+                && (!event_runtime_modifiers.is_empty() || !event_key_modifiers.is_empty());
+
+            // For event modifiers, we need to wrap the handler value.
+            // Record the position before the handler so we can insert prefixes.
+            let value_start_pos = if has_event_modifiers {
+                Some(buf.len())
+            } else {
+                None
+            };
+
+            if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                let value = &source[vs as usize..ve as usize];
+                if prop.is_directive {
+                    if prop_is_event && value.trim().is_empty() {
+                        // Empty string event handler (e.g., @click.stop="")
+                        buf.push_str("() => {}");
+                    } else if prop_is_event {
+                        let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                        let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
+                        // A cacheable inline handler gets `_cache[N] || (_cache[N] = …)`
+                        // for a stable function identity across renders
+                        // (official `cacheHandlers`) — but only when no
+                        // modifier wrapping applies to this prop (the
+                        // `_withModifiers`/`_withKeys` wrap composes around
+                        // this span separately via `value_start_pos`, and no
+                        // current case needs both together).
+                        let cache_idx = (!has_event_modifiers)
+                            .then(|| cache_slot(prop_idx))
+                            .flatten();
+                        if let Some(idx) = cache_idx {
+                            buf.push_str("_cache[");
+                            buf.push_str(&idx.to_string());
+                            buf.push_str("] || (_cache[");
+                            buf.push_str(&idx.to_string());
+                            buf.push_str("] = ");
+                        }
+                        push_event_handler(buf, value, &resolved, oxc_exp);
+                        if cache_idx.is_some() {
+                            buf.push(')');
+                        }
+                    } else {
+                        let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                        let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
+                        if prop_is_class {
+                            buf.push_str("_normalizeClass(");
+                            if let Some(static_cls) = merge_class {
+                                // Merge static + dynamic: _normalizeClass(["static", dynamic])
+                                buf.push_str("[\"");
+                                crate::template::vue_syntax::escape_js_string_into(buf, static_cls);
+                                buf.push_str("\", ");
+                                buf.push_str(&resolved);
+                                buf.push(']');
+                            } else {
+                                buf.push_str(&resolved);
+                            }
+                            buf.push(')');
+                            uses_normalize_class = true;
+                        } else if prop_is_style {
+                            buf.push_str("_normalizeStyle(");
+                            if let Some(static_sty) = merge_style {
+                                // Merge static + dynamic: _normalizeStyle([{obj}, dynamic])
+                                buf.push('[');
+                                props::emit_static_style_object(buf, static_sty);
+                                buf.push_str(", ");
+                                buf.push_str(&resolved);
+                                buf.push(']');
+                            } else {
+                                buf.push_str(&resolved);
+                            }
+                            buf.push(')');
+                            uses_normalize_style = true;
+                        } else {
+                            buf.push_str(&resolved);
+                        }
+                    }
+                } else if is_static_style {
+                    // Static style: emit as JS object for SSR normalization parity with Vue
+                    let style_val = if helpers::has_html_entities(value) {
+                        let mut decoded = String::with_capacity(value.len());
+                        helpers::decode_html_entities_into(&mut decoded, value);
+                        decoded
+                    } else {
+                        value.to_string()
+                    };
+                    props::emit_static_style_object(buf, &style_val);
+                } else {
+                    buf.push('"');
+                    if helpers::has_html_entities(value) {
+                        let mut decoded = String::with_capacity(value.len());
+                        helpers::decode_html_entities_into(&mut decoded, value);
+                        crate::template::vue_syntax::escape_js_string_into(buf, &decoded);
+                    } else {
+                        crate::template::vue_syntax::escape_js_string_into(buf, value);
+                    }
+                    buf.push('"');
+                }
+            } else if prop_is_event {
+                // Event handler with no value (e.g., @contextmenu.prevent)
+                buf.push_str("() => {}");
+            } else if let Some(arg_name) = bind_shorthand_arg {
+                // Vue 3.4+ same-name shorthand: `:disabled` → `disabled: resolvedBinding`
+                // The arg name is used as the expression — resolve it through bindings.
+                let camelized = crate::template::vue_syntax::camelize(arg_name);
+                let resolved = resolver.simple_expr(&camelized, BindingAccess::Read);
+                if prop_is_class {
+                    buf.push_str("_normalizeClass(");
+                    uses_normalize_class = true;
+                    if let Some(static_cls) = merge_class {
+                        buf.push_str("[\"");
+                        crate::template::vue_syntax::escape_js_string_into(buf, static_cls);
+                        buf.push_str("\", ");
+                        buf.push_str(&resolved);
+                        buf.push(']');
+                    } else {
+                        buf.push_str(&resolved);
+                    }
+                    buf.push(')');
+                } else if prop_is_style {
+                    buf.push_str("_normalizeStyle(");
+                    uses_normalize_style = true;
+                    if let Some(static_sty) = merge_style {
+                        buf.push('[');
+                        props::emit_static_style_object(buf, static_sty);
+                        buf.push_str(", ");
+                        buf.push_str(&resolved);
+                        buf.push(']');
+                    } else {
+                        buf.push_str(&resolved);
+                    }
+                    buf.push(')');
+                } else {
+                    buf.push_str(&resolved);
+                }
+            } else {
+                // Boolean attribute (no value)
+                buf.push_str("\"\"");
+            }
+
+            // Wrap event handler with _withModifiers/_withKeys if modifiers are present
+            if let Some(vsp) = value_start_pos {
+                // Extract the handler value that was just written (split_off avoids clone)
+                let handler_value = buf.split_off(vsp);
+
+                // Innermost: _withKeys wrapping (if key modifiers present)
+                if !event_key_modifiers.is_empty() {
+                    uses_with_keys = true;
+                    buf.push_str("_withKeys(");
+                    buf.push_str(&handler_value);
+                    buf.push_str(", [");
+                    for (i, km) in event_key_modifiers.iter().enumerate() {
+                        if i > 0 {
+                            buf.push_str(", ");
+                        }
+                        buf.push('"');
+                        crate::template::vue_syntax::escape_js_string_into(buf, km);
+                        buf.push('"');
+                    }
+                    buf.push_str("])");
+                } else {
+                    buf.push_str(&handler_value);
+                }
+
+                // Outermost: _withModifiers wrapping (if runtime modifiers present)
+                if !event_runtime_modifiers.is_empty() {
+                    uses_with_modifiers = true;
+                    // Save the inner result, wrap with _withModifiers
+                    let inner = buf.split_off(vsp);
+                    buf.push_str("_withModifiers(");
+                    buf.push_str(&inner);
+                    buf.push_str(", [");
+                    for (i, rm) in event_runtime_modifiers.iter().enumerate() {
+                        if i > 0 {
+                            buf.push_str(", ");
+                        }
+                        buf.push('"');
+                        crate::template::vue_syntax::escape_js_string_into(buf, rm);
+                        buf.push('"');
+                    }
+                    buf.push_str("])");
+                }
+            }
+
+            // If this prop is the first handler in a merge group, wrap value in array
+            // and emit remaining handlers' values.
+            if let Some(group) = event_merge_first_to_group.get(&prop_idx) {
+                // Insert `[` before the first handler's value
+                buf.insert(handler_value_start, '[');
+                // Emit subsequent handlers' values
+                for &other_idx in &group[1..] {
+                    buf.push_str(", ");
+                    let other_prop = &element.props[other_idx];
+                    let (uwm, uwk) = emit_merged_event_handler_value(
+                        buf, other_prop, other_idx, source, oxc_el, resolver, force_js,
+                    );
+                    if uwm {
+                        uses_with_modifiers = true;
+                    }
+                    if uwk {
+                        uses_with_keys = true;
+                    }
+                }
+                buf.push(']');
+            }
+        }
+        buf.push_str(" }");
+        if wrap_normalize_for_dynamic_key {
+            buf.push(')');
+        }
+    }
+    let mut uses_normalize_props = wrap_normalize_for_dynamic_key;
+    let mut uses_guard_reactive_props = false;
+    let mut uses_to_handlers = false;
+    let is_component = element.tag_type.is_component();
+
+    // Helper: format a spread expression, wrapping v-on spreads with _toHandlers
+    let format_spread = |buf: &mut String, spread: &(String, bool)| {
+        let (expr, is_von) = spread;
+        if *is_von {
+            buf.push_str("_toHandlers(");
+            buf.push_str(expr);
+            if !is_component {
+                buf.push_str(", true");
+            }
+            buf.push(')');
+        } else {
+            buf.push_str(expr);
+        }
+    };
+
+    if use_merge {
+        // Spreads mixed with regular props. When spreads come first in source
+        // order they were already emitted above; only append them when regular
+        // props came first (classic `_mergeProps({…}, spread)`).
+        if !spreads_first {
+            for spread in &spreads {
+                buf.push_str(", ");
+                format_spread(buf, spread);
+                if spread.1 {
+                    uses_to_handlers = true;
+                }
+            }
+        } else {
+            // Track _toHandlers import for leading spreads already emitted.
+            for spread in &spreads {
+                if spread.1 {
+                    uses_to_handlers = true;
+                }
+            }
+        }
+        buf.push(')');
+    } else if !spreads.is_empty() && !has_regular_props {
+        if spreads.len() == 1 && !spreads[0].1 {
+            // Single v-bind spread, no regular props → _normalizeProps(_guardReactiveProps(expr))
+            buf.push_str("_normalizeProps(_guardReactiveProps(");
+            buf.push_str(&spreads[0].0);
+            buf.push_str("))");
+            uses_normalize_props = true;
+            uses_guard_reactive_props = true;
+        } else if spreads.len() == 1 && spreads[0].1 {
+            // Single v-on spread, no regular props → _toHandlers(expr, true)
+            format_spread(buf, &spreads[0]);
+            uses_to_handlers = true;
+        } else {
+            // Multiple spreads, no regular props → _mergeProps(expr1, expr2)
+            buf.push_str("_mergeProps(");
+            for (i, spread) in spreads.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str(", ");
+                }
+                format_spread(buf, spread);
+                if spread.1 {
+                    uses_to_handlers = true;
+                }
+            }
+            buf.push(')');
+        }
+    }
+
+    PropsResult {
+        dynamic_props,
+        uses_merge: use_merge,
+        uses_normalize_class,
+        uses_normalize_style,
+        uses_with_modifiers,
+        uses_with_keys,
+        uses_is_ref,
+        uses_normalize_props,
+        uses_guard_reactive_props,
+        uses_to_handlers,
+        has_vnode_key,
+        has_dynamic_ref,
+        has_event_handler,
+        native_vmodel,
+        directive_entries,
+        uses_to_display_string,
+        has_hydration_binding,
+        has_dynamic_key,
+    }
+}
+
+/// Format a dynamic props array as a string (e.g., `["id", "title"]`).
+///
+/// If `hoisted_constants` is provided, the array is registered as a hoisted
+/// constant and the `_hoisted_N` reference is returned instead.
+pub(super) fn format_dynamic_props_ref(
+    dynamic_props: &[String],
+    hoisted_constants: Option<&mut Vec<(String, Vec<SegmentAnchor>)>>,
+) -> String {
+    let mut arr = String::with_capacity(dynamic_props.len() * 10);
+    arr.push('[');
+    for (i, key) in dynamic_props.iter().enumerate() {
+        if i > 0 {
+            arr.push_str(", ");
+        }
+        arr.push('"');
+        crate::template::vue_syntax::escape_js_string_into(&mut arr, key);
+        arr.push('"');
+    }
+    arr.push(']');
+
+    // Try to hoist the array as a module-level constant. A dynamic-props
+    // key array never embeds a mappable identifier, so it carries no anchor.
+    if let Some(hoisted) = hoisted_constants {
+        // Deduplicate: check if an identical array already exists
+        if let Some(idx) = hoisted.iter().position(|(c, _)| c == &arr) {
+            return format!("_hoisted_{}", idx + 1);
+        }
+        hoisted.push((arr, Vec::new()));
+        return format!("_hoisted_{}", hoisted.len());
+    }
+
+    arr
+}
+
+/// Emit the `_withDirectives()` closing part: `, [[dir, val, arg, mods], ...])`.
+///
+/// Handles both native v-model entries and directive entries (v-show, custom directives).
+/// Called from both self-closing and regular close tag paths, and from the
+/// component-with-slots path in `slots.rs` (which previously dropped v-show).
+pub(crate) fn emit_with_directives_close<'alloc>(
+    buf: &mut String,
+    native_vmodel: &Option<NativeVModel>,
+    directive_entries: &[DirectiveEntry],
+    out: &mut VdomOut<'alloc>,
+) {
+    let has_vmodel = native_vmodel.is_some();
+    let has_entries = !directive_entries.is_empty();
+    if !has_vmodel && !has_entries {
+        return;
+    }
+    out.add_vdom_import(VdomHelper::WithDirectives);
+    buf.push_str(", [");
+    let mut first = true;
+
+    // v-model entry first (if present)
+    if let Some(ref nvm) = native_vmodel {
+        buf.push('[');
+        buf.push_str(nvm.directive_helper.name());
+        buf.push_str(", ");
+        buf.push_str(&nvm.resolved_value);
+        if !nvm.modifiers.is_empty() {
+            buf.push_str(", void 0, ");
+            buf.push_str(&nvm.modifiers);
+        }
+        buf.push(']');
+        out.add_vdom_import(nvm.directive_helper);
+        first = false;
+    }
+
+    // Additional directive entries (v-show, custom directives)
+    for entry in directive_entries {
+        if !first {
+            buf.push_str(", ");
+        }
+        first = false;
+        buf.push('[');
+        buf.push_str(&entry.directive_ref);
+        if !entry.value.is_empty() || !entry.arg.is_empty() || !entry.modifiers.is_empty() {
+            buf.push_str(", ");
+            if entry.value.is_empty() {
+                buf.push_str("void 0");
+            } else {
+                buf.push_str(&entry.value);
+            }
+        }
+        if !entry.arg.is_empty() || !entry.modifiers.is_empty() {
+            buf.push_str(", ");
+            if entry.arg.is_empty() {
+                buf.push_str("void 0");
+            } else {
+                buf.push_str(&entry.arg);
+            }
+        }
+        if !entry.modifiers.is_empty() {
+            buf.push_str(", ");
+            buf.push_str(&entry.modifiers);
+        }
+        buf.push(']');
+        if let Some(helper) = entry.helper_import {
+            out.add_vdom_import(helper);
+        } else {
+            out.add_vdom_import(VdomHelper::ResolveDirective);
+        }
+    }
+
+    buf.push_str("])");
+}
+
+/// Inject a synthetic vnode `key: N` as the FIRST property of a props object
+/// already written into `buf` starting at byte `props_start`.
+///
+/// Official Vue injects the `v-if`/`v-else` branch key ahead of user props.
+/// Handles a plain `{ … }` object (including the empty `{  }` case) and a
+/// `_mergeProps(…)` wrapper (the key becomes the first merge argument, matching
+/// `_mergeProps({ key: 0 }, _ctx.spread)`).
+///
+/// Operates on the pre-`CodeTransform` assembly buffer, so string edits here do
+/// not desync any source map.
+pub(crate) fn inject_branch_key(buf: &mut String, props_start: usize, key: u32) {
+    let obj = &buf[props_start..];
+    let is_merge = obj.starts_with("_mergeProps(");
+    let has_leading_space = obj.starts_with("{ ");
+    let inner_empty = obj
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim()
+        .is_empty();
+    let key_prop = format!("key: {key}");
+
+    if is_merge {
+        let ins = props_start + "_mergeProps(".len();
+        buf.insert_str(ins, &format!("{{ {key_prop} }}, "));
+    } else if inner_empty {
+        buf.truncate(props_start);
+        buf.push_str(&format!("{{ {key_prop} }}"));
+    } else if has_leading_space {
+        buf.insert_str(props_start + 2, &format!("{key_prop}, "));
+    } else {
+        buf.insert_str(props_start + 1, &format!(" {key_prop}, "));
+    }
+}
+
+/// Process the leave phase of a VDOM element node.
+///
+/// 1. Resolves whitespace in children
+/// 2. Constructs VNode call via overwrites
+/// 3. Handles props, children, patch flags
+/// 4. Returns a ChildRecord for the parent's children list
+///
+/// `is_block_root` indicates this element is at a block-tree root position
+/// (template single root, v-if branch, or v-for item). Block roots use
+/// `_createElementBlock`/`_createBlock` and get `(_openBlock(), ...)` wrapping.
+///
+/// `injected_key` is the synthetic `v-if` branch key (`Some(n)` on a
+/// conditional-branch root without an explicit `:key`), injected ahead of user
+/// props so ternary arms patch as distinct nodes.
+#[allow(clippy::too_many_arguments)]
+pub fn process_element_leave<'alloc>(
+    element: &ElementNode,
+    oxc: Option<&OxcParsedElement<'alloc>>,
+    expressions: Option<&OxcParsedAst<'alloc>>,
+    children: &mut [ChildRecord],
+    source: &'alloc str,
+    out: &mut VdomOut<'alloc>,
+    options: &VdomOptions,
+    resolver: &VueBindingView<'alloc>,
+    buf: &mut String,
+    v_for_prefix: Option<&str>,
+    ast: &TemplateAst,
+    is_block_root: bool,
+    force_open_block: bool,
+    injected_key: Option<u32>,
+    mut hoisted_constants: Option<&mut Vec<(String, Vec<SegmentAnchor>)>>,
+    cache_index: Option<usize>,
+    resolved_components: Option<&mut Vec<super::component::ResolvedComponent>>,
+    component_tag: &VueComponentTagFacts,
+    slot_cached: bool,
+    // `_hoisted_N` index the walker's `enter_element` already reserved (and
+    // pushed content for) for THIS element, before its children were
+    // visited — see `VdomNodePlan::hoist`. `Some` means the
+    // props-object build + `can_hoist_props`/injected-key hoist decision
+    // below is skipped entirely and `_hoisted_{idx}` is emitted directly;
+    // `None` means the enter-time fast path didn't recognize this element
+    // (dynamic props, component, fully-static subtree, hoist_static
+    // disabled, …) and the logic below is the sole, unchanged authority.
+    pre_reserved_hoist: Option<usize>,
+    // The plans of THIS element's own inline event handlers / native
+    // `v-model` update handler, keyed by `prop_idx` — see
+    // `VdomNodePlan::handler_plans`. `_cache[N]` slots are reserved in a
+    // document-order pre-pass (`enter_template`) so handler caching numbers
+    // before any static-vnode/`v-memo` caching, matching official Vue's
+    // main-transform-then-`cacheStatic` pass ordering. `None`/absent-key
+    // means the prop is not a cacheable inline handler.
+    handler_cache_indices: Option<&FxHashMap<usize, HandlerPlan>>,
+    // `_cache[N]` reserved to hold THIS element's ENTIRE static children
+    // array (official Vue: when every one of a node's children is
+    // individually cacheable, `cacheStatic` groups them into ONE cached
+    // array and spreads it back: `[...(_cache[N] || (_cache[N] = [c1, c2,
+    // …]))]`, rather than caching each child separately). `Some` means the
+    // children-array open/close brackets below emit the spread wrapper
+    // instead of a bare `[`/`]`, and each child renders un-individually-
+    // cached (see `VdomNodePlan::array_group`).
+    array_group_cache_index: Option<usize>,
+    // `_cache[N]` reserved for each static-only text/interpolation run
+    // among THIS element's array-mode children, keyed by the run's start
+    // offset — see `VdomState::reserve_static_text_run_caches`.
+    text_run_cache_indices: &FxHashMap<u32, usize>,
+) -> ChildRecord {
+    let tag_open = &element.tag_open;
+    verter_debug_assert!((tag_open.start as usize + 1) <= source.len());
+    verter_debug_assert!((tag_open.name_end as usize) <= source.len());
+    let tag_name = &source[tag_open.start as usize + 1..tag_open.name_end as usize];
+    let helper = match vnode_helper(element, is_block_root) {
+        VdomHelper::CreateElementVNode if !options.element_vnodes => VdomHelper::CreateVNode,
+        VdomHelper::CreateElementBlock => options.element_block(),
+        helper => helper,
+    };
+
+    // The children are already resolved by the compile structure; tag
+    // extension and gap-filling below remove the source of dropped ones.
+
+    let has_props = !element.props.is_empty() || element.v_ref.is_some();
+    let has_children = !children.is_empty();
+
+    // Step 2: Compute patch flags
+    let mut expr_flag = oxc
+        .map(|o| o.expression_flag)
+        .unwrap_or(ExpressionFlag::empty());
+    // The syntax overlay knows literal expressions, but script constants
+    // become known only through the binding table. Vue skips text patching
+    // for a bare setup constant, unless a template-local name shadows it.
+    if matches!(element.children_mode, ChildrenMode::TextOnlyDynamic)
+        && !expr_flag.has(ExpressionFlags::AllInterpolationsStatic)
+        && expressions.is_some_and(|expressions| {
+            element.content.as_ref().is_some_and(|content| {
+                content.children.iter().all(|&child| {
+                    if !matches!(ast.nodes[child.0].kind, AstNodeKind::Interpolation(_)) {
+                        return true;
+                    }
+                    let Some(OxcNodeData::Interpolation(expr)) = expressions.data.get(child.0)
+                    else {
+                        return false;
+                    };
+                    if expr.dynamism == Dynamism::Static {
+                        return true;
+                    }
+                    let Some(oxc_ast::ast::Expression::Identifier(ident)) = &expr.expression else {
+                        return false;
+                    };
+                    let name = ident.name.as_str();
+                    !expressions
+                        .scopes
+                        .declares(expressions.scope_of(child, ast), name)
+                        && matches!(
+                            resolver.get(name),
+                            Some(BindingType::SetupConst | BindingType::LiteralConst)
+                        )
+                })
+            })
+        })
+    {
+        expr_flag = expr_flag.add(ExpressionFlags::AllInterpolationsStatic);
+    }
+    let mut patch_flag =
+        props::compute_patch_flags(element.prop_flag, expr_flag, element.children_mode);
+
+    // KeepAlive carries DYNAMIC_SLOTS (1024) in official Vue output so the
+    // runtime force-updates its cached slot content.
+    if helpers::is_keep_alive(tag_name) {
+        patch_flag |= helpers::PATCH_DYNAMIC_SLOTS;
+    }
+
+    // Cached static elements use -1 (CACHED) patch flag, bypassing all diffing.
+    // `cache_index` = individual element caching (adds wrapper + flag).
+    // `slot_cached` = slot-level grouped caching (flag only, wrapper handled by slot code).
+    let has_cached_patchflag = cache_index.is_some() || slot_cached;
+    let has_cache_wrapper = cache_index.is_some();
+
+    // Pre-scan: detect directives needing _withDirectives() wrapping.
+    // - Native elements: v-model, v-show, and custom directives all need wrapping.
+    // - Components: v-show and custom directives need wrapping. v-model on components
+    //   is handled differently (transformed to modelValue prop + onUpdate:modelValue event),
+    //   NOT via _withDirectives.
+    let is_component = element.tag_type.is_component();
+    let has_directives_wrap = element.props.iter().any(|p| {
+        if !p.is_directive {
+            return false;
+        }
+        let dname = &source[p.start as usize..p.name_end as usize];
+        // v-model: only wraps native elements (component v-model becomes props)
+        if dname == "v-model" {
+            return !is_component;
+        }
+        // v-show always wraps
+        if dname == "v-show" {
+            return true;
+        }
+        // Custom directives (v-*) wrap both native elements and components
+        !matches!(
+            dname,
+            ":" | "v-bind"
+                | "@"
+                | "v-on"
+                | "v-if"
+                | "v-else-if"
+                | "v-else"
+                | "v-for"
+                | "v-slot"
+                | "v-once"
+                | "v-text"
+                | "v-html"
+                | "v-cloak"
+                | "v-memo"
+                | "v-pre"
+        ) && dname.starts_with("v-")
+    });
+
+    // Step 3: Build open tag overwrite (reusing caller's buffer)
+    buf.clear();
+
+    // Cache wrapper prefix for static elements: `_cache[N] || (_cache[N] = `
+    if let Some(idx) = cache_index {
+        buf.push_str("_cache[");
+        buf.push_str(&idx.to_string());
+        buf.push_str("] || (_cache[");
+        buf.push_str(&idx.to_string());
+        buf.push_str("] = ");
+    }
+
+    // Include v-for prefix (e.g., `(_openBlock(true), _createElementBlock(_Fragment, null,
+    // _renderList(items, (item) => {return `) at the start of the overwrite. This ensures
+    // it appears AFTER any sibling text node closing markers that are prepended at the
+    // same position (overwrites come after prepends at the same position).
+    if let Some(prefix) = v_for_prefix {
+        buf.push_str(prefix);
+    }
+    // Wrap with _withDirectives() for v-model, v-show, custom directives
+    if has_directives_wrap {
+        buf.push_str("_withDirectives(");
+    }
+    // Block root elements (v-for items, v-if branches) need their own block scope
+    // so that dynamic children are tracked in dynamicChildren and patched correctly.
+    // Template root: wrapping is handled by leave_template, not here — EXCEPT
+    // when the root also needs `_withDirectives()` wrapping, in which case
+    // `(_openBlock(), …)` must nest INSIDE `_withDirectives(` (official
+    // Vue's `_withDirectives((_openBlock(), createXBlock(...)), [...])`);
+    // `leave_template`'s `root_element_has_directives_wrap` bypass then
+    // skips its own outer wrapper for that case.
+    // `force_open_block` covers built-ins (Teleport/KeepAlive) that must open a
+    // block at any nesting even without a structural directive.
+    let needs_block_wrapper = force_open_block
+        || (is_block_root
+            && (element.v_for.is_some() || element.v_condition.is_some() || has_directives_wrap));
+    if needs_block_wrapper {
+        buf.push_str("(_openBlock(), ");
+        out.add_vdom_import(VdomHelper::OpenBlock);
+    }
+    buf.push_str(helper.name());
+    out.add_vdom_import(helper);
+    // Check for <component :is="expr"> dynamic component (childless path)
+    let dynamic_is =
+        resolve_dynamic_component(element, source, oxc, resolver, out, options.force_js);
+    let skip_is_prop = dynamic_is.as_ref().map(|(_, idx)| *idx);
+
+    buf.push('(');
+    if element.tag_type.is_component() {
+        if let Some((ref resolved_tag, _)) = dynamic_is {
+            // Dynamic component: <component :is="expr"> → _resolveDynamicComponent(expr)
+            buf.push_str(resolved_tag);
+        } else {
+            // Static component: resolve through bindings or _resolveComponent
+            let resolved =
+                resolve_component_tag(tag_name, component_tag, resolver, out, resolved_components);
+            buf.push_str(&resolved);
+        }
+    } else {
+        // Plain element: string literal
+        buf.push('"');
+        crate::template::vue_syntax::escape_js_string_into(buf, tag_name);
+        buf.push('"');
+    }
+
+    // Adjust has_props to account for the skipped :is prop
+    let has_props = if skip_is_prop.is_some() {
+        element.props.len() > 1 || element.v_ref.is_some()
+    } else {
+        has_props
+    };
+
+    // Props
+    let (
+        dynamic_props,
+        has_dynamic_ref,
+        native_vmodel,
+        directive_entries,
+        has_hydration_binding,
+        has_dynamic_key,
+    ) = if has_props {
+        buf.push_str(", ");
+        if let Some(idx) = pre_reserved_hoist {
+            // Reserved during enter_element, in document pre-order, before
+            // any child was visited — see `pre_reserved_hoist`'s doc
+            // comment. A reservation exists only when `can_hoist_props`
+            // (mirrored at enter time in `try_reserve_element_hoist`)
+            // held, so every one of the dynamic-props fields below is
+            // guaranteed empty/None — skip rebuilding the props object
+            // entirely and reference the already-hoisted constant.
+            buf.push_str("_hoisted_");
+            buf.push_str(&idx.to_string());
+            (Vec::new(), false, None, Vec::new(), false, false)
+        } else {
+            let props_start = buf.len();
+            let mut props_anchors: Vec<SegmentAnchor> = Vec::new();
+            let props_result = build_props_object_into(
+                buf,
+                element,
+                source,
+                resolver,
+                oxc,
+                skip_is_prop,
+                options.force_js,
+                &mut props_anchors,
+                handler_cache_indices,
+                !options.cache_handlers,
+            );
+            // Hoist fully-static props objects to const _hoisted_N when:
+            // - hoist_static is enabled
+            // - no dynamic bindings, merges, normalizations, directives
+            // - not a component (components have variable tag resolution)
+            // - not already cached (redundant)
+            let can_hoist_props = options.hoist_static
+                && !has_cached_patchflag
+                && injected_key.is_none()
+                && !element.tag_type.is_component()
+                && props_result.dynamic_props.is_empty()
+                && !props_result.has_vnode_key
+                && !props_result.has_dynamic_ref
+                && !props_result.has_event_handler
+                && !props_result.uses_merge
+                && !props_result.uses_normalize_class
+                && !props_result.uses_normalize_style
+                && !props_result.uses_normalize_props
+                && !props_result.uses_guard_reactive_props
+                && !props_result.uses_to_handlers
+                && props_result.native_vmodel.is_none()
+                && props_result.directive_entries.is_empty();
+            if can_hoist_props {
+                if let Some(ref mut hoisted) = hoisted_constants {
+                    let props_str = buf[props_start..].to_string();
+                    // Dedup: check if identical props object already hoisted.
+                    // Reachable only when try_reserve_element_hoist did NOT
+                    // already reserve this element (e.g. is_fully_static
+                    // elements are excluded there but can still reach this
+                    // arm via a cache-eligibility mismatch) — a genuine
+                    // fallback path, not the common case.
+                    if let Some(idx) = hoisted.iter().position(|(c, _)| *c == props_str) {
+                        buf.truncate(props_start);
+                        buf.push_str(&format!("_hoisted_{}", idx + 1));
+                    } else {
+                        // `props_anchors` were recorded at absolute `buf`
+                        // offsets while `buf` still held `props_start`'s own
+                        // prefix — shift them into `props_str`'s own
+                        // coordinate space (relative to `props_start`).
+                        let shifted_anchors = props_anchors
+                            .iter()
+                            .map(|a| SegmentAnchor {
+                                content_offset: a.content_offset - props_start as u32,
+                                ..*a
+                            })
+                            .collect();
+                        hoisted.push((props_str, shifted_anchors));
+                        let idx = hoisted.len();
+                        buf.truncate(props_start);
+                        buf.push_str(&format!("_hoisted_{idx}"));
+                    }
+                }
+            } else if let Some(k) = injected_key {
+                // v-if branch root with user props: inject `key: N` as the
+                // first property. Hoisting is disabled above for this
+                // element.
+                inject_branch_key(buf, props_start, k);
+            } else {
+                // A directive-only prop set (v-show, v-cloak, custom
+                // directives, …) never writes into the props object — an
+                // element with ONLY such directives still reaches this
+                // branch (`has_props` is true because `element.props` is
+                // non-empty) but leaves the object empty. Official Vue
+                // emits `null` for props here, not `{}` — collapse it.
+                let compact: String = buf[props_start..]
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                if compact == "{}" {
+                    buf.truncate(props_start);
+                    buf.push_str("null");
+                }
+            }
+            if props_result.uses_merge {
+                out.add_vdom_import(VdomHelper::MergeProps);
+            }
+            if props_result.uses_normalize_class {
+                out.add_vdom_import(VdomHelper::NormalizeClass);
+            }
+            if props_result.uses_normalize_style {
+                out.add_vdom_import(VdomHelper::NormalizeStyle);
+            }
+            if props_result.uses_with_modifiers {
+                out.add_vdom_import(VdomHelper::WithModifiers);
+            }
+            if props_result.uses_is_ref {
+                out.add_vdom_import(VdomHelper::IsRef);
+            }
+            if props_result.uses_with_keys {
+                out.add_vdom_import(VdomHelper::WithKeys);
+            }
+            if props_result.uses_normalize_props {
+                out.add_vdom_import(VdomHelper::NormalizeProps);
+            }
+            if props_result.uses_guard_reactive_props {
+                out.add_vdom_import(VdomHelper::GuardReactiveProps);
+            }
+            if props_result.uses_to_handlers {
+                out.add_vdom_import(VdomHelper::ToHandlers);
+            }
+            if props_result.uses_to_display_string {
+                out.add_vdom_import(VdomHelper::ToDisplayString);
+            }
+            (
+                props_result.dynamic_props,
+                props_result.has_dynamic_ref,
+                props_result.native_vmodel,
+                props_result.directive_entries,
+                props_result.has_hydration_binding,
+                props_result.has_dynamic_key,
+            )
+        }
+    } else if let Some(k) = injected_key {
+        if let Some(idx) = pre_reserved_hoist {
+            buf.push_str(", _hoisted_");
+            buf.push_str(&idx.to_string());
+            (Vec::new(), false, None, Vec::new(), false, false)
+        } else {
+            // v-if branch root with no user props: the branch key IS the props
+            // object — `_createElementBlock("p", { key: 0 }, …)`. Official
+            // `hoistStatic` hoists this fully-static props object to
+            // `_hoisted_N` exactly like a static class/attrs object (see
+            // `can_hoist_props` above) whenever hoisting is enabled, the
+            // element isn't already patch-flag-cached (redundant), and it
+            // isn't a component (mirrors `can_hoist_props`'s own component
+            // exclusion — a component's resolved props aren't guaranteed
+            // constant).
+            let key_props_str = format!("{{ key: {k} }}");
+            let can_hoist_key =
+                options.hoist_static && !has_cached_patchflag && !element.tag_type.is_component();
+            if can_hoist_key {
+                if let Some(ref mut hoisted) = hoisted_constants {
+                    let idx = if let Some(existing) =
+                        hoisted.iter().position(|(c, _)| *c == key_props_str)
+                    {
+                        existing + 1
+                    } else {
+                        hoisted.push((key_props_str.clone(), Vec::new()));
+                        hoisted.len()
+                    };
+                    buf.push_str(", _hoisted_");
+                    buf.push_str(&idx.to_string());
+                } else {
+                    buf.push_str(", ");
+                    buf.push_str(&key_props_str);
+                }
+            } else {
+                buf.push_str(", ");
+                buf.push_str(&key_props_str);
+            }
+            (Vec::new(), false, None, Vec::new(), false, false)
+        }
+    } else {
+        if has_children || patch_flag != 0 {
+            // Need null placeholder for props when there are children or patch flags
+            buf.push_str(", null");
+        }
+        (Vec::new(), false, None, Vec::new(), false, false)
+    };
+    // For components with dynamic bound props, add PATCH_PROPS so that
+    // shouldUpdateComponent can check listed dynamic props.
+    // For plain elements, compute_patch_flags already handles PATCH_PROPS
+    // based on PropFlags::HasDynamicBinding / HasEventListener.
+    // `:ref` / `:key` are excluded from `dynamic_props` (vnode specials). If
+    // they were the only dynamic bindings, clear PATCH_PROPS so we don't pass
+    // a null/empty dynamicProps array that crashes Vue's patcher
+    // (`Cannot read properties of null (reading 'length')`).
+    //
+    // FULL_PROPS (a spread or a dynamic key) diffs every prop, so, as in
+    // official `buildProps`, it replaces PROPS; the name list still rides
+    // along after the flag.
+    let full_props = patch_flag & helpers::PATCH_FULL_PROPS != 0 || has_dynamic_key;
+    if full_props || dynamic_props.is_empty() {
+        patch_flag &= !helpers::PATCH_PROPS;
+    } else {
+        patch_flag |= helpers::PATCH_PROPS;
+    }
+    // Official emits 512 /* NEED_PATCH */ for dynamic refs (an inline
+    // ref_key/ref binding or a dynamic `:ref`) so the patcher traverses and
+    // updates the ref binding. The same flag marks a VNode that needs
+    // special ref/directive patching — native `v-model` and runtime
+    // directives (`v-show`, custom directives) wrapped in `_withDirectives()`
+    // set it too. Like official `buildProps`, it is added only when no props
+    // flag already makes the patcher visit the element: a model whose update
+    // handler is a dynamic prop is `8 /* PROPS */`, not 520.
+    let props_flags = helpers::PATCH_CLASS
+        | helpers::PATCH_STYLE
+        | helpers::PATCH_PROPS
+        | helpers::PATCH_FULL_PROPS;
+    if (has_dynamic_ref || native_vmodel.is_some() || !directive_entries.is_empty())
+        && patch_flag & props_flags == 0
+        && !has_dynamic_key
+    {
+        patch_flag |= helpers::PATCH_NEED_PATCH;
+    }
+    // Official emits 32 /* NEED_HYDRATION */ for any event listener whose
+    // key isn't exactly `onClick`, so async/lazy hydration attaches it
+    // eagerly instead of waiting — see `has_hydration_binding`.
+    if has_hydration_binding {
+        patch_flag |= helpers::PATCH_NEED_HYDRATION;
+    }
+    // A dynamic BIND KEY (`:[expr]`) means the key set itself can change —
+    // official emits FULL_PROPS (16) so the patcher always does a full
+    // diff, since a stale key can't be targeted by name.
+    if has_dynamic_key {
+        patch_flag |= helpers::PATCH_FULL_PROPS;
+    }
+
+    // Children opening
+    if has_children {
+        buf.push_str(", ");
+        match element.children_mode {
+            ChildrenMode::TextOnlyStatic | ChildrenMode::TextOnlyDynamic => {
+                // First child prefix
+                if children[0].kind == ChildKind::Text {
+                    buf.push('"');
+                } else if children[0].kind == ChildKind::Interpolation {
+                    buf.push_str("_toDisplayString");
+                    out.add_vdom_import(VdomHelper::ToDisplayString);
+                }
+            }
+            ChildrenMode::Mixed | ChildrenMode::MultiElement | ChildrenMode::SingleElement => {
+                if let Some(idx) = array_group_cache_index {
+                    buf.push_str("[...(_cache[");
+                    buf.push_str(&idx.to_string());
+                    buf.push_str("] || (_cache[");
+                    buf.push_str(&idx.to_string());
+                    buf.push_str("] = [");
+                } else {
+                    buf.push('[');
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Pre-build patch flag suffix (flag + dynamic props array) once, reuse in both
+    // self-closing and close-tag paths.
+    let patch_suffix: &str = if has_cached_patchflag {
+        // Cached elements always use -1 /* CACHED */ regardless of actual flags
+        if options.is_production {
+            ", -1"
+        } else {
+            ", -1 /* CACHED */"
+        }
+    } else if patch_flag != 0 {
+        let saved = buf.len();
+        buf.push_str(", ");
+        let flag_str =
+            helpers::format_patch_flag(patch_flag, options.is_production, |s| out.alloc_str(s));
+        buf.push_str(flag_str);
+        // Dynamic props array — required when PATCH_PROPS (8) is set.
+        // Vue's runtime reads `n2.dynamicProps` to know which props changed;
+        // omitting this causes `Cannot read properties of null (reading 'length')`.
+        // Under FULL_PROPS (16) official Vue still emits the bound names.
+        if (patch_flag & (helpers::PATCH_PROPS | helpers::PATCH_FULL_PROPS)) != 0
+            && !dynamic_props.is_empty()
+        {
+            buf.push_str(", ");
+            // A component's dynamic-props keys array is never hoisted to a
+            // module-level _hoisted_N — verified against the real compiler
+            // (Teleport, a built-in "component", keeps `["disabled"]`
+            // inline in both topologies). Only plain elements hoist it.
+            let props_hoisted_constants = if element.tag_type.is_component() {
+                None
+            } else {
+                hoisted_constants
+            };
+            let props_ref = format_dynamic_props_ref(&dynamic_props, props_hoisted_constants);
+            buf.push_str(&props_ref);
+        }
+        let suffix = out.alloc_str(&buf[saved..]);
+        buf.truncate(saved);
+        suffix
+    } else {
+        ""
+    };
+
+    // Self-closing or no close tag: single overwrite for entire tag
+    if element.is_self_closing || element.tag_close.is_none() {
+        // Emit PatchFlags for self-closing elements (before closing paren)
+        if has_cached_patchflag || patch_flag != 0 {
+            // Need null children placeholder before patch flags
+            if !has_children {
+                buf.push_str(", null");
+            }
+            buf.push_str(patch_suffix);
+        }
+        buf.push(')');
+        // Close the outer (_openBlock(), ...) wrapper for block root elements
+        if needs_block_wrapper {
+            buf.push(')');
+        }
+        // Close cache wrapper: `_cache[N] = ...)`
+        if has_cache_wrapper {
+            buf.push(')');
+        }
+        // Close _withDirectives() wrapper for v-model, v-show, custom directives
+        emit_with_directives_close(buf, &native_vmodel, &directive_entries, out);
+        out.overwrite(tag_open.start, tag_open.end, buf);
+
+        return ChildRecord {
+            start: tag_open.start,
+            end: tag_open.end,
+            kind: ChildKind::Element,
+            condition: None,
+            condition_prefix: None,
+        };
+    }
+
+    // Overwrite open tag.
+    // Extend the overwrite end to children[0].start (if children exist) to
+    // consume any whitespace gap between `>` and the first child. The tokenizer
+    // silently drops all-whitespace text segments before entities, so these
+    // gaps aren't represented in the AST but still exist in the source.
+    let open_end = if has_children {
+        children[0].start
+    } else {
+        tag_open.end
+    };
+    out.overwrite(tag_open.start, open_end, buf);
+
+    // Step 3b: Remove whitespace gaps between consecutive children.
+    // The tokenizer silently drops all-whitespace text segments before entities,
+    // so gaps can exist between any adjacent children (e.g., between &gt; and
+    // &lt; entities separated by a newline). Overwrite these gaps to "".
+    for i in 1..children.len() {
+        let prev_end = children[i - 1].end;
+        let next_start = children[i].start;
+        if next_start > prev_end {
+            out.overwrite(prev_end, next_start, "");
+        }
+    }
+
+    // Step 4: Add children separators (and text run wrapping for array modes)
+    let ast_children = element
+        .content
+        .as_ref()
+        .map(|c| c.children.as_slice())
+        .unwrap_or(&[]);
+    add_children_separators(
+        children,
+        element.children_mode,
+        out,
+        options,
+        source,
+        ast,
+        ast_children,
+        text_run_cache_indices,
+    );
+
+    // Step 5: Build close tag overwrite (reuse buffer)
+    buf.clear();
+    let tag_close = element.tag_close.as_ref().unwrap();
+
+    // Children closing
+    if has_children {
+        match element.children_mode {
+            ChildrenMode::TextOnlyStatic | ChildrenMode::TextOnlyDynamic => {
+                // Last child suffix
+                let last_kind = children.last().map(|c| c.kind).unwrap_or(ChildKind::Text);
+                if last_kind == ChildKind::Text {
+                    buf.push('"');
+                }
+                // Interpolation already ends with ) from interpolation.rs
+            }
+            ChildrenMode::Mixed | ChildrenMode::MultiElement | ChildrenMode::SingleElement => {
+                if array_group_cache_index.is_some() {
+                    buf.push_str("]))]");
+                } else {
+                    buf.push(']');
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Patch flag (only if non-zero or cached) — reuse pre-built suffix
+    if has_cached_patchflag || patch_flag != 0 {
+        // Need null children placeholder before patch flags (mirrors the
+        // self-closing branch above — an explicit close tag with no
+        // children, e.g. `<p v-text="x"></p>`, still needs the `null`
+        // positional children argument before the patch flag).
+        if !has_children {
+            buf.push_str(", null");
+        }
+        buf.push_str(patch_suffix);
+    }
+
+    buf.push(')');
+    // Close the outer (_openBlock(), ...) wrapper for block root elements
+    if needs_block_wrapper {
+        buf.push(')');
+    }
+    // Close cache wrapper: `_cache[N] = ...)`
+    if has_cache_wrapper {
+        buf.push(')');
+    }
+    // Close _withDirectives() wrapper for v-model, v-show, custom directives
+    emit_with_directives_close(buf, &native_vmodel, &directive_entries, out);
+    // Extend the close tag overwrite start back to the last child's end
+    // to consume trailing whitespace gaps (same reason as open tag above).
+    let close_start = if has_children {
+        children.last().unwrap().end
+    } else {
+        tag_close.start
+    };
+    out.overwrite(close_start, tag_close.end, buf);
+
+    // Return child record for the parent
+    ChildRecord {
+        start: tag_open.start,
+        end: tag_close.end,
+        kind: ChildKind::Element,
+        condition: None,
+        condition_prefix: None,
+    }
+}
+
+#[cfg(test)]
+#[path = "element_tests.rs"]
+mod tests;

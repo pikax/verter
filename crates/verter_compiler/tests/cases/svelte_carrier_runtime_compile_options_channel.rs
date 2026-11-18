@@ -23,8 +23,7 @@ use verter_compiler::framework_common::{
     SvelteHostIntegrationBackend, SvelteHostRuntimeRenderDemand,
 };
 use verter_language::carrier_grammar::{
-    CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-    FrameworkAdapterSemanticVersion,
+    CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
 };
 use verter_language::registered_source_authority::{
     CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -43,7 +42,7 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
         )
         .expect("registered source");
     let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
-    let config = CarrierGrammarConfig::Svelte;
+    let config = verter_compiler::svelte::svelte_grammar_config();
     grammar_authority
         .register_carrier_grammar(
             language,

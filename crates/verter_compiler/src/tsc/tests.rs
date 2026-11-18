@@ -2,6 +2,42 @@ use super::script::{
     generate_tsc_output_with_options, FallthroughPropsProjection, MacroTscInput, TscGenOptions,
     TscMode,
 };
+#[test]
+fn declaration_dependency_erases_only_the_selected_value_initializer() {
+    let source = "const unused = effect(), marker: unique symbol = Symbol();";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .with_config(oxc_parser::config::TokensParserConfig)
+            .parse();
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .build(&parsed.program)
+        .semantic;
+    let declaration = parsed.program.body[0].as_declaration().unwrap();
+    let emitted = super::script::render_declaration_dependency(
+        declaration,
+        &parsed.tokens,
+        semantic.scoping(),
+        source,
+        20,
+        "marker",
+    )
+    .unwrap();
+    assert_eq!(emitted.text(), "declare const marker: unique symbol;");
+    assert!(emitted.mappings().iter().any(|mapping| mapping
+        .source_span
+        .is_some_and(|span| { span.start == 20 + source.find("marker").unwrap() as u32 })));
+    assert!(super::script::render_declaration_dependency(
+        declaration,
+        &parsed.tokens,
+        semantic.scoping(),
+        source,
+        20,
+        "unused"
+    )
+    .is_none());
+}
+
 use oxc_sourcemap::SourceMap;
 use verter_macro_dto::{
     AuthoredMemberOrdinal, MacroAnchor, MacroFailure, MacroInvalidReason, MacroPartialReason,
@@ -2450,11 +2486,47 @@ fn tsc_codegen_define_model_modifiers_props() {
         };
         assert_generated_tsx_parses(&output);
         let modifier_type = typed_modifiers.unwrap_or("Record<string, true | undefined>");
-        assert!(
-            output.contains(&format!("{name}?: {modifier_type}")),
+        let member = format!("{name}?: {modifier_type}");
+        assert_eq!(
+            modifiers_member(&output, name),
+            member,
             "{call}: missing optional modifiers prop in declaration:\n{output}"
         );
+
+        // The IDE public constructor publishes the same modifiers prop as the
+        // declaration, so the editor and the emitted types accept the same keys.
+        let setup = format!("const model = {call}");
+        let ide = crate::project_public_constructor(
+            None,
+            Some(crate::ScriptBlockInput {
+                content: &setup,
+                content_start: 0,
+                lang: Some(crate::cursor::ScriptLanguage::TypeScript),
+            }),
+            None,
+        )
+        .expect("the IDE public constructor projects")
+        .declaration()
+        .expect("script setup renders a public declaration");
+        assert_eq!(
+            modifiers_member(&ide, name),
+            member,
+            "{call}: the IDE public constructor disagrees with the declaration:\n{ide}"
+        );
     }
+}
+
+/// The `name?: type` modifiers member a props type literal publishes.
+fn modifiers_member<'a>(output: &'a str, name: &str) -> &'a str {
+    let key = format!("{name}?: ");
+    let start = output
+        .find(&key)
+        .unwrap_or_else(|| panic!("no {key} member in:\n{output}"));
+    let rest = &output[start..];
+    let end = rest
+        .find([';', '}'])
+        .unwrap_or_else(|| panic!("unterminated {key} member in:\n{output}"));
+    rest[..end].trim_end()
 }
 
 // ── defineModel with imported type ──────────────────────────────────────────

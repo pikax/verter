@@ -15,6 +15,54 @@ use super::{
 const TSCONFIG: &str = "d:/ws/tsconfig.json";
 const COMPANION: &str = "d:/ws/src/Foo.vue.tsx";
 
+#[test]
+fn companions_preserve_the_implicit_default_include() {
+    let augmented = augment_tsconfig_bytes(
+        r#"{"compilerOptions":{"strict":true}}"#,
+        &[COMPANION.into()],
+    );
+    let actual: serde_json::Value = serde_json::from_str(&augmented).unwrap();
+    assert_eq!(actual["include"], serde_json::json!(["**/*"]));
+    assert_eq!(actual["files"], serde_json::json!([COMPANION]));
+    let explicit_empty = augment_tsconfig_bytes(r#"{"include":[]}"#, &[COMPANION.into()]);
+    let actual: serde_json::Value = serde_json::from_str(&explicit_empty).unwrap();
+    assert_eq!(actual["include"], serde_json::json!([]));
+}
+
+#[test]
+fn companions_merge_extends_aware_roots_from_the_config_owner() {
+    use crate::memory::{MemoryOptions, MemoryWorkspace};
+    let ws = MemoryWorkspace::new(MemoryOptions {
+        roots: vec!["/workspace".into()],
+        default_resolve_extensions: None,
+    });
+    ws.inject_file(
+        "/workspace/base.json".into(),
+        Arc::from(r#"{"files":["ambient.d.ts"],"include":["src/*.vue"]}"#),
+    );
+    let user = r#"{"extends":"../base.json"}"#;
+    ws.inject_file("/workspace/app/tsconfig.json".into(), Arc::from(user));
+    let membership = crate::config::load_project_membership(&ws, "/workspace/app/tsconfig.json");
+    let bytes = super::augment_tsconfig_bytes_with(
+        user,
+        &[COMPANION.into()],
+        &super::VirtualConfigOverrides {
+            effective_membership: Some(&membership),
+            ..Default::default()
+        },
+    );
+    let actual: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+    assert_eq!(actual["extends"], "../base.json");
+    assert_eq!(
+        actual["files"],
+        serde_json::json!(["/workspace/ambient.d.ts", COMPANION])
+    );
+    assert_eq!(
+        actual["include"],
+        serde_json::json!(["/workspace/src/*.vue"])
+    );
+}
+
 /// A real-dir source that knows one directory's entries (the rest fall through).
 #[derive(Debug)]
 struct OneDirSource {
@@ -277,5 +325,47 @@ fn strip_folds_case_and_slash_divergent_companion() {
         filtered.len(),
         1,
         "exactly the two divergent-form companion diagnostics are removed"
+    );
+}
+
+#[test]
+fn checking_overrides_preserve_authored_keys_and_work_without_carriers() {
+    let user = r#"{"extends":"./base.json","include":["src/**/*"],"exclude":["dist"],"files":["authored.ts"],"references":[{"path":"../other"}],"compilerOptions":{"rootDir":"src","jsx":"preserve","paths":{"@/*":["src/*"]},"types":["node"],"lib":["ES2022"],"composite":true,"noEmit":false,"allowArbitraryExtensions":false}}"#;
+    let authored: serde_json::Value = serde_json::from_str(user).unwrap();
+    for paths in [vec![], vec!["/project/View.vue.ts".to_string()]] {
+        let bytes = super::augment_tsconfig_bytes_with(
+            user,
+            &paths,
+            &super::VirtualConfigOverrides {
+                no_emit: true,
+                non_composite: true,
+                allow_arbitrary_extensions: true,
+                ..Default::default()
+            },
+        );
+        let actual: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+        let mut expected = authored.clone();
+        expected["compilerOptions"]["noEmit"] = true.into();
+        expected["compilerOptions"]["composite"] = false.into();
+        expected["compilerOptions"]["allowArbitraryExtensions"] = true.into();
+        for path in paths {
+            expected["files"].as_array_mut().unwrap().push(path.into());
+        }
+        assert_eq!(actual, expected);
+    }
+    let bytes = super::augment_tsconfig_bytes_with(
+        "{}",
+        &[],
+        &super::VirtualConfigOverrides {
+            no_emit: true,
+            non_composite: true,
+            allow_arbitrary_extensions: true,
+            ..Default::default()
+        },
+    );
+    let actual: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+    assert_eq!(
+        actual,
+        serde_json::json!({"compilerOptions":{"noEmit":true,"composite":false,"allowArbitraryExtensions":true}})
     );
 }

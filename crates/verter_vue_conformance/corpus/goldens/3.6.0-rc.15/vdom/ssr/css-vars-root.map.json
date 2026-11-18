@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/ssr/css-vars-root.vue"
+  ],
+  "names": [],
+  "mappings": ";;qBAMK,KAAK,EAAC,GAAG;;;wBAAZ,oBAAqB,KAArB,UAAqB,EAAR,MAAI",
+  "sourcesContent": [
+    "\n  <p class=\"a\">text</p>\n"
+  ]
+}

@@ -1517,10 +1517,10 @@ const COMMITTED_CELL_RECORD: &str = include_str!("../../svelte_conformance_cell_
 /// (adapter, carrier language, framework epoch, host epoch) and drifts
 /// with them.
 fn bound_host_route() -> String {
-    use verter_compiler::framework_common::{built_in_host_integration_catalog, CatalogCapability};
-    let identity = built_in_host_integration_catalog()
-        .iter()
-        .map(|row| row.identity())
+    use verter_compiler::framework_common::{CarrierCompilerBackendRegistry, CatalogCapability};
+    let identity = CarrierCompilerBackendRegistry::built_in()
+        .rows()
+        .map(|row| row.host_identity())
         .find(|identity| {
             identity.capability() == CatalogCapability::HostIntegration
                 && identity.adapter_id() == &verter_language::FrameworkAdapterId::svelte()
@@ -1533,7 +1533,7 @@ fn bound_host_route() -> String {
          svelte::runtime::compile_client",
         identity.adapter_id().as_str(),
         identity.carrier_language_id().as_str(),
-        identity.epoch().as_str(),
+        identity.framework_family(),
         identity
             .host_epoch()
             .expect("a host-integration row carries a host epoch")

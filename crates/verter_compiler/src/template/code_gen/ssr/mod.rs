@@ -35,19 +35,19 @@ use crate::template::oxc::types::{
 use crate::types::{NodeId, NodeProp};
 use crate::utils::vue::tag::is_void_tag;
 
-use crate::code_transform::SegmentAnchor;
+use crate::code_transform::{AnchorKind, SegmentAnchor};
 
-use super::binding::{BindingResolver, ReactivityLevel};
-use super::expression::build_prefixed_expr_segments;
-use super::shared::helpers::{self, is_builtin_component, to_pascal_case, SsrHelper, VdomHelper};
-use super::types::{CodeGenOutput, SegmentedOverwriteAuthority};
+use super::shared::helpers::{self, is_builtin_component, SsrHelper, VdomHelper};
+use super::types::CodeGenOutput;
 use super::vdom::element::resolve_expr;
-use super::vdom::props::{camelize, format_event_handler_key_into, needs_quoted_key};
+use super::vdom::props::needs_quoted_key;
 use super::{TemplateCodeGen, TemplateCodeGenOptions};
+use crate::template::binding::prefixed_expr::build_prefixed_expr_segments;
+use crate::template::binding::{BindingResolver, ReactivityLevel};
+use crate::template::vue_syntax::to_pascal_case;
+use crate::template::vue_syntax::{camelize, format_event_handler_key_into};
 
-mod props_object;
-
-use props_object::{PropsObject, PropsSlot};
+use crate::framework::vue::ssr::props_object::{PropsObject, PropsSlot};
 
 /// What each element pushed onto `elem_ctx` means for `leave_element`.
 #[derive(Debug, Clone, PartialEq)]
@@ -140,11 +140,11 @@ pub struct SsrCodeGen<'ast, 'alloc> {
     /// attribute check (`_ssrIncludeBooleanAttr(... ? _ssrLooseContain : _ssrLooseEqual)`).
     select_v_model_expr: Option<String>,
     /// Start position of an implicit default slot that was opened before named
-    /// slots. Used by `leave_element` to reorder default slot after named slots
-    /// via `move_slice`.
+    /// slots. Used by `leave_element` to relocate the default slot after the
+    /// named slots.
     default_slot_move_start: Option<u32>,
-    /// End position (exclusive) of the default slot range to move. Set when
-    /// the default slot is closed because a `<template v-slot>` was encountered.
+    /// End (exclusive) of the default slot run to relocate: the end of the
+    /// opening tag of the `<template v-slot>` that closed the default slot.
     default_slot_move_end: Option<u32>,
     /// Saved move tracking for nested component scopes.
     saved_default_slot_move: Vec<(Option<u32>, Option<u32>)>,
@@ -3212,6 +3212,7 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                         content_offset: PREFIX.len() as u32 + 2 + offset_in_attrs_obj,
                         length: "class".len() as u32,
                         source_pos,
+                        kind: AnchorKind::Exact,
                     });
                 }
                 format!(
@@ -4155,31 +4156,13 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
         if effective_count == 0 {
             // Empty template
             self.absorb_pending_comment_removals(root.tag_open.start, close_end);
-            out.overwrite_segmented(
-                root.tag_open.start,
-                close_end,
-                &fn_sig,
-                &[],
-                SegmentedOverwriteAuthority::new(),
-            );
+            out.overwrite_segmented(root.tag_open.start, close_end, &fn_sig, &[]);
             out.prepend_static(close_end, "}");
         } else {
             self.absorb_pending_comment_removals(root.tag_open.start, root.tag_open.end);
-            out.overwrite_segmented(
-                root.tag_open.start,
-                root.tag_open.end,
-                &fn_sig,
-                &[],
-                SegmentedOverwriteAuthority::new(),
-            );
+            out.overwrite_segmented(root.tag_open.start, root.tag_open.end, &fn_sig, &[]);
             self.absorb_pending_comment_removals(close_start, close_end);
-            out.overwrite_segmented(
-                close_start,
-                close_end,
-                "}",
-                &[],
-                SegmentedOverwriteAuthority::new(),
-            );
+            out.overwrite_segmented(close_start, close_end, "}", &[]);
         }
 
         // Any disabled-comment removal not absorbed by a claimed header
@@ -4591,13 +4574,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                             dynamic_expr, props_str, sid_arg
                         );
                         let el_end = self.el_end(el);
-                        out.overwrite_segmented(
-                            el.tag_open.start,
-                            el_end,
-                            &self.buf,
-                            &[],
-                            SegmentedOverwriteAuthority::new(),
-                        );
+                        out.overwrite_segmented(el.tag_open.start, el_end, &self.buf, &[]);
                         self.elem_ctx.push(ElemCtx::Complete);
                     } else {
                         // Has children — render as slot content like regular components
@@ -4651,13 +4628,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                             self.scoped_slot_entered.push(false);
                         }
 
-                        out.overwrite_segmented(
-                            el.tag_open.start,
-                            el.tag_open.end,
-                            &self.buf,
-                            &[],
-                            SegmentedOverwriteAuthority::new(),
-                        );
+                        out.overwrite_segmented(el.tag_open.start, el.tag_open.end, &self.buf, &[]);
                         self.in_push = false;
                         self.in_component_slots += 1;
                         self.elem_ctx.push(ElemCtx::DynamicComponentWithSlots);
@@ -4677,13 +4648,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                         self.buf.clear();
                         let _ = writeln!(self.buf, "_ssrRenderSuspense(_push, {{}})");
                         let el_end = self.el_end(el);
-                        out.overwrite_segmented(
-                            el.tag_open.start,
-                            el_end,
-                            &self.buf,
-                            &[],
-                            SegmentedOverwriteAuthority::new(),
-                        );
+                        out.overwrite_segmented(el.tag_open.start, el_end, &self.buf, &[]);
                         self.elem_ctx.push(ElemCtx::Complete);
                     } else {
                         let has_named_slots = self.has_template_slot_children(el);
@@ -4705,13 +4670,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                             self.buf
                                 .push_str("_ssrRenderSuspense(_push, {\ndefault: () => {\n");
                         }
-                        out.overwrite_segmented(
-                            el.tag_open.start,
-                            el.tag_open.end,
-                            &self.buf,
-                            &[],
-                            SegmentedOverwriteAuthority::new(),
-                        );
+                        out.overwrite_segmented(el.tag_open.start, el.tag_open.end, &self.buf, &[]);
                         self.in_push = false;
                         self.in_component_slots += 1;
                         self.suspense_implicit_default_open = has_named_slots && has_bare;
@@ -4782,13 +4741,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
 
                     // Insert into push stream
                     if self.in_push {
-                        out.overwrite_segmented(
-                            el.tag_open.start,
-                            el.tag_open.end,
-                            &self.buf,
-                            &[],
-                            SegmentedOverwriteAuthority::new(),
-                        );
+                        out.overwrite_segmented(el.tag_open.start, el.tag_open.end, &self.buf, &[]);
                     } else {
                         out.overwrite_fmt(
                             el.tag_open.start,
@@ -4811,13 +4764,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                         | "base-transition"
                 ) {
                     // Remove the opening tag — children render directly.
-                    out.overwrite_segmented(
-                        el.tag_open.start,
-                        el.tag_open.end,
-                        "",
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(el.tag_open.start, el.tag_open.end, "", &[]);
                     self.elem_ctx.push(ElemCtx::TransparentBuiltin);
                     return super::WalkAction::Continue;
                 }
@@ -4889,13 +4836,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     self.buf.clear();
                     self.buf
                         .push_str("_ssrRenderTeleport(_push, (_push) => {\n");
-                    out.overwrite_segmented(
-                        el.tag_open.start,
-                        el.tag_open.end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(el.tag_open.start, el.tag_open.end, &self.buf, &[]);
                     self.in_push = false;
                     self.in_component_slots += 1;
                     self.elem_ctx.push(ElemCtx::TeleportBody);
@@ -5298,13 +5239,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     component_ref, props_expr, sid_arg
                 );
                 let el_end = self.el_end(el);
-                out.overwrite_segmented(
-                    el.tag_open.start,
-                    el_end,
-                    &self.buf,
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                out.overwrite_segmented(el.tag_open.start, el_end, &self.buf, &[]);
                 self.elem_ctx.push(ElemCtx::Complete);
             } else {
                 // Has children — emit slot wrappers via _withCtx.
@@ -5364,13 +5299,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     self.scoped_slot_entered.push(false);
                 }
 
-                out.overwrite_segmented(
-                    el.tag_open.start,
-                    el.tag_open.end,
-                    &self.buf,
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                out.overwrite_segmented(el.tag_open.start, el.tag_open.end, &self.buf, &[]);
                 self.in_push = false;
                 self.in_component_slots += 1;
                 self.elem_ctx.push(ElemCtx::ComponentWithSlots);
@@ -5396,6 +5325,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             // close it before starting the named slot.
             // Skip this when inside Suspense — the outer component's default slot
             // is NOT being closed here; the Suspense implicit default is handled below.
+            let mut default_run_ends_here = false;
             if !in_suspense && self.default_slot_open {
                 self.close_push(el.tag_open.start, out);
                 // Walk up to parent component to generate VDOM fallback for default children
@@ -5413,8 +5343,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 let _ = write!(self.buf, "}} else {{\nreturn {}\n}}\n}}),", vdom_fallback);
                 out.prepend_alloc(el.tag_open.start, &self.buf);
                 self.default_slot_open = false;
-                // Record end for reordering: +1 to include the Inserted chunk at this pos
-                self.default_slot_move_end = Some(el.tag_open.start + 1);
+                // The default slot run is relocated after the named slots. A
+                // relocation carries the edits inside its range and the
+                // insertions at its start, never those at its end, and every
+                // closing insertion of the default slot (its last child's,
+                // the push literal's, the fallback branch) sits at this tag's
+                // start. So the run ends past this opening tag: the tag is
+                // removed inside the run and the named slot opens with an
+                // insertion at the tag's end, which stays in place.
+                self.default_slot_move_end = Some(el.tag_open.end);
+                default_run_ends_here = true;
             }
 
             let slot_name = if let Some(ref v_slot) = el.v_slot {
@@ -5448,13 +5386,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     self.suspense_implicit_default_open = false;
                 }
                 let _ = write!(self.buf, "\n{}: () => {{\n", slot_name);
-                out.overwrite_segmented(
-                    el.tag_open.start,
-                    el.tag_open.end,
-                    &self.buf,
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                out.overwrite_segmented(el.tag_open.start, el.tag_open.end, &self.buf, &[]);
                 self.in_push = false;
                 self.elem_ctx.push(ElemCtx::SuspenseSlotTemplate);
             } else {
@@ -5463,13 +5395,12 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     "\n{}: _withCtx(({}, _push, _parent, _scopeId) => {{\nif (_push) {{\n",
                     slot_name, params
                 );
-                out.overwrite_segmented(
-                    el.tag_open.start,
-                    el.tag_open.end,
-                    &self.buf,
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                if default_run_ends_here {
+                    out.overwrite_segmented(el.tag_open.start, el.tag_open.end, "", &[]);
+                    out.prepend_alloc(el.tag_open.end, &self.buf);
+                } else {
+                    out.overwrite_segmented(el.tag_open.start, el.tag_open.end, &self.buf, &[]);
+                }
                 self.in_push = false;
                 // Track scoped slot depth for child component DYNAMIC flag
                 let is_scoped = params != "_";
@@ -5512,13 +5443,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     "_ssrRenderSlot(_ctx.$slots, {}, {}, () => {{",
                     name_arg, props
                 );
-                out.overwrite_segmented(
-                    el.tag_open.start,
-                    el.tag_open.end,
-                    &self.buf,
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                out.overwrite_segmented(el.tag_open.start, el.tag_open.end, &self.buf, &[]);
                 self.in_push = false;
                 self.elem_ctx.push(ElemCtx::SlotOutletFallback);
                 self.depth += 1;
@@ -5529,13 +5454,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     name_arg, props, sid_arg
                 );
                 let el_end = self.el_end(el);
-                out.overwrite_segmented(
-                    el.tag_open.start,
-                    el_end,
-                    &self.buf,
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                out.overwrite_segmented(el.tag_open.start, el_end, &self.buf, &[]);
                 self.elem_ctx.push(ElemCtx::Complete);
             }
             return super::WalkAction::Continue;
@@ -5553,21 +5472,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             let skip_frag = el.v_for.is_none() && self.has_single_element_child(el, source);
             self.ensure_push(el.tag_open.start, out);
             if skip_frag {
-                out.overwrite_segmented(
-                    el.tag_open.start,
-                    el.tag_open.end,
-                    "",
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                out.overwrite_segmented(el.tag_open.start, el.tag_open.end, "", &[]);
             } else {
-                out.overwrite_segmented(
-                    el.tag_open.start,
-                    el.tag_open.end,
-                    "<!--[-->",
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                out.overwrite_segmented(el.tag_open.start, el.tag_open.end, "<!--[-->", &[]);
             }
             self.depth += 1;
             self.elem_ctx.push(ElemCtx::InParentPush);
@@ -5589,13 +5496,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 let _ = write!(self.buf, "</{}>", tag_name);
             }
             let el_end = self.el_end(el);
-            out.overwrite_segmented(
-                el.tag_open.start,
-                el_end,
-                &self.buf,
-                &[],
-                SegmentedOverwriteAuthority::new(),
-            );
+            out.overwrite_segmented(el.tag_open.start, el_end, &self.buf, &[]);
             self.elem_ctx.push(ElemCtx::Complete);
             return super::WalkAction::Continue;
         }
@@ -5611,13 +5512,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 let _ = write!(self.buf, "</{}>", tag_name);
             }
             let el_end = self.el_end(el);
-            out.overwrite_segmented(
-                el.tag_open.start,
-                el_end,
-                &self.buf,
-                &[],
-                SegmentedOverwriteAuthority::new(),
-            );
+            out.overwrite_segmented(el.tag_open.start, el_end, &self.buf, &[]);
             self.elem_ctx.push(ElemCtx::Complete);
             return super::WalkAction::Continue;
         }
@@ -5644,13 +5539,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     let _ = write!(self.buf, "${{_ssrInterpolate({})}}", model_expr);
                     let _ = write!(self.buf, "</{}>", tag_name);
                     let el_end = self.el_end(el);
-                    out.overwrite_segmented(
-                        el.tag_open.start,
-                        el_end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(el.tag_open.start, el_end, &self.buf, &[]);
                     self.elem_ctx.push(ElemCtx::Complete);
                     return super::WalkAction::Continue;
                 } else {
@@ -5666,13 +5555,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     }
                     let _ = write!(self.buf, "</{}>", tag_name);
                     let el_end = self.el_end(el);
-                    out.overwrite_segmented(
-                        el.tag_open.start,
-                        el_end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(el.tag_open.start, el_end, &self.buf, &[]);
                     self.elem_ctx.push(ElemCtx::Complete);
                     return super::WalkAction::Continue;
                 }
@@ -5685,13 +5568,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             self.buf.clear();
             let _ = write!(self.buf, "<{}{}{}>", tag_name, attrs_str, sid);
             let el_end = self.el_end(el);
-            out.overwrite_segmented(
-                el.tag_open.start,
-                el_end,
-                &self.buf,
-                &[],
-                SegmentedOverwriteAuthority::new(),
-            );
+            out.overwrite_segmented(el.tag_open.start, el_end, &self.buf, &[]);
             self.elem_ctx.push(ElemCtx::Complete);
             return super::WalkAction::Continue;
         }
@@ -5702,6 +5579,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             content_offset: 0,
             length: 0,
             source_pos: 0,
+            kind: AnchorKind::Point,
         }];
         let anchor_count = if !self.in_push {
             // Not inside a push — open a new push (for root or standalone)
@@ -5716,8 +5594,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             if let Some(anchor) = attrs_anchor {
                 anchors[0] = SegmentAnchor {
                     content_offset: attrs_offset + anchor.content_offset,
-                    length: anchor.length,
-                    source_pos: anchor.source_pos,
+                    ..anchor
                 };
                 1
             } else {
@@ -5736,8 +5613,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             if let Some(anchor) = attrs_anchor {
                 anchors[0] = SegmentAnchor {
                     content_offset: attrs_offset + anchor.content_offset,
-                    length: anchor.length,
-                    source_pos: anchor.source_pos,
+                    ..anchor
                 };
                 1
             } else {
@@ -5749,7 +5625,6 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             el.tag_open.end,
             &self.buf,
             &anchors[..anchor_count],
-            SegmentedOverwriteAuthority::new(),
         );
         self.depth += 1;
         super::WalkAction::Continue
@@ -5798,13 +5673,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     let _ = write!(self.buf, "</{}>", tag_name);
                 }
                 if let Some(ref tc) = el.tag_close {
-                    out.overwrite_segmented(
-                        tc.start,
-                        tc.end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(tc.start, tc.end, &self.buf, &[]);
                 } else {
                     out.prepend_alloc(el.tag_open.end, &self.buf);
                 }
@@ -5827,13 +5696,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     }
 
                     if let Some(ref tc) = el.tag_close {
-                        out.overwrite_segmented(
-                            tc.start,
-                            tc.end,
-                            &self.buf,
-                            &[],
-                            SegmentedOverwriteAuthority::new(),
-                        );
+                        out.overwrite_segmented(tc.start, tc.end, &self.buf, &[]);
                     } else {
                         out.prepend_alloc(el.tag_open.end, &self.buf);
                     }
@@ -5867,13 +5730,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     }
 
                     if let Some(ref tc) = el.tag_close {
-                        out.overwrite_segmented(
-                            tc.start,
-                            tc.end,
-                            &self.buf,
-                            &[],
-                            SegmentedOverwriteAuthority::new(),
-                        );
+                        out.overwrite_segmented(tc.start, tc.end, &self.buf, &[]);
                     } else {
                         out.prepend_alloc(el.tag_open.end, &self.buf);
                     }
@@ -5938,13 +5795,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 }
 
                 if let Some(ref tc) = el.tag_close {
-                    out.overwrite_segmented(
-                        tc.start,
-                        tc.end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(tc.start, tc.end, &self.buf, &[]);
                 } else {
                     let el_end = self.el_end(el);
                     out.prepend_alloc(el_end, &self.buf);
@@ -5954,7 +5805,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     self.default_slot_move_start.take(),
                     self.default_slot_move_end.take(),
                 ) {
-                    out.move_slice(move_start, move_end, close_pos);
+                    out.relocate(move_start, move_end, close_pos, "", "");
                 }
                 // Restore outer default_slot_open state
                 self.default_slot_open = self.saved_default_slot_open.pop().unwrap_or(false);
@@ -6011,13 +5862,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 }
 
                 if let Some(ref tc) = el.tag_close {
-                    out.overwrite_segmented(
-                        tc.start,
-                        tc.end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(tc.start, tc.end, &self.buf, &[]);
                 } else {
                     let el_end = self.el_end(el);
                     out.prepend_alloc(el_end, &self.buf);
@@ -6027,7 +5872,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     self.default_slot_move_start.take(),
                     self.default_slot_move_end.take(),
                 ) {
-                    out.move_slice(move_start, move_end, close_pos);
+                    out.relocate(move_start, move_end, close_pos, "", "");
                 }
                 self.default_slot_open = self.saved_default_slot_open.pop().unwrap_or(false);
                 if let Some((ms, me)) = self.saved_default_slot_move.pop() {
@@ -6055,13 +5900,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 let _ = write!(self.buf, "}} else {{\nreturn {}\n}}\n}}),", vdom_fallback);
 
                 if let Some(ref tc) = el.tag_close {
-                    out.overwrite_segmented(
-                        tc.start,
-                        tc.end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(tc.start, tc.end, &self.buf, &[]);
                 } else {
                     let el_end = self.el_end(el);
                     out.prepend_alloc(el_end, &self.buf);
@@ -6080,13 +5919,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 self.buf.push_str("},");
 
                 if let Some(ref tc) = el.tag_close {
-                    out.overwrite_segmented(
-                        tc.start,
-                        tc.end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(tc.start, tc.end, &self.buf, &[]);
                 } else {
                     let el_end = self.el_end(el);
                     out.prepend_alloc(el_end, &self.buf);
@@ -6107,13 +5940,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 let _ = writeln!(self.buf, "}}, _push, _parent{})", sid_arg);
 
                 if let Some(ref tc) = el.tag_close {
-                    out.overwrite_segmented(
-                        tc.start,
-                        tc.end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(tc.start, tc.end, &self.buf, &[]);
                 } else {
                     let el_end = self.el_end(el);
                     out.prepend_alloc(el_end, &self.buf);
@@ -6140,13 +5967,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 }
 
                 if let Some(ref tc) = el.tag_close {
-                    out.overwrite_segmented(
-                        tc.start,
-                        tc.end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(tc.start, tc.end, &self.buf, &[]);
                 } else {
                     let el_end = self.el_end(el);
                     out.prepend_alloc(el_end, &self.buf);
@@ -6155,13 +5976,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             ElemCtx::TransparentBuiltin => {
                 // Remove closing tag — children already rendered directly.
                 if let Some(ref tc) = el.tag_close {
-                    out.overwrite_segmented(
-                        tc.start,
-                        tc.end,
-                        "",
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(tc.start, tc.end, "", &[]);
                 }
             }
             ElemCtx::TransitionGroupTag(ref tg_tag) => {
@@ -6197,13 +6012,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 let _ = writeln!(self.buf, "}}{}", closing_args);
 
                 if let Some(ref tc) = el.tag_close {
-                    out.overwrite_segmented(
-                        tc.start,
-                        tc.end,
-                        &self.buf,
-                        &[],
-                        SegmentedOverwriteAuthority::new(),
-                    );
+                    out.overwrite_segmented(tc.start, tc.end, &self.buf, &[]);
                 } else {
                     let el_end = self.el_end(el);
                     out.prepend_alloc(el_end, &self.buf);
@@ -6279,22 +6088,10 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             //   4. Between two elements AND text contains \r or \n
             // Otherwise: condense to a single space.
             if self.should_remove_whitespace_node(id, content) {
-                out.overwrite_segmented(
-                    text.start,
-                    text.end,
-                    "",
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                out.overwrite_segmented(text.start, text.end, "", &[]);
             } else {
                 self.ensure_push(text.start, out);
-                out.overwrite_segmented(
-                    text.start,
-                    text.end,
-                    " ",
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                out.overwrite_segmented(text.start, text.end, " ", &[]);
             }
         } else {
             self.ensure_push(text.start, out);
@@ -6305,13 +6102,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             // Apply full SSR text escaping: decode entities → escape HTML → escape template literal.
             let escaped = escape_ssr_text(&condensed);
             if escaped != content {
-                out.overwrite_segmented(
-                    text.start,
-                    text.end,
-                    &escaped,
-                    &[],
-                    SegmentedOverwriteAuthority::new(),
-                );
+                out.overwrite_segmented(text.start, text.end, &escaped, &[]);
             }
         }
     }
@@ -6348,13 +6139,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             let resolved = self.resolve_expr(expr, interp.inner_start, Some(oxc));
             self.buf.clear();
             let _ = write!(self.buf, "${{_ssrInterpolate({})}}", resolved);
-            out.overwrite_segmented(
-                interp.start,
-                interp.end,
-                &self.buf,
-                &[],
-                SegmentedOverwriteAuthority::new(),
-            );
+            out.overwrite_segmented(interp.start, interp.end, &self.buf, &[]);
             return;
         }
 
@@ -6379,17 +6164,12 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     content_offset: wrap_offset + seg.generated_start,
                     length: seg.generated_end - seg.generated_start,
                     source_pos,
+                    kind: AnchorKind::Exact,
                 })
             })
             .collect();
 
-        out.overwrite_segmented(
-            interp.start,
-            interp.end,
-            &self.buf,
-            &anchors,
-            SegmentedOverwriteAuthority::new(),
-        );
+        out.overwrite_segmented(interp.start, interp.end, &self.buf, &anchors);
     }
 
     fn visit_comment(
@@ -6417,13 +6197,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
         self.ensure_push(comment.start, out);
         let escaped = escape_template_literal(content);
         if escaped != content {
-            out.overwrite_segmented(
-                comment.start,
-                comment.end,
-                &escaped,
-                &[],
-                SegmentedOverwriteAuthority::new(),
-            );
+            out.overwrite_segmented(comment.start, comment.end, &escaped, &[]);
         }
     }
 }

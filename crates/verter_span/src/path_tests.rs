@@ -1,6 +1,21 @@
 use super::*;
 use std::borrow::Cow;
 
+#[test]
+fn separator_normalization_preserves_every_other_path_byte() {
+    for (input, expected) in [
+        (r"C:\Users\Dev\App.vue", "C:/Users/Dev/App.vue"),
+        (r"\\?\C:\dir\..\App.vue", "//?/C:/dir/../App.vue"),
+        (r"\\server\share\App.vue", "//server/share/App.vue"),
+    ] {
+        assert_eq!(normalize_path_separators(input), expected);
+    }
+    assert!(matches!(
+        normalize_path_separators("C:/Users/Dev/App.vue"),
+        Cow::Borrowed(_)
+    ));
+}
+
 // ── canonicalize_path: drive lowering + slash + casing preservation ──
 
 #[test]

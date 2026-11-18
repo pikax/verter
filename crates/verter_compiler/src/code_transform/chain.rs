@@ -14,7 +14,7 @@ use oxc_sourcemap::{SourceMap, Token};
 
 use super::chunk::Chunk;
 use super::code_transform::CodeTransform;
-use super::source_map::advance_generated_position;
+use crate::emission::correspondence::advance_generated_position;
 
 /// A transform whose shape has no chaining semantics.
 ///
@@ -37,6 +37,9 @@ pub enum SourceMapChainError {
     /// An input segment names a generated position that does not exist in the
     /// transform's input text, or one that splits a surrogate pair.
     SegmentPositionOutOfBounds { line: u32, column: u32 },
+    /// The transform captured no map facts, so it has no correspondence to
+    /// chain through.
+    MapNotCaptured,
 }
 
 /// The authored payload a chained segment carries: `None` for a sourceless
@@ -86,10 +89,13 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         &self,
         input: &SourceMap<'_>,
     ) -> Result<SourceMap<'static>, SourceMapChainError> {
-        if !self.intro().is_empty() {
+        if self.require_map().is_err() {
+            return Err(SourceMapChainError::MapNotCaptured);
+        }
+        if self.intro_len() > 0 {
             return Err(SourceMapChainError::IntroPresent);
         }
-        if !self.outro().is_empty() {
+        if self.outro_len() > 0 {
             return Err(SourceMapChainError::OutroPresent);
         }
 
@@ -233,7 +239,9 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                 Chunk::InsertedMapped { .. } => {
                     return Err(SourceMapChainError::UnsupportedChunk("InsertedMapped"))
                 }
-                Chunk::Moved { .. } => return Err(SourceMapChainError::UnsupportedChunk("Moved")),
+                Chunk::Relocated { .. } => {
+                    return Err(SourceMapChainError::UnsupportedChunk("Relocated"))
+                }
                 // Chain composition understands the retained/single-token-
                 // replacement partition only; a segmented overwrite's
                 // multi-anchor shape is a genuinely different chunk kind, so

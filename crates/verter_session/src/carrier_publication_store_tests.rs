@@ -30,7 +30,8 @@ pub(crate) fn authorities() -> (Arc<RegisteredSourceAuthority>, Arc<CarrierGramm
 }
 
 fn vue_grammar() -> CarrierGrammarConfig {
-    CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap()
+    verter_compiler::framework_common::vue_grammar_config("{{", "}}", std::iter::empty::<&str>())
+        .unwrap()
 }
 
 fn svelte_authorities() -> (Arc<RegisteredSourceAuthority>, Arc<CarrierGrammarAuthority>) {
@@ -41,7 +42,7 @@ fn svelte_authorities() -> (Arc<RegisteredSourceAuthority>, Arc<CarrierGrammarAu
             verter_language::FileLanguage::svelte(),
             FrameworkAdapterSemanticVersion::new(1).unwrap(),
             CarrierParserGrammarVersion::new(1).unwrap(),
-            CarrierGrammarConfig::Svelte,
+            verter_compiler::svelte::svelte_grammar_config(),
         )
         .expect("register Svelte grammar");
     (source, grammar)
@@ -156,7 +157,11 @@ fn strict_syntax_defect_still_publishes_a_recoverable_product_family() {
         )
         .expect("register source");
     let accepted = grammar
-        .accept_registered_source(&source, &snapshot, &CarrierGrammarConfig::Svelte)
+        .accept_registered_source(
+            &source,
+            &snapshot,
+            &verter_compiler::svelte::svelte_grammar_config(),
+        )
         .expect("accept source");
     let store = CarrierPublicationStore::new(
         source,
@@ -894,8 +899,12 @@ fn grammar_revision_keys_a_new_publication_lane() {
         .into_envelope()
         .expect("first grammar publication");
 
-    let revised_config =
-        CarrierGrammarConfig::vue("[[", "]]", std::iter::empty::<&str>()).expect("revised grammar");
+    let revised_config = verter_compiler::framework_common::vue_grammar_config(
+        "[[",
+        "]]",
+        std::iter::empty::<&str>(),
+    )
+    .expect("revised grammar");
     grammar
         .register_carrier_grammar(
             verter_language::FileLanguage::vue(),
@@ -2173,4 +2182,32 @@ fn a_superseded_stable_leader_is_fenced_on_its_double_checked_adoption() {
         1,
         "the double-checked read adopts the retained unit: exactly one parse"
     );
+}
+
+/// The publication key a carrier records and the parse key of the
+/// registered artifact read one parse-options value — the registered
+/// grammar's own — so they cannot drift apart for either carrier.
+#[test]
+fn the_registered_parse_key_and_the_publication_key_use_one_parse_options_value() {
+    use verter_compiler::framework_common::registered_carrier_projection::parse_registered_source_for_tests;
+    let cases = [
+        (
+            verter_language::FileLanguage::vue(),
+            vue_grammar(),
+            "<script setup>const a = 1</script><template><p>{{ a }}</p></template>",
+        ),
+        (
+            verter_language::FileLanguage::svelte(),
+            verter_compiler::svelte::svelte_grammar_config(),
+            "<script>let a = 1;</script><p>{a}</p>",
+        ),
+    ];
+    for (language, grammar, source) in cases {
+        let artifact = parse_registered_source_for_tests(language.clone(), grammar, source);
+        assert_eq!(
+            crate::carrier_publication_store::registered_carrier_parse_key(source, &language),
+            Some(artifact.parse_key().clone()),
+            "{language:?}: the publication key is the registered artifact's parse key"
+        );
+    }
 }

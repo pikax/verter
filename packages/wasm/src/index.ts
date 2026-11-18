@@ -25,6 +25,9 @@ export type {
   HostBlockOverrideEntry,
   HostUpdateResult,
   HostResolvedId,
+  HostRequestMarker,
+  HostIdRejection,
+  HostRejectedId,
   HostVirtualMeta,
   HostUpsertRequest,
   HostRemoveResult,
@@ -56,6 +59,7 @@ import type {
   HostConfig,
   HostModuleReference,
   HostResolvedId,
+  HostRejectedId,
   HostUpsertRequest,
   HostUpdateResult,
   HostVirtualNodeKind,
@@ -100,8 +104,10 @@ import type {
 // =============================================================================
 
 type WasmInitFn = () => Promise<unknown>;
-type WasmHostResolveFn = (rawId: string) => HostResolvedId | null;
-type WasmHostUpsertFn = (request: HostUpsertRequest) => HostUpdateResult;
+type WasmHostResolveFn = (rawId: string) => HostResolvedId | HostRejectedId;
+/** The WASM carrier reports the update without the native host's `contentHash`. */
+type WasmHostUpdateResult = Omit<HostUpdateResult, "contentHash">;
+type WasmHostUpsertFn = (request: HostUpsertRequest) => WasmHostUpdateResult;
 type WasmHostListVirtualFilesFn = (canonicalId: string) => HostVirtualNodeKind[];
 type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
 type WasmHostCompileRequestFn = (
@@ -293,11 +299,11 @@ export class Host {
     this.inner = new wasmHostCtor(config);
   }
 
-  resolve(rawId: string): HostResolvedId | null {
+  resolve(rawId: string): HostResolvedId | HostRejectedId {
     return this.inner.resolve(rawId);
   }
 
-  upsert(request: HostUpsertRequest): HostUpdateResult {
+  upsert(request: HostUpsertRequest): WasmHostUpdateResult {
     return this.inner.upsert(request);
   }
 

@@ -1,10 +1,12 @@
+> **Superseding note (conditional decisions):** The conditional decision-seam paragraph below is superseded by [Stepping conditional decisions](conditional-decisions.md#stepping-conditional-decisions). Conditional queries now retain one owned decision in `FamilyBuild::Conditional` and resume at the operation that named each read, inside its held observations. There is no ConditionalBuild/drain_conditional replay driver or decision-stage answer table. Completed operand deliveries remain scoped solely to relation computation through `OperandAnswerScope`; Flow's seam retains its own needs and gap handling. The synchronous lowering entry drives the same decision in place and still owns its branch callback.
+
 - `SemanticExecution` (`semantic_execution.rs`) — the continuation runtime: a request-scoped demand table (the execution's completed results), a frame arena and a ready queue driven by one loop. A frame needing another demand returns `EvalStep::Need` and is parked; completion enqueues its waiters and never resumes one recursively, a need of an open demand on the frame's own chain is a cycle the program answers, and a frame's step never drives a nested execution. An instantiation or a `typeof` evaluated outside any drive runs on it (`project_semantic_dispatch/query_frames.rs`): its build is a frame whose decl-body projection needs each instantiation it reaches instead of evaluating it in place, so an alias chain is a chain of frames bounded by neither the stack nor the native nested-query depth. A decl-body projection that reaches a value's `typeof` (no member path, no type arguments) needs it the same way, and that `typeof` builds as a frame of its own when the value's type is its authored annotation (`begin_typeof` / `drain_typeof`): the annotation's projection needs each instantiation it reaches, so `typeof __v` over `{ [K in keyof L99<0>]: L99<0>[K] }`, whose interface heritage nests a hundred levels, is a hundred frames. A frame owns its lease, tracer and build-local taint, installs them only for its own steps, replays each delivery's carrier into its tracer and folds its rails into its taint; code a step reaches synchronously evaluates in place and never drives.
 - A root `typeof` drives like an instantiation, and every `typeof` build that evaluates something its value's type comes from suspends on the runtime instead of evaluating what it reaches in place (`TypeofBuild`, `drain_typeof`):
   - a value whose type lowers from its authored value position — its annotation, its inferred initializer, its const-object shape (`lower_typeof_body_or_suspend`) — lowers it as a projection that needs each instantiation and `typeof` it reaches, so `declare const v<i>: typeof v<i-1>` and `const x<i> = x<i-1>`, 500 deep, are 500 frames on a 1 MiB stack;
   - a function value lowers its signatures one at a time (`SignatureLowering`): its own declaration's, then each later script's merged global declaration read as its turn comes, so `declare function h<i>(): ReturnType<typeof h<i-1>>` is a chain of frames; the augmenting blocks' overloads of an exported function still lower in place;
   - a value initialized by an expression source evaluates that expression as the frame's build (`ExpressionSourceRun` over `IndexedValueRun`): the indexed evaluation's explicit stack names its position by the children it descended through, never by borrowing the expression, and stops at each leaf that is a value's `typeof` (`id(y)` reads `typeof y`) with that `typeof` as its need, so `const y<i> = id(y<i-1>)` is a chain of frames. The inline evaluator runs the same run to completion. The probe the inline path wraps the evaluation in is one observation across the steps: each step re-opens it with what the earlier steps observed (`ObservedRead::resume`) and consumes its delivery inside it (`FrameDelivery`), and the last step adopts it when the evaluation yields a value and drops it when it yields none. A leaf of any other shape (a structured value literal naming values) still lowers in place.
 - A suspending projection that reaches a conditional type needs its decision (the `Conditional` query) instead of deciding it in place (`ProjectionSeam` holds the awaited decision and hands its delivery back to the conditional that needed it). The decision runs as a frame of its own (`ConditionalBuild`, `drain_conditional`): the decision procedure is a function of its operands and of the answers to the instantiations and `typeof`s it reads, so a step runs it with the answers its frame holds (`DecisionSeam`, `read_at_decision_seam`). A read the answers do not hold enters exactly as the frame's need would: a result the memo serves warm answers it at once and joins the answers; one that must be computed becomes one of the frame's needs, its claim continuing in `QueryProgram.retries`, and reads as a typed gap. The run collects every such need it reaches — a run that waits on a read (`decision_waits`) reads on through the operand normalization's per-arm and per-position walks instead of stopping at their first gap — then is dropped with every observation it made; the frame needs each collected read in turn and runs the decision again once all are delivered, so a decision over a 1,000-member union runs twice, not once per member. A query the decision evaluates in place (a relation, a reduction) reads only the answers (`nested_decision_query`): what it builds is kept, so it never reads a gap. Before relating, the decision demands the operands its relation unwraps — as the checker instantiates a conditional's check and extends types before relating them — so the relation reads them answered instead of instantiating them in place. A decision nested in the drive outside every checker obligation completes for the request alone, as it does nested in a synchronous build (`FrameProducer::RequestLocal`, `completes_request_locally`): it enters no family memo.
-  A frame's result never nests natively below the code that reads it, so its receipt's nesting is carried apart from the reader's own (`OperationFootprint.frame_query_depth`): a reader's admission checks its own depth against the deeper of the two, and a chain of decisions does not stack a query level per link. `type C<i> = C<i-1> extends string ? … : never`, 500 deep, decides on a 1 MiB stack. A branch that selects the alias before keeps it as a carrier, and each level's decision walks the carriers below it: that walk, not the runtime, is quadratic in such a chain's length.
+  A frame's result never nests natively below the code that reads it, so its receipt's nesting is carried apart from the reader's own (`OperationFootprint.frame_query_depth`): a reader's admission checks its own depth against the deeper of the two, and a chain of decisions does not stack a query level per link. `type C<i> = C<i-1> extends string ? … : never`, 500 deep, decides on a 1 MiB stack: declared-alias preparation holds an owned structural-fact demand whose reads are the frame's needs (see `conditional-decisions.md`, “Stepping conditional decisions”). A branch that selects the alias before keeps it as a carrier, and each level's decision walks the carriers below it: that walk, not the runtime, is quadratic in such a chain's length.
   A decision instantiates the operands that name declarations before it relates them, so the instantiation — and the flows its class methods' returns read — runs ahead of the relation, outside its component; a relation whose own walk instantiates them (operands held in object members) keeps them in its component.
   A suspending projection that reaches a member-path or applied `typeof` (`y.v`, `typeof f<string>`) needs it as it needs a value's own `typeof` (`ReferenceProjectionPlan::Typeof`, `ProjectionFrame::AwaitTypeof`). Its delivery carries whether the read answered a value and with which fact status (`ProjectionDelivery`): a read that answered none is a miss, and an applied `typeof` applies its type arguments to the answer; an inline run reads it in place (`read_typeof_in_place`). The read is one root-and-path `TypeOf` query, the lookup contract the in-place lowering keys through `typeof_reference_key`: a member path that answers no value is never retried under a joined, namespace-qualified name, which would bypass the module's export domain. A member-path `typeof` built as a frame lowers the member positions where the value declares them — an object literal's own members, a class's own statics — as its own suspending projections (`TypeofThen::Member`, `MemberLowering`, `value_member_plan`), so `const y<i> = { v: y<i-1>.v }` and `class C<i> { static v = C<i-1>.v }`, 500 deep, are chains of frames on a 1 MiB stack. A function signature whose body-derived return reads through `LowerLocator` into an in-place `FlowReturn` is bounded per signature, not by the chain.
 - Driving is by polls. `SemanticExecution::poll(program, root, waker)` runs every runnable frame and returns `Ready` with the root's outcome (or the stop that abandoned every open demand), or `Pending` once the chain's tip waits on an outside producer; later polls of the same drive pass no root. `Program::poll_subscription` checks the producer and registers the waker in one atomic step. For the memo this is `Subscription::poll` (`semantic_query_memo/producer.rs`): the readiness check and the waker registration happen under the flight's lock, and every flight resolution (completion, abort, cancellation sweep, invalidation, a panicking producer) goes through `FlightCell::wake_subscribers`, which notifies the condvar and wakes every registered waker after resolving under that lock, so a resolution between a poll's check and its registration is never lost. A pending subscriber holds its wait-for edge (cycle refusal unchanged) and its waker until it resolves or drops; dropping a pending subscription, or a pending execution, releases the edge, takes the waker off the flight and drops every suspended frame (leases abort, active instantiations leave, open cost scopes abandon). `drive` is the blocking driver: it polls with a per-thread unparking waker and parks between polls in 2 ms slices, the same cancellation-observation rail the blocking condvar wait keeps. The synchronous (non-driven) entry keeps `Subscription::wait`.
@@ -286,10 +288,10 @@ its summed work count.
 cursor, infer-binder factory (including the root identity and path cache), and
 substitutions. Each advance borrows a `TypeExprLowering` context and yields
 `LowerProgress::Done` or a `LowerRead` with a query key and delivery shape.
-`Node` takes the exact `execute_type_node` output; `Whole` takes the narrowed
-`CacheRead<QueryResult<SemanticNodeId>>`, retaining the fact status that the
-carrier head's `resume_anchor` consumes. A caller holding a whole cold-build
-read uses the existing `narrow_value_cache_read` before delivery. Carrier-read
+`Node` takes the exact `execute_type_node` output; `Whole` takes the original
+`CacheRead<QueryResult<SemanticQueryValue>>`, retaining its value domain and
+fact status. Node-domain consumers use the existing `narrow_value_cache_read`
+at consumption, including the carrier head's `resume_anchor`. Carrier-read
 intent is recorded when the read is requested, before suspension.
 
 Bare-reference anchors, carrier finishes, reducing `keyof`, reducing indexed
@@ -302,8 +304,27 @@ and their selected branch callbacks still run in place. Import types use the
 shared import-head planner, suspend on its anchor and finish, lower arguments
 only when consumed under the caller's context, and project qualified tails as
 whole reads. Type-parameter leaf bounds, script-setup bindings, spread objects
-and authored member keys retain native recursion. Applied typeof signature
-discovery and carrier-finish augmentation collection remain in place too.
+and authored member keys retain native recursion. Applied `typeof` finishes
+its arguments through `ExplicitInstantiation`: object call and construct lists
+are retained `SignatureListRead`s, yielding Whole reads in that order, with no
+construct read after an unsettled call list. The shared list owner handles
+composite-result reads and current-epoch refusal/rebind; no held-epoch path or
+second list walk is introduced. The object's settled signatures still
+instantiate in place through the same clause machine after both buckets settle.
+Carrier-finish augmentation collection remains in place.
+A substitution walk standing at its template read keeps its levels' cost
+recordings open on the connected demand, so the demand must stay open until
+the walk answers; a root demand entered by the read would clear them and the
+completed substitution could not publish its priced memo entry. The machine
+never keeps a guard across a read; its holder says who keeps the demand
+(`InstantiationDemand`). A suspending `TypeLowerRead` holder, like an
+overload set's stage, keeps it open for the lowering's whole extent
+(`Held`). The in-place drivers (`lower_type_expr_with_infer_factory`,
+`drive_type_lowering`) hold a slot instead (`InPlace`): each substitution
+enters the demand into the slot when it begins and leaves it with its
+answer, the span the public substitution entry holds, and the read between
+is answered inside it. Carrier finishes, anchor and import-head reads, and the
+signature-list stage hold no ledger state across their reads.
 This helper does not make an arbitrary semantic root nonblocking.
 
 Binding frames hold owned environments and lend them to their children through
@@ -365,6 +386,18 @@ specific boundaries; it does not convert the synchronous shared helpers reached
 inside argument preparation, declaration printing or final composite reduction,
 or make an arbitrary semantic root nonblocking.
 
+**Key sets.** `build.rs` owns `KeySetRead`, the owned form of `key_set_of`.
+It holds the base whose `keyof` it reads next and the `keyof` carriers it has
+already settled. `begin_key_set_read` names the first `KeyOf` read without
+making it. `resume_key_set_read` consumes one delivery and returns
+`KeySetStep::Done` or the next `KeyOf` read. `abandon_key_set_read` releases
+a walk: between reads it holds only node ids. `key_set_of` keeps its
+signature and is the in-place loop over the same steps, with the walk on the
+stack; it allocates no box. A kept declaration or application is settled
+between reads by `resolve_signature_source_carrier`, in place. That settle is
+the walk's one read it does not name. The read is `Send`, never `Clone` or
+`Copy`. The conditional decision holds it as its `KeySet` operation.
+
 ### Indexed argument reads in flow bodies
 
 The flow reader advances the shared `IndexedValueRun` with suspension enabled.
@@ -382,3 +415,51 @@ Receiver fallbacks and native call-route drivers settle the same walk through
 need also settles through `settle_now` and the existing indexed call resolver
 with that attribution; it never becomes a `ReadWait`. The call helper request
 relay owns suspension of that remaining call need.
+
+## Stepping declared-literal widening read
+
+`project_semantic_dispatch/value_widening.rs`, a child of the flow-return
+module, owns whether a value read yields a widening literal
+(`value_read_widens`), as one owned walk: `begin_value_widening` /
+`resume_value_widening` / `abandon_value_widening` over a `ValueWideningRead`
+(`Send`, not `Clone`) that holds the visited value roots and the cursor:
+either the next declaration a copy chain names, or a call-initialized
+`const`'s expression source evaluating. Each step answers
+(`WideningStep::Done(bool)`) or holds the walk, boxed, waiting on the
+`ReadWait` the indexed run requests (`ValueWideningRead::waiting_on`);
+`resume_value_widening` answers that read in place and carries the walk on.
+`WideningsRead` (`begin_value_widenings`, `requests`, `finish`,
+`abandon_value_widenings`) carries several walks; it adds no step of its own.
+
+A holder may not answer the read itself yet. A delivered `ReadDelivery` is
+consumed outside the walk's probe, so a call that is not fresh could not
+drop what that read observed (an operation-budget partial would stay folded
+into the enclosing build). `deliver_value_widening` and the list's
+`deliver_value_widenings` therefore refuse every delivery with the typed
+`WideningDeliveryRefusal::NeedsObservedDelivery`, handing the walk back (or
+leaving it in the list) still waiting, until a delivery carries its read's
+observation into the probe.
+
+The walk adds no stepping of its own. A call-initialized `const` routes its
+expression source as `drain_semantic_expression_source` does, under one
+optional probe held in the `ExpressionSourceRun` between reads, and an
+indexed initializer advances the shared `IndexedValueRun` through
+`FlowReadDriver::advance_indexed_value` (see "Indexed argument reads in flow
+bodies"). So the reads it yields are that run's: a leaf's `typeof` as a
+`Node` read, and a lazy declared return's `Instantiate` as a `Whole` read
+where the return is checked. Calls settle in place there. The run is
+advanced, and its reads requested and answered, under the `Expression`
+checking site, as the inline indexed drain holds it: a refused tuple splice
+in a declared return is TS2800, never TS2799. The probe is
+adopted when the value is a fresh literal and dropped otherwise, and a
+pending obligation makes the value a typed miss, exactly as
+`semantic_expression_source_is_fresh` reads it inline. The in-place drive
+(`value_read_widens`, a loop over `resume_value_widening`) answers each
+read with `read_in_place` inside the probe's resumed observation, so a call
+that is not fresh drops what its reads observed.
+
+Still read in place beneath the walk: host indexed, prepared-declaration
+and route reads in `value_path_declaration`; the `SignaturesOfType` read of
+a namespace import's `default` member; an initializer routed to a function
+or flow return; and an initializer's call resolution and explicit type
+arguments.

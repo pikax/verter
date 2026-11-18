@@ -1,10 +1,11 @@
+use verter_compiler::framework_common::CarrierFrontend;
 use verter_compiler::svelte::runtime::{compile_client, ClientCompileError, SvelteRuntimeOptions};
-use verter_compiler::svelte::{parse_svelte, SvelteCarrierCompiler};
+use verter_compiler::svelte::{parse_svelte, SvelteCarrierFrontend};
 use verter_language::{ParseOptions, SyntaxReject};
 
 fn parse_diagnostic_codes(source: &str) -> Vec<&'static str> {
-    let compiler = SvelteCarrierCompiler;
-    compiler
+    let frontend = SvelteCarrierFrontend;
+    frontend
         .parse(source, &ParseOptions::default())
         .expect("recoverable Svelte syntax must publish its carrier artifact")
         .diagnostics
@@ -42,8 +43,8 @@ fn carrier_parse_publishes_a_real_strict_svelte_defect() {
     // syntax errors while still recording the diagnostic — the
     // official-reject-PARITY verdict (does this source get a `Main` at all)
     // is a separate, later concern, decided at compile time.
-    let compiler = SvelteCarrierCompiler;
-    let artifact = compiler
+    let frontend = SvelteCarrierFrontend;
+    let artifact = frontend
         .parse("<!--", &ParseOptions::default())
         .expect("an unterminated comment is a recoverable strict-parse defect");
     assert_ne!(artifact.parse_key.digest().as_bytes(), &[0; 32]);
@@ -101,8 +102,8 @@ fn a_later_strict_defect_does_not_stop_an_earlier_recoverable_defect_from_publis
     // single defect wins as THE official reject) is `official_reject_gate`'s
     // separate concern at compile time.
     let source = "<div class=\"a\" class=\"b\"><!--";
-    let compiler = SvelteCarrierCompiler;
-    let artifact = compiler
+    let frontend = SvelteCarrierFrontend;
+    let artifact = frontend
         .parse(source, &ParseOptions::default())
         .expect("a retained strict defect stays publishable at the carrier seam");
     assert!(artifact
@@ -128,12 +129,12 @@ fn runtime_keeps_the_full_ordered_official_reject_oracle() {
 
 #[test]
 fn requesting_the_official_loose_parse_mode_is_typed_and_non_publishing() {
-    let compiler = SvelteCarrierCompiler;
+    let frontend = SvelteCarrierFrontend;
     let opts = verter_language::ParseOptions {
         svelte_loose: true,
         ..verter_language::ParseOptions::default()
     };
-    let reject = compiler
+    let reject = frontend
         .parse("<div>hi</div>", &opts)
         .expect_err("the loose parse profile is unsupported and must reject before parsing");
 
@@ -160,8 +161,8 @@ fn requesting_strict_parsing_on_well_formed_svelte_publishes_normally() {
     // well-formed source with the DEFAULT (strict) profile stays
     // publishable — the reject is about the requested profile, not the
     // source.
-    let compiler = SvelteCarrierCompiler;
-    compiler
+    let frontend = SvelteCarrierFrontend;
+    frontend
         .parse("<div>hi</div>", &ParseOptions::default())
         .expect("strict parsing of well-formed Svelte source must publish");
 }
@@ -189,8 +190,8 @@ fn loose_and_strict_requests_for_identical_source_have_different_syntax_profiles
 
 #[test]
 fn comments_inside_an_open_tag_do_not_create_attributes() {
-    let compiler = SvelteCarrierCompiler;
-    compiler
+    let frontend = SvelteCarrierFrontend;
+    frontend
         .parse(
             "<div data-one=\"1\" // data-one=\"2\"\n data-two=\"2\"></div>",
             &ParseOptions::default(),

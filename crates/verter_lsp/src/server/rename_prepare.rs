@@ -101,7 +101,7 @@ pub(super) async fn handle_prepare_rename(
     let uri = &params.text_document.uri;
     let position = &params.position;
 
-    let ownership_witness = match rename_request_admission(server, uri) {
+    let ownership_witness = match rename_request_admission(server, uri).await {
         RenameAdmission::Decline => return Ok(None),
         RenameAdmission::Refuse(error) => return Err(error),
         RenameAdmission::Serve { ownership_witness } => ownership_witness,

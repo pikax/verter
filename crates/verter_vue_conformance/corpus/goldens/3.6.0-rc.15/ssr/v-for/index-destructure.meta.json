@@ -1,0 +1,56 @@
+{
+  "schema": 2,
+  "caseId": "v-for/index-destructure",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-for/index-destructure.vue",
+    "sha256": "266c416bb7671c6be04ac24c26336f607badc2699b1814a64fc9a2269081b20c"
+  },
+  "options": {
+    "sha256": "308f79b35865e77f0ce61f6e66e24e59d486d87cc64d32f7b6e09249632ceffd",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/v-for/index-destructure.vue",
+      "id": "v-for/index-destructure",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/v-for/index-destructure.js",
+      "sha256": "9f927fe69a249557590b2a14f2658bfd6559318349e4fedf052b618934f44ca8",
+      "bytes": 884
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/v-for/index-destructure.map.json",
+      "sha256": "ae11569c203cc025a6db56676650195a824d13968bd4acaea38c3fd65aa030e0"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "ref",
+      "alias": "ref"
+    }
+  ]
+}

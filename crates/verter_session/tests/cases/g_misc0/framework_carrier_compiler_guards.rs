@@ -135,7 +135,7 @@ fn framework_codegen_uses_code_transform() {
     // pipeline (the positive half — a carrier with an IDE projection delegates,
     // never hand-rolls a string).
     let bridge = strip_line_comments(&read_src(
-        "crates/verter_compiler/src/framework_common/vue_bridge.rs",
+        "crates/verter_compiler/src/framework_common/vue_bundle.rs",
     ));
     assert!(
         bridge.contains("compile_from_parsed"),

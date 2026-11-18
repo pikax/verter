@@ -24,8 +24,8 @@ use crate::actor::{spawn_actor, ClientHandle};
 use crate::error::{TsgoApiError, TsgoApiResult};
 use crate::gate::{self, GateClearance, ObservedEngine};
 use crate::proto::types::{
-    method, Diagnostic, InitializeResponse, OpaqueHandle, SnapshotChanges, SnapshotResponse,
-    SymbolResponse, TypeResponse, UpdateSnapshotParams,
+    method, Diagnostic, DiagnosticResponse, InitializeResponse, OpaqueHandle, SnapshotChanges,
+    SnapshotResponse, SymbolResponse, TypeResponse, UpdateSnapshotParams,
 };
 use crate::snapshot::OverlaySnapshot;
 use crate::transport::pipe::StdioPipeTransport;
@@ -352,6 +352,17 @@ impl TsgoClient {
         self.handle.publish_snapshot(snapshot);
     }
 
+    /// The host paths the engine read itself since this client connected:
+    /// files, failed-lookup probes (answered from disk, possibly as absent)
+    /// and directories the published overlay does not own. Sorted, with
+    /// forward slashes. The engine keeps what it read for its session and
+    /// reads a path again only when told it changed, so the set grows with
+    /// the session and is exactly what the session holds from disk. A new
+    /// connection starts with an empty set. Clones share one record.
+    pub fn host_reads(&self) -> Vec<String> {
+        self.handle.host_reads()
+    }
+
     /// `initialize` — the once-only startup handshake. Returns the engine's
     /// case-sensitivity + current directory.
     pub async fn initialize(&self) -> TsgoApiResult<InitializeResponse> {
@@ -439,6 +450,19 @@ impl TsgoClient {
         Ok(resp)
     }
 
+    /// Decode every diagnostic stream through the same wire-message renderer.
+    async fn diagnostic_request(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> TsgoApiResult<Vec<Diagnostic>> {
+        let diagnostics: Vec<DiagnosticResponse> = self.typed(method, params).await?;
+        Ok(diagnostics
+            .into_iter()
+            .map(DiagnosticResponse::into_diagnostic)
+            .collect())
+    }
+
     /// `getSemanticDiagnostics` — type-check diagnostics for `file` in the given
     /// snapshot/project. The file rides as the one-element `files` list
     /// (sync/api.js:2338-2345); an unknown key such as a scalar `file` is
@@ -449,7 +473,7 @@ impl TsgoClient {
         project: &str,
         file: &str,
     ) -> TsgoApiResult<Vec<Diagnostic>> {
-        self.typed(
+        self.diagnostic_request(
             method::GET_SEMANTIC_DIAGNOSTICS,
             &serde_json::json!({ "snapshot": snapshot, "project": project, "files": [file] }),
         )
@@ -464,7 +488,7 @@ impl TsgoClient {
         project: &str,
         file: &str,
     ) -> TsgoApiResult<Vec<Diagnostic>> {
-        self.typed(
+        self.diagnostic_request(
             method::GET_SYNTACTIC_DIAGNOSTICS,
             &serde_json::json!({ "snapshot": snapshot, "project": project, "files": [file] }),
         )
@@ -483,7 +507,7 @@ impl TsgoClient {
         snapshot: &OpaqueHandle,
         project: &str,
     ) -> TsgoApiResult<Vec<Diagnostic>> {
-        self.typed(
+        self.diagnostic_request(
             method::GET_SEMANTIC_DIAGNOSTICS,
             &serde_json::json!({ "snapshot": snapshot, "project": project }),
         )
@@ -499,7 +523,7 @@ impl TsgoClient {
         snapshot: &OpaqueHandle,
         project: &str,
     ) -> TsgoApiResult<Vec<Diagnostic>> {
-        self.typed(
+        self.diagnostic_request(
             method::GET_SYNTACTIC_DIAGNOSTICS,
             &serde_json::json!({ "snapshot": snapshot, "project": project }),
         )
@@ -517,8 +541,24 @@ impl TsgoClient {
         snapshot: &OpaqueHandle,
         project: &str,
     ) -> TsgoApiResult<Vec<Diagnostic>> {
-        self.typed(
+        self.diagnostic_request(
             method::GET_CONFIG_FILE_PARSING_DIAGNOSTICS,
+            &serde_json::json!({ "snapshot": snapshot, "project": project }),
+        )
+        .await
+    }
+
+    /// `getProgramDiagnostics` — program-wide validation, including compiler
+    /// options diagnostics such as TS5102 for a removed option. Config-file
+    /// parsing diagnostics are returned separately by
+    /// [`Self::get_config_file_parsing_diagnostics`]. Mirrors sync/api.js:2421.
+    pub async fn get_program_diagnostics(
+        &self,
+        snapshot: &OpaqueHandle,
+        project: &str,
+    ) -> TsgoApiResult<Vec<Diagnostic>> {
+        self.diagnostic_request(
+            method::GET_PROGRAM_DIAGNOSTICS,
             &serde_json::json!({ "snapshot": snapshot, "project": project }),
         )
         .await
@@ -961,6 +1001,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn program_diagnostics_preserve_the_wire_result_and_request_failures() {
+        for succeeds in [true, false] {
+            let (client, from_engine, mut to_engine) = test_client();
+            let engine = tokio::spawn(async move {
+                let raw = to_engine.recv().await.unwrap();
+                let (request, _) = decode_frame(&raw, 0).unwrap();
+                let name = String::from_utf8_lossy(request.name).into_owned();
+                let payload: serde_json::Value = serde_json::from_slice(request.payload).unwrap();
+                let (kind, body): (_, &[u8]) = if succeeds {
+                    (
+                        MessageType::Response,
+                        br#"[{"code":5102,"category":1,"text":"removed option","pos":0,"end":0,"messageChain":[{"code":5102,"category":3,"text":"use paths instead","pos":-1,"end":-1}]}]"#,
+                    )
+                } else {
+                    (MessageType::Error, b"program diagnostic request failed")
+                };
+                from_engine
+                    .send(encode_frame(kind, request.name, body))
+                    .await
+                    .unwrap();
+                (name, payload)
+            });
+            let result = client
+                .get_program_diagnostics(&OpaqueHandle(17), "p.options")
+                .await;
+            let (name, payload) = engine.await.unwrap();
+            assert_eq!(name, "getProgramDiagnostics");
+            assert_eq!(
+                payload,
+                serde_json::json!({"snapshot":17,"project":"p.options"})
+            );
+            if succeeds {
+                let diagnostics = result.expect("typed program diagnostics");
+                assert_eq!(diagnostics.len(), 1);
+                assert_eq!(diagnostics[0].code, 5102);
+                assert_eq!(diagnostics[0].text, "removed option\n  use paths instead");
+            } else {
+                assert!(
+                    result.is_err(),
+                    "a failed program request must not report clean"
+                );
+            }
+        }
+    }
+
     // ── DISCRIMINATING: `release` sends `{ snapshot: N }` (sync/api.js:1026),
     //    never a `{ handle: N }` the engine would ignore (a silent snapshot
     //    leak). Fire-and-forget, so a capture test is the only rail. ──────────
@@ -1083,7 +1169,7 @@ mod tests {
         let recorded: Arc<parking_lot::Mutex<Vec<(String, serde_json::Value)>>> =
             Arc::new(parking_lot::Mutex::new(Vec::new()));
 
-        const DRIVEN_OPS: usize = 9;
+        const DRIVEN_OPS: usize = 10;
         let rec = Arc::clone(&recorded);
         let engine = tokio::spawn(async move {
             let mut to_engine = to_engine;
@@ -1153,6 +1239,10 @@ mod tests {
             .await
             .expect("getConfigFileParsingDiagnostics resolves");
         client
+            .get_program_diagnostics(&snap, "proj")
+            .await
+            .expect("getProgramDiagnostics resolves");
+        client
             .get_type_at_position(&snap, "proj", "/ws/A.tsx", 10)
             .await
             .expect("getTypeAtPosition resolves");
@@ -1181,6 +1271,7 @@ mod tests {
             "getSemanticDiagnostics",
             "getSyntacticDiagnostics",
             "getConfigFileParsingDiagnostics",
+            "getProgramDiagnostics",
             "getTypeAtPosition",
             "getSymbolAtPosition",
             "typeToString",

@@ -336,8 +336,8 @@ pub enum ComponentMetaResolutionPurpose {
 /// An object-literal-only `defineExpose` with fields stays analyzer-owned and is
 /// excluded by `raw_macro_surface_is_authoritative`; every other snapshot macro
 /// contributes exactly one input in source order, built from the bundle its
-/// producer answered. A macro no requested surface reads (`withDefaults`,
-/// `defineOptions`) contributes an empty input. A component whose adapter
+/// producer answered. A macro with no requested surface reads contributes an
+/// empty input; typed `defineOptions` retains its producer diagnostics. A component whose adapter
 /// plans source families (Svelte) contributes one more input, after the
 /// macros, built from those families' bundles.
 ///
@@ -370,28 +370,103 @@ pub(crate) fn component_meta_resolved_macros<M: verter_audit::observe::ObserveEx
     owner_canonical: &str,
     snapshot_macros: &[AnalyzedMacro],
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {
+    let reads = declared_surface_reads(host, ctx, dispatch, owner_canonical, snapshot_macros);
+    resolved_macro_inputs(&reads, snapshot_macros)
+}
+
+/// [`component_meta_resolved_macros`] for the component-meta compute that
+/// publishes the macro surfaces: the one place that compute consumes its macro
+/// bundles. Each published row of a type-argument macro is admitted through
+/// the shared admission function, with the macro's type-argument node as its
+/// parent. The bundle may come from the producer's cold compute or from its
+/// cache, possibly warmed by another request; the rows and the parent are the
+/// same either way, so the request's `PublishedField` edges do not depend on
+/// cache state. The producer itself records none, so a cold bundle is never
+/// recorded twice.
+pub(crate) fn component_meta_published_macros<M: verter_audit::observe::ObserveExec>(
+    host: &crate::VerterHost,
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities<M>,
+    >,
+    owner_canonical: &str,
+    snapshot_macros: &[AnalyzedMacro],
+) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {
+    let reads = declared_surface_reads(host, ctx, dispatch, owner_canonical, snapshot_macros);
+    admit_published_macro_rows(ctx, dispatch, owner_canonical, snapshot_macros, &reads);
+    resolved_macro_inputs(&reads, snapshot_macros)
+}
+
+/// The producer read answering snapshot macro `macro_index` of `kind`.
+fn vue_macro_read(
+    reads: &[crate::typeinfo::framework_surface::executor::ProducerRead],
+    macro_kind: AnalyzedMacroKind,
+    macro_index: usize,
+) -> Option<&crate::typeinfo::framework_surface::executor::ProducerRead> {
+    use crate::typeinfo::node_refs::MemberProducer;
+    reads.iter().find(|read| {
+        matches!(
+            read.producer,
+            MemberProducer::VueMacro { kind, index }
+                if kind == macro_kind && usize::try_from(index) == Ok(macro_index)
+        )
+    })
+}
+
+/// Admit the published rows of every macro bundle the owner's reads answered.
+fn admit_published_macro_rows<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities<M>,
+    >,
+    owner_canonical: &str,
+    snapshot_macros: &[AnalyzedMacro],
+    reads: &[crate::typeinfo::framework_surface::executor::ProducerRead],
+) {
+    let Some(serve) = ctx.ensure_indexed_ready_serve(owner_canonical) else {
+        return;
+    };
+    for (macro_index, mac) in snapshot_macros.iter().enumerate() {
+        if raw_macro_surface_is_authoritative(mac) {
+            continue;
+        }
+        if let Some(dtos) =
+            vue_macro_read(reads, mac.kind, macro_index).and_then(|read| read.dtos())
+        {
+            crate::typeinfo::framework_surface::vue_exec::admit_published_macro_rows(
+                dispatch,
+                owner_canonical,
+                serve.indexed.whole_hash,
+                macro_index,
+                mac,
+                dtos,
+            );
+        }
+    }
+}
+
+/// The extractor inputs built from the owner's producer reads.
+fn resolved_macro_inputs(
+    reads: &[crate::typeinfo::framework_surface::executor::ProducerRead],
+    snapshot_macros: &[AnalyzedMacro],
+) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {
     use crate::typeinfo::framework_surface::SvelteSurfaceSource;
     use crate::typeinfo::node_refs::MemberProducer;
 
-    let reads = declared_surface_reads(host, ctx, dispatch, owner_canonical, snapshot_macros);
     let mut inputs = Vec::new();
     for (macro_index, mac) in snapshot_macros.iter().enumerate() {
         if raw_macro_surface_is_authoritative(mac) {
             continue;
         }
         let mut input = empty_macro_input(macro_index);
-        let read = reads.iter().find(|read| {
-            matches!(
-                read.producer,
-                MemberProducer::VueMacro { kind, index }
-                    if kind == mac.kind && usize::try_from(index) == Ok(macro_index)
-            )
-        });
+        let read = vue_macro_read(reads, mac.kind, macro_index);
         if let Some(dtos) = read.and_then(|read| read.dtos()) {
+            input.diagnostics = dtos.diagnostics.clone();
             // The lower-crate input rows carry the session-resolved SOURCE
-            // POSITIONS alongside the analysis fields — the normalized-surface
-            // authority the extraction publishes (the flat evaluated lanes
-            // contribute metadata only).
+            // POSITIONS alongside the analysis fields. Each normalized row's
+            // authority supplies both the published source and its metadata.
             match mac.kind {
                 AnalyzedMacroKind::DefineProps => {
                     input.props_guarantee = dtos.domain_guarantee.clone()
@@ -420,7 +495,8 @@ pub(crate) fn component_meta_resolved_macros<M: verter_audit::observe::ObserveEx
                 .map(
                     |row| verter_semantic::analysis::component_meta::ResolvedExposeInput {
                         field: row.analysis.clone(),
-                        type_source: row.type_source.clone(),
+                        authority: row.authority.clone(),
+                        authored_evidence: row.authored_evidence.clone(),
                     },
                 )
                 .collect();
@@ -529,6 +605,12 @@ fn declared_surface_reads<M: verter_audit::observe::ObserveExec>(
     }) {
         requested.push(FrameworkSurfaceKind::Expose);
     }
+    if snapshot_macros
+        .iter()
+        .any(|mac| mac.kind == AnalyzedMacroKind::DefineOptions && mac.is_type_based)
+    {
+        requested.push(FrameworkSurfaceKind::Options);
+    }
     let selector = crate::typeinfo::framework_surface::ResolvedComponentSelector {
         canonical: std::sync::Arc::from(owner_canonical),
         export: crate::typeinfo::framework_surface::ComponentExport::Default,
@@ -550,6 +632,7 @@ fn empty_macro_input(
 ) -> verter_semantic::analysis::component_meta::ResolvedMacroInput {
     verter_semantic::analysis::component_meta::ResolvedMacroInput {
         macro_index,
+        diagnostics: Vec::new(),
         props: Vec::new(),
         emits: Vec::new(),
         slots: Vec::new(),

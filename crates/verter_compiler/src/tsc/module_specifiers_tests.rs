@@ -2,6 +2,15 @@
 //! text that merely looks like one.
 
 use super::*;
+
+#[test]
+fn borrowed_program_inventory_matches_the_public_specifier_owner() {
+    let source = "import type { Props } from './types'; export type Public = import('./App.vue.ts').default;";
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
+    let spans = collect_module_specifier_spans_from_program(source, &parsed.program).unwrap();
+    assert_eq!(Some(spans), collect_module_specifier_spans(source).unwrap());
+}
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 use verter_parser::oxc_parse::Parser;
@@ -275,4 +284,66 @@ fn an_inventory_whose_parse_is_refused_is_the_typed_refusal() {
         .map(|span| span.text)
         .collect();
     assert_eq!(texts, ["./Child.vue"]);
+}
+
+#[test]
+fn rewritten_specifiers_keep_positions_and_carry_maps_and_path_references() {
+    let source =
+        "/// <reference path=\"./ambient.d.ts\" />\nimport { t } from '@/types'; const x = t;\n";
+    let inventory = collect_module_inventory(source).unwrap().unwrap();
+    let [reference] = inventory.reference_paths.as_slice() else {
+        panic!("{:?}", inventory.reference_paths);
+    };
+    assert_eq!(reference.text, "./ambient.d.ts");
+    assert_eq!(
+        &source[reference.start..reference.end],
+        "\"./ambient.d.ts\""
+    );
+    assert_eq!(reference.quote, '"');
+    assert_eq!(inventory.specifiers.len(), 1);
+    let rewritten = rewrite_module_specifiers(
+        source,
+        &inventory.specifiers,
+        |specifier| (specifier == "@/types").then(|| "./types.ts".to_string()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(rewritten.text, source.replace("'@/types'", "'./types.ts'"));
+    assert_eq!(
+        rewritten.replaced,
+        [("./types.ts".to_string(), "@/types".to_string())]
+    );
+    // A position after the rewritten literal leads back to the source.
+    let table = rewritten.map.generate_lookup_table();
+    let column = rewritten.text.lines().nth(1).unwrap().find("x =").unwrap() as u32;
+    let token = rewritten.map.lookup_token(&table, 1, column).unwrap();
+    let source_column = source.lines().nth(1).unwrap().find("x =").unwrap() as u32;
+    assert_eq!(
+        (
+            token.get_src_line(),
+            token.get_src_col() + column - token.get_dst_col()
+        ),
+        (1, source_column)
+    );
+    // Carrying the rewrite's own map back over the rewritten text answers
+    // the source positions for the text rewritten back.
+    let restored = rewrite_module_specifiers(
+        &rewritten.text,
+        &collect_module_specifier_spans(&rewritten.text)
+            .unwrap()
+            .unwrap(),
+        |specifier| (specifier == "./types.ts").then(|| "@/types".to_string()),
+        Some(&rewritten.map),
+    )
+    .unwrap();
+    assert_eq!(restored.text, source);
+    let table = restored.map.generate_lookup_table();
+    let token = restored.map.lookup_token(&table, 1, source_column).unwrap();
+    assert_eq!(
+        (
+            token.get_src_line(),
+            token.get_src_col() + source_column - token.get_dst_col()
+        ),
+        (1, source_column)
+    );
 }

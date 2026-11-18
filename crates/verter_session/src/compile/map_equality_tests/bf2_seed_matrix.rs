@@ -249,7 +249,7 @@ pub(super) fn compile_cell(cell: &SeedCell) -> RealCompile {
 pub(super) fn assemble(case: &RealCompile) -> AssembledVueModule {
     assemble_vue_main_module(
         &case.canonical_id,
-        &case.compiled,
+        case.compiled(),
         &case.meta,
         &case.profile,
     )
@@ -670,12 +670,12 @@ fn bf2_authored_source_oracle_runs_over_every_seed_matrix_cell(
         // parse/script/template phase vocabulary) does not arise — and is
         // asserted not to arise rather than answered by invention.
         assert!(
-            case.compiled.diagnostics.is_empty(),
+            case.compiled().diagnostics.is_empty(),
             "{}: the compile emitted diagnostics ({:?}); they have no defined projection onto \
              the golden's phase-kind vocabulary, so this suite can no longer hand the oracle a \
              faithful candidate",
             cell.golden_name,
-            case.compiled.diagnostics
+            case.compiled().diagnostics
         );
 
         let report = &oracle_report.raw;
@@ -878,6 +878,9 @@ fn primary_oracle_reports(run: &SeedRun) -> Vec<CellReport> {
     reports
 }
 
+/// One named contract checked over the shared seed-matrix run.
+type SeedContract = (&'static str, fn(&SeedRun));
+
 #[test]
 fn authoritative_seed_matrix_contracts_share_one_verified_run() {
     assert_eq!(SEED_MATRIX_READS.load(Ordering::SeqCst), 0);
@@ -887,7 +890,7 @@ fn authoritative_seed_matrix_contracts_share_one_verified_run() {
     assert_eq!(SEED_MATRIX_READS.load(Ordering::SeqCst), 1);
     assert_eq!(CELL_COMPILES.load(Ordering::SeqCst), run.cells.len());
 
-    let contracts: &[(&str, fn(&SeedRun))] = &[
+    let contracts: &[SeedContract] = &[
         (
             "locked manifest applicability",
             seed_matrix_applicability_is_partitioned_from_the_locked_manifest,

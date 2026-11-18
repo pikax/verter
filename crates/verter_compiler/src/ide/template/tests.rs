@@ -73,7 +73,7 @@ fn gen_tsx_template(source: &str) -> String {
     );
 
     let mut tpl_ct = CodeTransform::new(source, &alloc);
-    let mut out = CodeGenOutput::new(&alloc);
+    let mut out = EditRecorder::new(&alloc);
     let bindings = FxHashMap::default();
     let options = IdeTemplateOptions {
         self_name: "App",
@@ -93,7 +93,7 @@ fn gen_tsx_template(source: &str) -> String {
         &options,
         &TemplateComponentBindings::default(),
     );
-    out.apply_to(&mut tpl_ct);
+    out.apply(&mut tpl_ct).expect("recorded edits apply");
 
     let full = tpl_ct.build_string();
 
@@ -342,7 +342,7 @@ fn gen_tsx_template_with_components(
 
     let tpl_alloc = Allocator::new();
     let mut tpl_ct = CodeTransform::new(source, &tpl_alloc);
-    let mut out = CodeGenOutput::new(&tpl_alloc);
+    let mut out = EditRecorder::new(&tpl_alloc);
 
     let mut binding_map: FxHashMap<&str, BindingType> = FxHashMap::default();
     for &(name, bt) in bindings {
@@ -370,7 +370,7 @@ fn gen_tsx_template_with_components(
         &options,
         &components,
     );
-    out.apply_to(&mut tpl_ct);
+    out.apply(&mut tpl_ct).expect("recorded edits apply");
 
     let full = tpl_ct.build_string();
     let tpl_start = template_ast.root.tag_open.start as usize;
@@ -504,7 +504,7 @@ fn gen_tsx_template_with_raw_tokens(
 
     let tpl_alloc = Allocator::new();
     let mut tpl_ct = CodeTransform::new(source, &tpl_alloc);
-    let mut out = CodeGenOutput::new(&tpl_alloc);
+    let mut out = EditRecorder::new(&tpl_alloc);
     let binding_map: FxHashMap<&str, BindingType> = bindings.iter().copied().collect();
     let options = IdeTemplateOptions {
         self_name: "App",
@@ -524,11 +524,12 @@ fn gen_tsx_template_with_raw_tokens(
         &options,
         &TemplateComponentBindings::default(),
     );
-    out.apply_to(&mut tpl_ct);
+    out.apply(&mut tpl_ct).expect("recorded edits apply");
 
     let full = tpl_ct.build_string();
-    let map =
-        tpl_ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"));
+    let map = tpl_ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<RawToken> = map
         .get_tokens()
         .map(|t| RawToken {
@@ -825,7 +826,7 @@ fn gen_jsx_template(source: &str) -> String {
     );
 
     let mut tpl_ct = CodeTransform::new(source, &alloc);
-    let mut out = CodeGenOutput::new(&alloc);
+    let mut out = EditRecorder::new(&alloc);
     let bindings = FxHashMap::default();
     let options = IdeTemplateOptions {
         self_name: "App",
@@ -845,7 +846,7 @@ fn gen_jsx_template(source: &str) -> String {
         &options,
         &TemplateComponentBindings::default(),
     );
-    out.apply_to(&mut tpl_ct);
+    out.apply(&mut tpl_ct).expect("recorded edits apply");
 
     let full = tpl_ct.build_string();
     let tpl_start = template_ast.root.tag_open.start as usize;
@@ -1141,7 +1142,7 @@ fn gen_tsx_template_strict_slots_with_bindings(
 
     let tpl_alloc = Allocator::new();
     let mut tpl_ct = CodeTransform::new(source, &tpl_alloc);
-    let mut out = CodeGenOutput::new(&tpl_alloc);
+    let mut out = EditRecorder::new(&tpl_alloc);
 
     let mut binding_map: FxHashMap<&str, BindingType> = FxHashMap::default();
     for &(name, bt) in bindings {
@@ -1166,7 +1167,7 @@ fn gen_tsx_template_strict_slots_with_bindings(
         &options,
         &TemplateComponentBindings::default(),
     );
-    out.apply_to(&mut tpl_ct);
+    out.apply(&mut tpl_ct).expect("recorded edits apply");
 
     let full = tpl_ct.build_string();
     let tpl_start = template_ast.root.tag_open.start as usize;
@@ -1219,7 +1220,7 @@ fn gen_tsx_template_strict_slots_with_map(
 
     let tpl_alloc = Allocator::new();
     let mut tpl_ct = CodeTransform::new(source, &tpl_alloc);
-    let mut out = CodeGenOutput::new(&tpl_alloc);
+    let mut out = EditRecorder::new(&tpl_alloc);
     let binding_map: FxHashMap<&str, BindingType> = bindings
         .iter()
         .map(|&(name, bt)| (tpl_alloc.alloc_str(name) as &str, bt))
@@ -1242,11 +1243,12 @@ fn gen_tsx_template_strict_slots_with_map(
         &options,
         &TemplateComponentBindings::default(),
     );
-    out.apply_to(&mut tpl_ct);
+    out.apply(&mut tpl_ct).expect("recorded edits apply");
 
     let full = tpl_ct.build_string();
-    let map =
-        tpl_ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"));
+    let map = tpl_ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<(u32, u32, u32)> = map
         .get_tokens()
         .filter(|t| t.get_source_id().is_some())

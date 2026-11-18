@@ -430,7 +430,7 @@ pub(super) struct NestedChildParts {
     pub(super) params: Vec<SemanticNodeId>,
     pub(super) signature_params: Vec<crate::semantic_query::FunctionParam>,
     pub(super) type_param_decls: Vec<crate::semantic_query::TypeParamDecl>,
-    pub(super) binder_env: FlowBinderEnv,
+    pub(super) binder_env: Arc<FlowBinderEnv>,
     pub(super) captured_products: FlowProductStore,
     /// The product authority `captured_products` advances under.
     pub(super) captured_execution: super::super::flow_return_products::FlowFrameExecution,
@@ -891,7 +891,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let owned = ActivationOwned {
             content,
             params,
-            binder_env: Arc::new(binder_env),
+            binder_env,
             canonical: Arc::from(self.st.canonical),
             self_slot: None,
         };

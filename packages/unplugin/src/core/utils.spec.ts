@@ -56,4 +56,23 @@ describe("parseVueRequest", () => {
     expect(result.query.lang).toBe("scss");
     expect(result.query.index).toBe(1);
   });
+
+  it("reads the language from the dotted key", () => {
+    const result = parseVueRequest("/path/to/App.vue?vue&type=style&index=0&lang.module.css");
+    expect(result.query.lang).toBe("module.css");
+  });
+
+  it("keeps the text before the first question mark for a refused request", () => {
+    const result = parseVueRequest("/path/to/App.vue?vue");
+    expect(result.filename).toBe("/path/to/App.vue");
+    expect(result.query.vue).toBe(true);
+    expect(result.query.verter).toBe(false);
+  });
+
+  it("does not treat host flags as owned query fields", () => {
+    const result = parseVueRequest("/path/to/App.vue?vue&type=style&index=2&inline&used&lang.css");
+    expect(result.query.index).toBe(2);
+    expect(result.query.scoped).toBe(false);
+    expect(result.query.lang).toBe("css");
+  });
 });

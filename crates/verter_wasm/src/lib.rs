@@ -617,11 +617,10 @@ impl WasmVerterHost {
     /// Resolves a raw import ID (e.g. `./Foo.vue?type=style&index=0`) into its
     /// canonical ID, virtual node kind, and bundler/LSP identifiers.
     ///
-    /// Returns `null` (serialised via `serde_wasm_bindgen`) if the ID does
-    /// not match any file tracked by this host.
+    /// A raw ID the id grammar rejects resolves to `{ rejected: <code> }`.
     #[wasm_bindgen]
     pub fn resolve(&self, raw_id: &str) -> Result<JsValue, JsValue> {
-        let output = catch_panic(|| self.inner.resolve(raw_id).map(host_resolved_id_to_ffi))?;
+        let output = catch_panic(|| host_resolve_outcome_to_ffi(self.inner.resolve(raw_id)))?;
         to_wasm_value(&output)
     }
 

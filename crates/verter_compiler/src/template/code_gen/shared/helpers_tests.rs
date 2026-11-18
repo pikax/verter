@@ -1,6 +1,8 @@
 use super::*;
 use smallvec::SmallVec;
 
+use crate::template::vue_syntax::needs_js_escaping;
+
 // ==================== parse_v_for_expression ====================
 
 #[test]

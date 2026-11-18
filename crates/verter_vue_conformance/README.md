@@ -1,7 +1,7 @@
 # verter_vue_conformance
 
-Hermetic official **Vue 3.6 RC** compiler conformance goldens for Verter's VDOM
-and Vapor backends, and the structural comparator that checks Verter's shipped
+Hermetic official **Vue 3.6 RC** compiler conformance goldens for Verter's VDOM,
+Vapor and server-render (SSR) backends, and the structural comparator that checks Verter's shipped
 output against them. This crate houses the seed corpus, the VENDORED oracle
 artifacts produced by the pinned official Vue RC toolchain, and the OXC
 structural comparator + seed conformance suite.
@@ -33,23 +33,59 @@ differently, so positions are cosmetic).
 ```text
 corpus/
 ├── manifest.json                      # generated: case-id → SFC → per-backend artifacts + disposition
-├── cases/<area>/<case>.vue            # seed SFC corpus (32 cases, one focused feature each)
+├── cases/<area>/<case>.vue            # seed SFC corpus (one focused feature each)
 ├── support/types.ts                   # locally vendored shared types (hermetic compile reads stay in corpus/)
-└── goldens/3.6.0-rc.5/                # vendored official output, version-scoped
+└── goldens/3.6.0-rc.15/                # vendored official output, version-scoped
     ├── vdom/<area>/<case>.js          # official emitted render/component module (VDOM backend)
     ├── vdom/<area>/<case>.map.json    # its source map
     ├── vdom/<area>/<case>.meta.json   # per-cell metadata (schema, versions, hashes, disposition, diagnostics, helpers)
-    └── vapor/…                        # same for the Vapor backend
+    ├── vapor/…                        # same for the Vapor backend
+    └── ssr/…                          # same for the server render (`ssrRender`, `ssr: true`)
 ```
 
 The generator/oracle package lives at `packages/vue-conformance-oracle`
 (private, never published). The single pin authority for the toolchain version
 is `VUE_ORACLE_VERSION` in `packages/vue-conformance-oracle/vue-golden-lib.mjs`
-(currently `3.6.0-rc.5` for `vue`, `@vue/compiler-dom`, `@vue/compiler-sfc`,
+(currently `3.6.0-rc.15` for `vue`, `@vue/compiler-dom`, `@vue/compiler-sfc`,
 and `@vue/compiler-vapor`; `esbuild` is pinned separately for the TS type-strip
 post-process).
 
 ## Regenerating
+
+`corrections/` is a separate minimal synthetic corpus with raw Vue **3.6.0-rc.15**
+`compileScript` / `compileTemplate` outputs. Its `probes.json` records source
+and golden hashes, affected target/mode cells, and their dispositions. It does
+not change the RC corpus or its pin. The correction tests reuse the existing
+case discovery and structural canonicalizer. Corrected and matched cells
+compare complete render functions (including helper identities, literal
+payloads and patch flags); module/setup scaffolds are outside this oracle.
+The route differential still checks its usual module, map and diagnostic
+dimensions, with Corrected rows only for proven differences. Pending and
+excluded cells retain their inputs and goldens without acceptance rows or
+passing render-contract claims. The metadata explains each exclusion.
+
+`native_server_slot_children_follow_vue` also compares the complete server
+renders of the named-slot corpus case and the one-statement slot-handler
+regression against official output, and requires the legacy renders to differ.
+The former uses the RC corpus golden; the latter keeps raw Vue 3.6.0-rc.15 output
+and its source/code hashes and compile options beside the correction goldens.
+These contracts support the server route's inherited native slot-scope
+Corrected rows.
+
+These raw goldens use `id: "test"`, `filename: "App.vue"`, development mode,
+and the script's binding metadata for separate templates; server templates
+use `ssr: true`, and inline output uses `compileScript({ inlineTemplate: true })`.
+TypeScript expression plugins are enabled for TypeScript setup blocks. Raw
+Vue TypeScript output is retained, without an erasure post-process. The
+default Rust tests read committed artifacts only, requiring no Node install.
+
+`packages/vue-conformance-oracle/gen-vue-correction-goldens.mjs` is the only
+writer of `corrections/goldens/<version>/` and `probes.json`. Install
+`@vue/compiler-sfc` at the target version and `typescript@5.9.3` in an isolated
+directory, then run it with that directory as its argument (`--check` compares
+the committed artifacts with a fresh run). It refuses mismatched Vue packages,
+keeps every authored probe field, and rewrites only versions, paths, hashes and
+diagnostics.
 
 ```bash
 pnpm install                # install the pinned RC toolchain (exact versions, no ranges)
@@ -114,8 +150,8 @@ AND a line-number shift — both still PASS.
 
 ## Seed conformance run + tracked dispositions
 
-`tests/cases/seed_conformance.rs` compiles all 32 seed SFCs with Verter for
-BOTH backends (`verter_compiler::compile`, `force_vapor` for vapor) and
+`tests/cases/seed_conformance.rs` compiles every corpus SFC with Verter for
+the client backends (the server-render goldens are registered as pending comparison until Verter emits server output) (`verter_compiler::compile`, `force_vapor` for vapor) and
 assembles the runtime Main through the GENUINE shipped pipeline — no hand
 copy: `verter_compiler::framework_common::vue_bridge::vue_result_to_runtime_bundle`
 (the carrier's real `VerterCompileResult` → `RuntimeCompileOutput`
@@ -166,8 +202,9 @@ VERTER_CONFORMANCE_DEBUG=<case-id> cargo test -p verter_vue_conformance --test m
 
 - One focused feature per SFC; ids are `path/safe-hierarchical` (directory =
   feature area).
-- Each case is compiled for BOTH backends (`vdom` via `@vue/compiler-dom`,
-  `vapor` via `@vue/compiler-vapor` with `vapor: true`); per-cell dispositions
+- Each case is compiled for every backend (`vdom` via `@vue/compiler-dom`,
+  `vapor` via `@vue/compiler-vapor` with `vapor: true`, `ssr` via
+  `compileTemplate({ ssr: true })` with the scope id and `v-bind()` css variables); per-cell dispositions
   are recorded independently, including official rejections with diagnostics.
 - `lang="ts"` script-setup cells are type-stripped with the pinned esbuild
   (`{ loader: "ts" }` only — PURE annotations and the official export shape

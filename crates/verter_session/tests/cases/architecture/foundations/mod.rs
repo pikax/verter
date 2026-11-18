@@ -720,6 +720,17 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // tests/cases/compile-fail/certified_binding_struct_literal_forge.rs
         // trybuild fixture.
         "pub mod semantic_capability",
+        // crates/verter_tsc/src/sfc_driver/{mapper_server,per_file}.rs read
+        // carrier transforms through the mapper plane; its revision types
+        // live in the cache module, so both are public together.
+        "pub mod sfc_projection_cache",
+        "pub mod sfc_projection_mapper",
+        // crates/verter_tsc/src/{api_check.rs,sfc_driver/project_program.rs}
+        // attribute engine diagnostics to their obligations.
+        "pub mod sfc_projection_diagnostics",
+        // crates/verter_tsc/src/sfc_driver/{mod,project_program}.rs admit
+        // per-project publications through the certified binding.
+        "pub mod sfc_projection_observations",
         // tests/cases/g_session/committed_input_basis.rs — session bind of
         // one committed InputBasis + SnapshotFence (crate-root re-exports
         // wrap, so the line-based extractor records the bare prefix).
@@ -877,7 +888,8 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // depend on verter_protocol internals.
         "pub use verter_protocol::types::PublicApiProjectionSubject",
         // tests/cases/g_misc0/relative_path_session_parity.rs
-        "pub use id::resolve_external",
+        // crates/verter_napi/src/lib.rs parses raw ids at the binding boundary.
+        "pub use id::{parse_raw_id, resolve_external}",
         // TS7 oracle harness snapshot GENERATOR entries — `pub` ONLY under the
         // `oracle-gen` feature (off the default closure), so the
         // `src/bin/oracle_gen` + `src/bin/oracle_upgrade` binaries (separate

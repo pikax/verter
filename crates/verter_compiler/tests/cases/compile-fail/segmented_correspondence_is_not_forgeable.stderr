@@ -1,0 +1,11 @@
+error[E0451]: fields `content`, `anchors` and `checked_against` of struct `SegmentedCorrespondence` are private
+  --> tests/cases/compile-fail/segmented_correspondence_is_not_forgeable.rs:8:9
+   |
+ 7 |     let _forged = verter_compiler::code_transform::SegmentedCorrespondence {
+   |                   -------------------------------------------------------- in this type
+ 8 |         content: "_ctx.foo",
+   |         ^^^^^^^ private field
+ 9 |         anchors: &[],
+   |         ^^^^^^^ private field
+10 |         checked_against: "{{ bar }}",
+   |         ^^^^^^^^^^^^^^^ private field

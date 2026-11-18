@@ -238,6 +238,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
 /// A family build between two of its stages: what the stages before the
 /// read it waits on computed.
 pub(super) enum FamilyBuild {
+    Conditional(Box<super::conditional_decision::ConditionalDecision>),
     TemplateUnion(
         Box<QueryBuildOutput>,
         Box<crate::semantic_query::SemanticNodeData>,
@@ -273,11 +274,23 @@ impl FamilyBuild {
     /// declaration instantiations and evaluation carrier reads.
     fn counts_need_intent(&self, key: &SemanticQueryKey) -> bool {
         match self {
+            Self::Conditional(decision) => {
+                decision.reads_for_carrier() && !matches!(key, SemanticQueryKey::TypeOf { .. })
+            }
             Self::ApparentType(_) => true,
             Self::ProjectPath(build) => build.walk.counts_awaited_intent(key),
             Self::Discovery(walk) => walk.counts_awaited_intent(key),
             _ => false,
         }
+    }
+
+    /// Whether a counted read this build makes in place counts its intent
+    /// even when the read is driven on the continuation runtime. A
+    /// conditional decision counts each of its reads at the position that
+    /// makes it, whichever way the read is evaluated, as its in-place
+    /// driver does: the driven root enters its query without counting it.
+    fn counts_driven_need_intent(&self) -> bool {
+        matches!(self, Self::Conditional(_))
     }
 
     /// Whether the read this build waits on was named from kernel handles a
@@ -300,7 +313,8 @@ impl FamilyBuild {
             Self::Discovery(walk) => {
                 walk.awaits_retired_result(stage.graph_store().signature_store().epoch())
             }
-            Self::MacroPayload(_)
+            Self::Conditional(_)
+            | Self::MacroPayload(_)
             | Self::ReduceIntersection(_)
             | Self::ClassInstanceSurface(_)
             | Self::ClassStaticSurface(_)
@@ -351,6 +365,7 @@ impl FamilyBuild {
         dispatch: &ProjectSemanticDispatch<'_, C>,
     ) {
         match self {
+            Self::Conditional(decision) => dispatch.release_conditional_decision(decision),
             Self::ProjectPath(build) => build.walk.release(dispatch),
             Self::OverloadSet(build) => build.release(dispatch),
             Self::Discovery(walk) => walk.release(dispatch),
@@ -368,7 +383,8 @@ impl FamilyBuild {
             Self::ResolveDecl(build) => build.port_read(),
             Self::ProjectPath(build) => build.walk.port_read(),
             Self::Discovery(walk) => walk.port_read(),
-            Self::MacroPayload(_)
+            Self::Conditional(_)
+            | Self::MacroPayload(_)
             | Self::ReduceIntersection(_)
             | Self::OverloadSet(_)
             | Self::ClassInstanceSurface(_)
@@ -447,7 +463,8 @@ const _: () = assert!(std::mem::size_of::<FamilyStep>() <= 176);
 pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
     matches!(
         key,
-        SemanticQueryKey::TemplateLiteralReduce { .. }
+        SemanticQueryKey::Conditional { .. }
+            | SemanticQueryKey::TemplateLiteralReduce { .. }
             | SemanticQueryKey::ResolveMacroPayload { .. }
             | SemanticQueryKey::ResolveDecl(_)
             | SemanticQueryKey::ReduceIntersection { .. }
@@ -471,6 +488,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     #[inline(never)]
     pub(super) fn begin_family_build(&self, key: &SemanticQueryKey) -> Option<FamilyStep> {
         match key {
+            SemanticQueryKey::Conditional { .. } => {
+                Some(self.begin_conditional_family(
+                    key,
+                    super::helper_continuation::HelperDrive::InPlace,
+                ))
+            }
             SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
                 Some(self.begin_template_literal_reduce(pattern, args))
             }
@@ -569,6 +592,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // instantiate candidates through the substitution walk, whose
         // in-place reads a dispatcher stage makes.
         let build = match build {
+            FamilyBuild::Conditional(decision) => {
+                return self.resume_conditional_family(decision, deliver);
+            }
             FamilyBuild::ProjectPath(build) => {
                 return self.resume_project_path(*build, deliver);
             }
@@ -584,6 +610,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.graph().record_continuation_resumed();
         let read = deliver();
         match build {
+            FamilyBuild::Conditional(_) => {
+                unreachable!("a conditional resumes at its standing operation")
+            }
             FamilyBuild::ProjectPath(_) => unreachable!("a path walk resumed above"),
             FamilyBuild::Discovery(_) => unreachable!("a signature discovery resumed above"),
             FamilyBuild::TemplateUnion(mut output, fallback) => {
@@ -650,6 +679,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             FamilyBuild::MacroPayload(build) => self
                 .continuation_stage()
                 .resume_macro_payload_owner(build, serve),
+            FamilyBuild::Conditional(_) => unreachable!("a conditional reads no file"),
             FamilyBuild::TemplateUnion(..) => unreachable!("a template union is a query read"),
             FamilyBuild::ProjectPath(_) => unreachable!("a path walk resumed above"),
             FamilyBuild::ResolveDecl(build) => self
@@ -701,7 +731,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 unreachable!("a class's static surface reads only its declarations")
             }
             (
-                FamilyBuild::MacroPayload(_)
+                FamilyBuild::Conditional(_)
+                | FamilyBuild::MacroPayload(_)
                 | FamilyBuild::ReduceIntersection(_)
                 | FamilyBuild::OverloadSet(_)
                 | FamilyBuild::ClassInstanceSurface(_)
@@ -754,17 +785,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Resume `build` with `key`, the query it names next, read in place
-    /// where the build consumes it. A read that drives on the continuation
-    /// runtime counts its intent at its root's entry; any other read a
-    /// counting build makes is counted here.
+    /// where the build consumes it. A read a counting build makes is
+    /// counted here, unless it drives on the continuation runtime and the
+    /// build is not a conditional decision
+    /// ([`FamilyBuild::counts_driven_need_intent`]).
     pub(super) fn resume_family_need_in_place(
         &self,
         key: SemanticQueryKey,
         build: FamilyBuild,
     ) -> FamilyStep {
         let retired = build.awaits_retired_read(&self.continuation_stage());
-        let counts =
-            !retired && build.counts_need_intent(&key) && !self.drives_on_the_runtime(&key);
+        let counts = !retired
+            && build.counts_need_intent(&key)
+            && (build.counts_driven_need_intent() || !self.drives_on_the_runtime(&key));
         if !retired {
             build.trace_need(&key);
         }
@@ -900,5 +933,92 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
+    }
+}
+
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    #[inline(never)]
+    fn resume_conditional_family(
+        &self,
+        mut decision: Box<super::conditional_decision::ConditionalDecision>,
+        deliver: &mut dyn FnMut() -> CacheRead<QueryResult<SemanticQueryValue>>,
+    ) -> FamilyStep {
+        verter_audit::attribute_scope!(ConditionalReduce);
+        let mut delivery = || super::narrow_value_cache_read(deliver());
+        let step = self.advance_conditional_decision(
+            &mut decision,
+            Some(super::conditional_decision::DecisionDelivery::Read(
+                &mut delivery,
+            )),
+        );
+        self.conditional_family_step(*decision, step)
+    }
+
+    #[inline(never)]
+    pub(super) fn begin_conditional_family(
+        &self,
+        key: &SemanticQueryKey,
+        drive: super::helper_continuation::HelperDrive,
+    ) -> FamilyStep {
+        verter_audit::attribute_scope!(ConditionalReduce);
+        let SemanticQueryKey::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            distributive,
+            pending,
+        } = key
+        else {
+            unreachable!("a conditional family key")
+        };
+        let mut decision = self.begin_conditional_decision(
+            *check,
+            *extends,
+            *distributive,
+            super::conditional_decision::DecisionBranches::Materialized {
+                true_branch: *true_branch,
+                false_branch: *false_branch,
+                pending: pending.clone(),
+                literal_extends: None,
+            },
+            drive,
+        );
+        let step = self.advance_conditional_decision(&mut decision, None);
+        self.conditional_family_step(decision, step)
+    }
+
+    #[inline(never)]
+    fn conditional_family_step(
+        &self,
+        decision: super::conditional_decision::ConditionalDecision,
+        step: super::conditional_decision::DecisionStep,
+    ) -> FamilyStep {
+        match step {
+            super::conditional_decision::DecisionStep::Done(output) => FamilyStep::Done(output),
+            super::conditional_decision::DecisionStep::Read(key) => {
+                FamilyStep::Need(*key, Box::new(FamilyBuild::Conditional(Box::new(decision))))
+            }
+            super::conditional_decision::DecisionStep::Branch(_) => {
+                unreachable!("a materialized family already has both branch nodes")
+            }
+        }
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trace_conditional_family_for_tests(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> (QueryBuildOutput, Vec<SemanticQueryKey>) {
+        let (_connected, _) = self.enter_connected_demand(false);
+        let mut requested = Vec::new();
+        let step = self
+            .begin_family_build(key)
+            .expect("a conditional family continuation");
+        let step =
+            self.complete_family_in_place_naming(step, &mut |key| requested.push(key.clone()));
+        let FamilyStep::Done(output) = step else {
+            unreachable!("a node-domain conditional output")
+        };
+        (*output, requested)
     }
 }

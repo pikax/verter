@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use verter_language::carrier_grammar::{
-    AcceptedRegisteredCarrierSource, CarrierGrammarAuthority, CarrierGrammarConfig,
-    CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
+    AcceptedRegisteredCarrierSource, CarrierGrammarAuthority, CarrierParserGrammarVersion,
+    FrameworkAdapterSemanticVersion,
 };
 use verter_language::registered_source_authority::{
     CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -33,9 +33,10 @@ fn accepted(
         .expect("registered source");
     let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
     let config = if language.is_vue() {
-        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).expect("Vue config")
+        crate::framework_common::vue_grammar_config("{{", "}}", std::iter::empty::<&str>())
+            .expect("Vue config")
     } else {
-        CarrierGrammarConfig::Svelte
+        crate::svelte::svelte_grammar_config()
     };
     grammar_authority
         .register_carrier_grammar(
@@ -182,19 +183,19 @@ fn registered_rehome_accepts_the_same_parse_under_a_new_source_authority() {
     ));
 }
 
-/// Build the closed dispatch value the module-internal projector expects for
-/// `accepted`'s own resolved language — mirrors exactly what
-/// `project_registered_accepted` resolves internally.
-fn known_compiler(
+/// The catalog frontend row the module-internal projector dispatches on for
+/// `accepted`'s own resolved language — the same row
+/// `project_registered_accepted` selects internally.
+fn catalog_frontend_row(
     accepted: &AcceptedRegisteredCarrierSource,
-) -> super::registered_carrier_projection::KnownRegisteredCompiler {
-    use super::registered_carrier_projection::KnownRegisteredCompiler;
+) -> &'static super::CarrierFrontendRow {
     let language = accepted.source().resolved_file_language();
-    if language.is_vue() {
-        KnownRegisteredCompiler::Vue(Arc::new(super::vue_bridge::VueCarrierCompiler))
-    } else {
-        KnownRegisteredCompiler::Svelte(Arc::new(crate::svelte::SvelteCarrierCompiler))
-    }
+    super::CarrierFrontendRegistry::built_in()
+        .row_for(
+            language.adapter_id().expect("registered adapter"),
+            language.carrier_language_id().expect("carrier language"),
+        )
+        .expect("catalog frontend row")
 }
 
 /// Regression coverage for `RegisteredCarrierProjection::into_framework_parse_artifact`:
@@ -202,7 +203,7 @@ fn known_compiler(
 /// resulting artifact must retain the EXACT Arcs the projection produced —
 /// never a clone, never a rebuild.
 #[test]
-fn b2_materialization_preserves_exact_carrier_and_inventory_arcs() {
+fn materialization_preserves_exact_carrier_and_inventory_arcs() {
     for (path, language, source) in [
         (
             "file:///workspace/Materialize.vue",
@@ -216,12 +217,10 @@ fn b2_materialization_preserves_exact_carrier_and_inventory_arcs() {
         ),
     ] {
         let (_, _, accepted) = accepted(path, language, source);
-        let known = known_compiler(&accepted);
-        let projection = super::registered_carrier_projection::project_registered_carrier(
-            Some(&known),
-            &accepted,
-        )
-        .expect("registered source parses");
+        let row = catalog_frontend_row(&accepted);
+        let projection =
+            super::registered_carrier_projection::project_registered_carrier(Some(row), &accepted)
+                .expect("registered source parses");
         let carrier_before = projection.carrier().clone();
         let inventory_before = Arc::clone(projection.inventory());
         let artifact = projection.into_framework_parse_artifact();
@@ -1067,23 +1066,36 @@ fn unclosed_dynamic_directive_argument_at_eof_projects_typed_recovery() {
 
 #[test]
 fn catalog_project_registered_accepted_parses_without_compiler_registry() {
-    let (_, _, accepted) = accepted(
-        "file:///workspace/App.vue",
-        verter_language::FileLanguage::vue(),
-        "<template><p>ok</p></template>",
-    );
-    let parses_before = super::registered_carrier_projection::registered_frontend_parse_count();
-    let projection = super::registered_carrier_projection::project_registered_accepted(&accepted)
-        .expect("catalog frontend must project accepted Vue source");
-    assert_eq!(
-        super::registered_carrier_projection::registered_frontend_parse_count(),
-        parses_before + 1
-    );
-    let artifact = projection.into_framework_parse_artifact();
-    assert_eq!(
-        artifact.adapter_id(),
-        &verter_language::FrameworkAdapterId::vue()
-    );
+    use super::registered_carrier_projection::{
+        project_registered_accepted, registered_frontend_parse_count,
+    };
+    use verter_language::{FileLanguage, FrameworkAdapterId};
+    for (path, language, adapter, source) in [
+        (
+            "file:///workspace/App.vue",
+            FileLanguage::vue(),
+            FrameworkAdapterId::vue(),
+            "<template><p>ok</p></template>",
+        ),
+        (
+            "file:///workspace/App.svelte",
+            FileLanguage::svelte(),
+            FrameworkAdapterId::svelte(),
+            "<p>ok</p>",
+        ),
+    ] {
+        let (_, _, accepted) = accepted(path, language, source);
+        let parses_before = registered_frontend_parse_count();
+        let projection = project_registered_accepted(&accepted)
+            .expect("catalog frontend must project the accepted source");
+        assert_eq!(
+            registered_frontend_parse_count(),
+            parses_before + 1,
+            "{adapter:?} projection parses the source once"
+        );
+        let artifact = projection.into_framework_parse_artifact();
+        assert_eq!(artifact.adapter_id(), &adapter);
+    }
 }
 
 #[test]
@@ -1215,35 +1227,41 @@ fn catalog_miss_is_typed_frontend_mismatch_not_a_parse() {
 }
 
 #[test]
-fn fixture_registry_rejects_without_panic_when_known_projector_is_absent() {
-    let (_, _, accepted) = accepted(
+fn projection_rejects_without_parsing_when_the_frontend_row_is_absent_or_foreign() {
+    use super::registered_carrier_projection::{
+        project_registered_carrier, registered_frontend_parse_count,
+    };
+    let (_, _, vue) = accepted(
         "file:///workspace/Fixture.vue",
         verter_language::FileLanguage::vue(),
         "<template>ok</template>",
     );
-    let parses_before = super::registered_carrier_projection::registered_frontend_parse_count();
-    let err =
-        match super::registered_carrier_projection::project_registered_carrier(None, &accepted) {
-            Err(err) => err,
-            Ok(_) => panic!("an absent known projector must reject, not project"),
-        };
-    assert_eq!(
-        super::registered_carrier_projection::registered_frontend_parse_count(),
-        parses_before,
-        "a missing known projector must not parse"
+    let (_, _, svelte) = accepted(
+        "file:///workspace/Fixture.svelte",
+        verter_language::FileLanguage::svelte(),
+        "<p>ok</p>",
     );
-    assert!(matches!(
-        err,
-        verter_language::SyntaxReject::UnsupportedProfile {
-            reason: verter_language::UnsupportedSyntaxProfileReason::FrontendMismatch,
-            ..
-        }
-    ));
+    let foreign = catalog_frontend_row(&svelte);
+    for (case, row) in [("absent", None), ("foreign", Some(foreign))] {
+        let parses_before = registered_frontend_parse_count();
+        let Err(err) = project_registered_carrier(row, &vue) else {
+            panic!("an {case} frontend row must reject, not project");
+        };
+        assert_eq!(
+            registered_frontend_parse_count(),
+            parses_before,
+            "an {case} frontend row must not parse"
+        );
+        let mismatch = matches!(
+            err,
+            verter_language::SyntaxReject::UnsupportedProfile {
+                reason: verter_language::UnsupportedSyntaxProfileReason::FrontendMismatch,
+                ..
+            }
+        );
+        assert!(mismatch, "an {case} frontend row is a frontend mismatch");
+    }
 }
-
-// Parse selection is catalog-typed (`parse_registered_frontend` /
-// `InstalledCarrierFrontend`). Geometry after parse still matches the
-// closed `KnownRegisteredCompiler` enum — not dyn dispatch.
 
 // ── FL2-E TE-C-12 / T-B1-D03: Svelte style dialect derives from `lang` ──
 

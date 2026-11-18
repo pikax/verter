@@ -70,7 +70,23 @@ fn gen_script<'a>(
 ) -> ScriptCodeGenResult<'a> {
     let prepared =
         crate::script::prepared::PreparedScript::build(source, script, script_setup, alloc);
-    let result = generate_script(script, script_setup, &prepared, source, ct, alloc, options);
+    let lane = crate::script::bindings::script_lane_bindings(
+        script_setup,
+        &prepared,
+        options.macro_runtime,
+        alloc,
+    );
+    let result = generate_script(
+        script,
+        script_setup,
+        &prepared,
+        source,
+        ct,
+        alloc,
+        options,
+        lane,
+    )
+    .expect("recorded script edits apply");
 
     // Mirror the production compile pipeline: under force_js the whole-program
     // body strip runs AFTER generate_script (compile/mod.rs), owning all TS
@@ -99,6 +115,91 @@ fn gen_script<'a>(
 }
 
 // ── Test 1: No script blocks ──────────────────────────────────
+
+#[test]
+fn script_edits_preserve_the_transforms_map_policy() {
+    use crate::emission::{map_capture_events, reset_map_capture_events, test_source, MapMode};
+
+    let (setup, source) = make_script("const n = 1", "<script setup>", true);
+    for is_vapor in [false, true] {
+        let mut outputs = Vec::new();
+        for mode in [MapMode::NoMap, MapMode::Map] {
+            let alloc = Allocator::default();
+            reset_map_capture_events();
+            let mut ct = CodeTransform::with_mode_in(&source, &alloc, mode);
+            let result = gen_script(
+                None,
+                Some(&setup),
+                &source,
+                &mut ct,
+                &alloc,
+                &ScriptCodeGenOptions {
+                    component_name: "App",
+                    is_vapor,
+                    ..Default::default()
+                },
+            );
+            assert!(!result.sfc_binding_markers.is_empty());
+            for marker in result.sfc_binding_markers {
+                assert!(ct.generated_content_range(marker).is_some());
+            }
+            let code = ct.build_string();
+            let parsed =
+                verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::mjs())
+                    .parse();
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "{:?}\n{code}",
+                parsed.diagnostics
+            );
+            let frozen = ct.freeze(test_source("App.vue", &source)).unwrap();
+            assert_eq!(frozen.hints().is_some(), mode == MapMode::Map);
+            if mode == MapMode::NoMap {
+                assert_eq!(map_capture_events(), 0);
+            }
+            outputs.push(code);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+    }
+}
+
+#[test]
+fn script_lowering_preserves_text_without_map_capture() {
+    use crate::emission::MapMode;
+    let (setup, source) = make_script("const n = 1", "<script setup>", true);
+    let mut outputs = Vec::new();
+    for mode in [MapMode::Map, MapMode::NoMap] {
+        let alloc = Allocator::default();
+        let mut transform = CodeTransform::with_mode_in(&source, &alloc, mode);
+        crate::emission::reset_map_capture_events();
+        gen_script(
+            None,
+            Some(&setup),
+            &source,
+            &mut transform,
+            &alloc,
+            &Default::default(),
+        );
+        let code = transform.build_string();
+        assert!(code.contains("const n = 1"), "{code}");
+        if mode == MapMode::NoMap {
+            assert_eq!(transform.captured_map_facts(), (0, false));
+            assert_eq!(crate::emission::map_capture_events(), 0);
+        } else {
+            assert!(transform.captured_map_facts().0 > 0);
+        }
+        let parsed =
+            verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::mjs())
+                .parse();
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{:?}\n{code}",
+            parsed.diagnostics
+        );
+        outputs.push(code);
+    }
+    assert_eq!(outputs[0], outputs[1]);
+}
 
 #[test]
 fn no_script_blocks_returns_empty() {
@@ -413,6 +514,50 @@ fn script_setup_ref_binding_type() {
     );
 
     // "count" should be SetupRef
+    assert_eq!(
+        result.bindings.get("count").copied(),
+        Some(BindingType::SetupRef),
+        "bindings: {:?}",
+        result.bindings
+    );
+}
+
+/// A `ref` imported from `vue` in the companion `<script>` is Vue's `ref` in
+/// `<script setup>` too, as in Vue's `userImports`.
+#[test]
+fn script_setup_call_of_companion_vue_import_is_setup_ref() {
+    let alloc = Allocator::default();
+    let (mut companion, companion_source) =
+        make_script("\nimport { ref } from 'vue'\n", "<script>", false);
+    let (setup, setup_source) = make_script("\nconst count = ref(0)\n", "<script setup>", true);
+    // The companion block follows the setup block in the combined source.
+    let shift = setup_source.len() as u32;
+    companion.tag_open.start += shift;
+    companion.tag_open.end += shift;
+    companion.tag_open.name_end += shift;
+    if let Some(close) = companion.tag_close.as_mut() {
+        close.start += shift;
+        close.end += shift;
+        close.name_end += shift;
+    }
+    companion.content = companion
+        .content
+        .map(|span| crate::common::Span::new(span.start + shift, span.end + shift));
+    let full = format!("{setup_source}{companion_source}");
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        Some(&companion),
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Counter",
+            ..Default::default()
+        },
+    );
+
     assert_eq!(
         result.bindings.get("count").copied(),
         Some(BindingType::SetupRef),

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 fn carrier_heap<'t>(
     carrier: &'t Arc<dyn CarrierParse>,
@@ -22,17 +22,17 @@ use verter_span::Span;
 
 use verter_language::ParseOptions;
 
-use super::capability::{
-    CarrierFrontend, FrameworkEpochId, FrameworkSemanticAuthority, ProjectionBackend,
-};
+use verter_identity::successor::{CarrierProfileId, FrameworkProfileId};
+
+use super::capability::{FrameworkSemanticAuthority, ProjectionBackend};
 use super::carrier_compiler::{
     CompileUnsupported, RuntimeBlockContentInputs, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
 };
-use super::catalog::{CatalogCapability, CatalogRow, ImmutableCapabilityCatalog};
-use super::vue_bridge::VueCarrierCompiler;
-use super::vue_carrier_frontend::{
-    vue_carrier_frontend_registration, VueCarrierFrontend, VueParseAdmission, VueSfcV3,
+use super::carrier_registry::{
+    CarrierFrontendRegistry, CarrierFrontendRow, ProjectionBackendRow, SemanticAuthorityRow,
 };
+use super::catalog::CatalogSnapshot;
+use super::vue_carrier_frontend::{VueCarrierFrontend, VueSfcV3};
 use super::vue_projection_backend::{
     vue_projection_backend_registration, VueProjectionBackend, VueProjectionError,
     VueProjectionInputs,
@@ -42,11 +42,9 @@ use crate::compile::types::{VueExecutionInputs, VueMacroSemanticInput};
 use crate::compile::RawTemplateData;
 use crate::compile_request::CompileRequest;
 use crate::standalone::DirectCompileError;
-use crate::svelte::carrier_frontend::SvelteParseAdmission;
 use crate::svelte::{
-    svelte_carrier_frontend_registration, svelte_projection_backend_registration,
-    svelte_semantic_authority_registration, SvelteCarrierCompiler, SvelteCarrierFrontend,
-    SvelteProjectionBackend, SvelteProjectionError, SvelteProjectionInputs,
+    svelte_projection_backend_registration, svelte_semantic_authority_registration,
+    SvelteCarrierFrontend, SvelteProjectionBackend, SvelteProjectionError, SvelteProjectionInputs,
     SvelteSemanticAuthority, SvelteSfc5,
 };
 use verter_parser::parser::types::StyleLang;
@@ -102,7 +100,8 @@ pub struct RegisteredCarrierPayload {
 pub struct FrameworkParseArtifact {
     adapter_id: FrameworkAdapterId,
     language_id: LanguageId,
-    epoch: FrameworkEpochId,
+    carrier_profile: CarrierProfileId,
+    framework_profile: FrameworkProfileId,
     parse_key: Arc<verter_language::ParseKey>,
     syntax_profile: Arc<verter_language::SyntaxProfileId>,
     common: FrameworkParseCommon,
@@ -124,25 +123,41 @@ impl FrameworkParseArtifact {
         &self.language_id
     }
 
-    /// Framework epoch bound on this artifact at registered projection.
-    ///
-    /// Semantic catalog lookup keys adapter × this epoch × Semantic —
-    /// callers do not hop the frontend catalog and do not branch on
-    /// Vue/Svelte identity.
+    /// Carrier profile bound on this artifact at registered projection,
+    /// from the frontend row that parsed it.
     #[must_use]
-    pub fn epoch(&self) -> &FrameworkEpochId {
-        &self.epoch
+    pub fn carrier_profile(&self) -> &CarrierProfileId {
+        &self.carrier_profile
     }
 
-    /// Remint catalog epoch identity for miss-path tests. Adapter, carrier
-    /// language, geometry, and retained parse stay unchanged.
+    /// Framework profile bound on this artifact at registered projection.
+    ///
+    /// Registry lookups key carrier × this profile — callers do not hop
+    /// the frontend registry and do not branch on Vue/Svelte identity.
+    #[must_use]
+    pub fn framework_profile(&self) -> &FrameworkProfileId {
+        &self.framework_profile
+    }
+
+    /// The same artifact under a framework profile no catalog registers,
+    /// for miss-path tests. Adapter, carrier language and profile,
+    /// geometry, and retained parse stay unchanged.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub fn remint_epoch_for_tests(&self, epoch: &str) -> Self {
+    pub fn with_unregistered_profile_for_tests(&self) -> Self {
+        const UNREGISTERED: super::profile::FrameworkProfileManifest =
+            super::profile::FrameworkProfileManifest {
+                family: "unregistered",
+                release: "1",
+                admitted_majors: &[1],
+                claimed_carriers: &[],
+            };
         Self {
             adapter_id: self.adapter_id.clone(),
             language_id: self.language_id.clone(),
-            epoch: FrameworkEpochId::new(epoch),
+            carrier_profile: self.carrier_profile.clone(),
+            framework_profile: super::profile::framework_profile(&UNREGISTERED)
+                .expect("the unregistered test manifest is admitted"),
             parse_key: Arc::clone(&self.parse_key),
             syntax_profile: Arc::clone(&self.syntax_profile),
             common: self.common.clone(),
@@ -322,7 +337,8 @@ impl FrameworkParseArtifact {
         Ok(Self {
             adapter_id: self.adapter_id.clone(),
             language_id: self.language_id.clone(),
-            epoch: self.epoch.clone(),
+            carrier_profile: self.carrier_profile.clone(),
+            framework_profile: self.framework_profile.clone(),
             parse_key: Arc::clone(&self.parse_key),
             syntax_profile: Arc::clone(&self.syntax_profile),
             common: FrameworkParseCommon {
@@ -345,25 +361,11 @@ fn parse_identity_for_accepted(
 }
 
 fn parse_options_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseOptions {
-    match accepted.grammar().canonical_config() {
-        CarrierGrammarConfig::Vue {
-            delimiters,
-            custom_elements,
-        } => ParseOptions {
-            delimiters: (
-                delimiters.open().to_string(),
-                delimiters.close().to_string(),
-            ),
-            custom_elements: custom_elements
-                .iter()
-                .map(|name| name.as_str().to_string())
-                .collect(),
-            svelte_loose: false,
-        },
-        // The registered grammar authority has no loose-mode concept yet —
-        // every registered Svelte source requests strict parsing.
-        CarrierGrammarConfig::Svelte => ParseOptions::default(),
-    }
+    accepted
+        .grammar()
+        .canonical_config()
+        .parse_options()
+        .clone()
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -425,7 +427,7 @@ impl std::fmt::Debug for FrameworkParseArtifact {
             .debug_struct("FrameworkParseArtifact")
             .field("adapter_id", &self.adapter_id)
             .field("language_id", &self.language_id)
-            .field("epoch", &self.epoch)
+            .field("framework_profile", &self.framework_profile)
             .field("parse_key", &self.parse_key)
             .field("common", &self.common)
             .finish_non_exhaustive()
@@ -484,7 +486,8 @@ pub struct RegisteredCarrierProjection {
     diagnostics: Vec<LanguageDiagnostic>,
     parse_key: Arc<verter_language::ParseKey>,
     syntax_profile: Arc<verter_language::SyntaxProfileId>,
-    epoch: FrameworkEpochId,
+    carrier_profile: CarrierProfileId,
+    framework_profile: FrameworkProfileId,
 }
 
 impl RegisteredCarrierProjection {
@@ -508,7 +511,8 @@ impl RegisteredCarrierProjection {
             diagnostics,
             parse_key,
             syntax_profile,
-            epoch,
+            carrier_profile,
+            framework_profile,
         } = self;
         verter_debug_assert_eq!(
             compute_carrier_structure_hash(&inventory),
@@ -517,7 +521,8 @@ impl RegisteredCarrierProjection {
         FrameworkParseArtifact {
             adapter_id: carrier.inner.adapter_id.clone(),
             language_id: carrier.inner.language_id.clone(),
-            epoch,
+            carrier_profile,
+            framework_profile,
             parse_key,
             syntax_profile,
             common: FrameworkParseCommon {
@@ -527,73 +532,6 @@ impl RegisteredCarrierProjection {
             carrier_structure_hash,
             carrier,
             _geometry: super::registered_geometry_state::RegisteredGeometry { _private: () },
-        }
-    }
-}
-
-/// The registered compilers this crate knows how to project — a closed,
-/// exhaustive dispatch set for the registered-projection path.
-///
-/// There is no external dyn-dispatch entry point into registered
-/// projection: a bogus third-party carrier compiler cannot
-/// reach a projection arm at all, because it is not a variant of this
-/// enum — the match below is exhaustive by construction, with no
-/// wildcard arm and no `unreachable!()`.
-#[derive(Clone)]
-pub(super) enum KnownRegisteredCompiler {
-    Vue(Arc<VueCarrierCompiler>),
-    Svelte(Arc<SvelteCarrierCompiler>),
-}
-
-impl KnownRegisteredCompiler {
-    pub(super) fn adapter_id(&self) -> FrameworkAdapterId {
-        match self {
-            Self::Vue(compiler) => compiler.adapter_id(),
-            Self::Svelte(compiler) => compiler.adapter_id(),
-        }
-    }
-
-    fn carrier_language_id(&self) -> LanguageId {
-        match self {
-            Self::Vue(compiler) => compiler.carrier_language_id(),
-            Self::Svelte(compiler) => compiler.carrier_language_id(),
-        }
-    }
-}
-
-/// Installed Vue/Svelte frontend row stored in the immutable catalog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstalledCarrierFrontend {
-    /// Vue SFC frontend.
-    Vue(VueCarrierFrontend),
-    /// Svelte component frontend.
-    Svelte(SvelteCarrierFrontend),
-}
-
-/// Admission token for a catalog-selected Vue or Svelte frontend.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstalledParseAdmission {
-    /// Vue frontend admission.
-    Vue(VueParseAdmission),
-    /// Svelte frontend admission.
-    Svelte(SvelteParseAdmission),
-}
-
-impl CarrierFrontend for InstalledCarrierFrontend {
-    type ParseArtifact = Arc<UnregisteredFrameworkParseArtifact>;
-    type SyntaxReject = SyntaxReject;
-    type ParseAdmission = InstalledParseAdmission;
-
-    fn parse(
-        &self,
-        source: &str,
-        opts: &ParseOptions,
-    ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject> {
-        #[cfg(test)]
-        REGISTERED_FRONTEND_PARSE_COUNT.with(|count| count.set(count.get() + 1));
-        match self {
-            Self::Vue(frontend) => frontend.parse(source, opts),
-            Self::Svelte(frontend) => frontend.parse(source, opts),
         }
     }
 }
@@ -613,57 +551,31 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// Frontend parse entries on the calling thread: every catalog-selected
+/// parse enters [`super::InstalledCarrierFrontend::parse`] once.
 #[cfg(test)]
-pub(super) fn registered_frontend_parse_count() -> usize {
+pub(crate) fn registered_frontend_parse_count() -> usize {
     REGISTERED_FRONTEND_PARSE_COUNT.with(std::cell::Cell::get)
 }
 
-/// Frozen Vue + Svelte frontend catalog. Built once from the Vue/Svelte
-/// frontend registration constructors; no insert after.
-#[must_use]
-pub fn built_in_frontend_catalog(
-) -> &'static ImmutableCapabilityCatalog<InstalledCarrierFrontend, (), (), (), ()> {
-    static CATALOG: OnceLock<ImmutableCapabilityCatalog<InstalledCarrierFrontend, (), (), (), ()>> =
-        OnceLock::new();
-    CATALOG.get_or_init(|| {
-        ImmutableCapabilityCatalog::try_from_rows([
-            CatalogRow::from(
-                vue_carrier_frontend_registration().map_frontend(InstalledCarrierFrontend::Vue),
-            ),
-            CatalogRow::from(
-                svelte_carrier_frontend_registration()
-                    .map_frontend(InstalledCarrierFrontend::Svelte),
-            ),
-        ])
-        .expect("built-in Vue and Svelte frontend identities are unique")
-    })
+#[cfg(test)]
+pub(super) fn record_registered_frontend_parse() {
+    REGISTERED_FRONTEND_PARSE_COUNT.with(|count| count.set(count.get() + 1));
 }
 
-/// The unique frontend catalog row for one adapter × carrier-language
-/// identity, or `None` when no frontend is registered for it.
-fn frontend_row_for(
-    adapter_id: &FrameworkAdapterId,
-    carrier_language_id: &LanguageId,
-) -> Option<&'static CatalogRow<InstalledCarrierFrontend, (), (), (), ()>> {
-    built_in_frontend_catalog().iter().find(|row| {
-        let identity = row.identity();
-        identity.capability() == CatalogCapability::Frontend
-            && identity.adapter_id() == adapter_id
-            && identity.carrier_language_id() == carrier_language_id
-    })
-}
-
-/// Catalog lookup for a registered Vue/Svelte frontend. Unknown adapter or
-/// language returns `None` — no fallback parse.
+/// Registry lookup for a registered frontend. Unknown adapter or language
+/// returns `None` — no fallback parse.
 #[must_use]
 pub fn registered_frontend_for(
     adapter_id: &FrameworkAdapterId,
     carrier_language_id: &LanguageId,
-) -> Option<&'static InstalledCarrierFrontend> {
-    frontend_row_for(adapter_id, carrier_language_id).and_then(|row| row.frontend())
+) -> Option<&'static super::InstalledCarrierFrontend> {
+    CarrierFrontendRegistry::built_in()
+        .row_for(adapter_id, carrier_language_id)
+        .map(|row| row.frontend())
 }
 
-/// Catalog lookup for the registered carrier-grammar fact on a frontend
+/// Registry lookup for the registered carrier-grammar fact on a frontend
 /// row. Unknown identity, or a frontend row without a registered grammar
 /// fact, returns `None` — never another framework's grammar.
 #[must_use]
@@ -671,14 +583,18 @@ pub fn registered_grammar_for(
     adapter_id: &FrameworkAdapterId,
     carrier_language_id: &LanguageId,
 ) -> Option<&'static CarrierGrammarConfig> {
-    frontend_row_for(adapter_id, carrier_language_id).and_then(|row| row.registered_grammar())
+    CarrierFrontendRegistry::built_in()
+        .row_for(adapter_id, carrier_language_id)
+        .and_then(|row| row.registered_grammar())
 }
 
-fn frontend_epoch(
+fn frontend_identity(
     adapter_id: &FrameworkAdapterId,
     carrier_language_id: &LanguageId,
-) -> Option<FrameworkEpochId> {
-    frontend_row_for(adapter_id, carrier_language_id).map(|row| row.identity().epoch().clone())
+) -> Option<&'static super::catalog::CatalogIdentity> {
+    CarrierFrontendRegistry::built_in()
+        .row_for(adapter_id, carrier_language_id)
+        .map(|row| row.identity())
 }
 
 /// Template facts plus the diagnostics their extraction produced.
@@ -725,7 +641,7 @@ impl std::fmt::Debug for InstalledSemanticAuthority {
 }
 
 impl InstalledSemanticAuthority {
-    const fn new(
+    pub(super) const fn new(
         eval_source_fn: fn(&str, &FrameworkParseArtifact) -> Arc<str>,
         template_facts_fn: fn(&str, &FrameworkParseArtifact) -> Option<TemplateFactsProduct>,
     ) -> Self {
@@ -829,70 +745,51 @@ fn source_binds_to_artifact_parse_key(source: &str, artifact: &FrameworkParseArt
     }
 }
 
-/// Frozen Vue + Svelte semantic catalog. Built once from the Vue/Svelte
-/// semantic registration constructors; no insert after.
-#[must_use]
-pub fn built_in_semantic_catalog(
-) -> &'static ImmutableCapabilityCatalog<(), (), InstalledSemanticAuthority, (), ()> {
-    static CATALOG: OnceLock<
-        ImmutableCapabilityCatalog<(), (), InstalledSemanticAuthority, (), ()>,
-    > = OnceLock::new();
-    CATALOG.get_or_init(|| {
-        ImmutableCapabilityCatalog::try_from_rows([
-            CatalogRow::from(vue_semantic_authority_registration().map_semantic(|_| {
-                InstalledSemanticAuthority::new(
-                    vue_semantic_eval_source,
-                    vue_semantic_template_facts,
-                )
-            })),
-            CatalogRow::from(svelte_semantic_authority_registration().map_semantic(|_| {
-                InstalledSemanticAuthority::new(
-                    svelte_semantic_eval_source,
-                    svelte_semantic_template_facts,
-                )
-            })),
-        ])
-        .expect("built-in Vue and Svelte semantic identities are unique")
+/// The Vue semantic-authority row of the catalog snapshot.
+pub(super) fn vue_semantic_row() -> SemanticAuthorityRow {
+    vue_semantic_authority_registration().map_semantic(|_| {
+        InstalledSemanticAuthority::new(vue_semantic_eval_source, vue_semantic_template_facts)
     })
 }
 
-/// Catalog lookup for a registered semantic authority by adapter × epoch.
-/// Unknown or mismatched identity returns `None` — no framework fallback.
+/// The Svelte semantic-authority row of the catalog snapshot.
+pub(super) fn svelte_semantic_row() -> SemanticAuthorityRow {
+    svelte_semantic_authority_registration().map_semantic(|_| {
+        InstalledSemanticAuthority::new(svelte_semantic_eval_source, svelte_semantic_template_facts)
+    })
+}
+
+/// Snapshot lookup for a registered semantic authority by carrier ×
+/// framework profile. Unknown or mismatched identity returns `None` — no
+/// framework fallback.
 #[must_use]
 pub fn registered_semantic_for(
-    adapter_id: &FrameworkAdapterId,
-    epoch: &FrameworkEpochId,
+    carrier: &CarrierProfileId,
+    profile: &FrameworkProfileId,
 ) -> Option<&'static InstalledSemanticAuthority> {
-    built_in_semantic_catalog().iter().find_map(|row| {
-        let identity = row.identity();
-        (identity.capability() == CatalogCapability::Semantic
-            && identity.adapter_id() == adapter_id
-            && identity.epoch() == epoch)
-            .then(|| row.semantic())
-            .flatten()
-    })
+    CatalogSnapshot::built_in().semantic_for(carrier, profile)
 }
 
-/// Identity-bound semantic catalog row: adapter × registered frontend
-/// epoch × Semantic. No artifact, no parse, no Vue/Svelte match.
+/// Identity-bound semantic catalog row: the registered frontend's carrier
+/// × framework profile. No artifact, no parse, no Vue/Svelte match.
 #[must_use]
 pub fn registered_semantic_for_frontend(
     adapter_id: &FrameworkAdapterId,
     carrier_language_id: &LanguageId,
 ) -> Option<&'static InstalledSemanticAuthority> {
-    let epoch = frontend_epoch(adapter_id, carrier_language_id)?;
-    registered_semantic_for(adapter_id, &epoch)
+    let identity = frontend_identity(adapter_id, carrier_language_id)?;
+    registered_semantic_for(identity.carrier(), identity.framework_profile())
 }
 
-/// One `built_in_semantic_catalog` lookup keyed adapter × artifact epoch
-/// × Semantic, then the selected row's eval-source payload. Catalog miss
+/// One semantic-authority lookup keyed adapter × artifact epoch, then the
+/// selected row's eval-source payload. Catalog miss
 /// is `None` — no frontend hop, no Vue/Svelte match, no blanking.
 #[must_use]
 pub fn eval_source_from_catalog(
     artifact: &FrameworkParseArtifact,
     source: &str,
 ) -> Option<Arc<str>> {
-    registered_semantic_for(artifact.adapter_id(), artifact.epoch())
+    registered_semantic_for(artifact.carrier_profile(), artifact.framework_profile())
         .map(|authority| authority.eval_source(source, artifact))
 }
 
@@ -910,8 +807,8 @@ pub enum TemplateFactsBasis<'a> {
     SelectedTemplate(&'a str),
 }
 
-/// One `built_in_semantic_catalog` lookup keyed adapter × artifact epoch
-/// × Semantic, then the selected row's template-fact payload. Catalog
+/// One semantic-authority lookup keyed adapter × artifact epoch, then the
+/// selected row's template-fact payload. Catalog
 /// miss, parse-key mismatch, selected-template mismatch, producer failure,
 /// and a template expression's parse or a walk-stack lease refused its
 /// stack (facts read off the empty program in its place would be
@@ -931,7 +828,8 @@ pub fn template_facts_from_catalog(
     if !source_binds_to_artifact_parse_key(source, artifact) {
         return None;
     }
-    let semantic = registered_semantic_for(artifact.adapter_id(), artifact.epoch())?;
+    let semantic =
+        registered_semantic_for(artifact.carrier_profile(), artifact.framework_profile())?;
     match verter_parser::oxc_parse::refusals_within(|| semantic.template_facts(source, artifact)) {
         (facts, None) => facts,
         (_, Some(_)) => None,
@@ -1014,7 +912,7 @@ impl std::fmt::Debug for InstalledProjectionBackend {
 }
 
 impl InstalledProjectionBackend {
-    const fn new(
+    pub(super) const fn new(
         project_ide_fn: fn(
             super::capability::ProductExecutionGrant,
             &str,
@@ -1047,24 +945,6 @@ thread_local! {
     /// Per-thread count of catalog projection-producer executions.
     static PROJECTION_PRODUCER_INVOCATIONS: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Per-thread count of projection catalog CONSULTS (row lookups), so
-    /// tests can prove which demand validations touch the projection
-    /// capability at all. Counted at the one lookup choke point
-    /// ([`registered_projection_for`]), not at call sites, so any future
-    /// consult path is counted too.
-    static PROJECTION_CATALOG_CONSULTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Projection catalog consults on the calling thread. Test observability
-/// only.
-#[cfg(test)]
-#[must_use]
-pub(super) fn projection_catalog_consult_count() -> u64 {
-    PROJECTION_CATALOG_CONSULTS.with(std::cell::Cell::get)
 }
 
 /// Catalog projection-producer executions on the calling thread since the
@@ -1170,50 +1050,31 @@ fn map_svelte_projection_error(error: SvelteProjectionError) -> CompileUnsupport
     }
 }
 
-/// Frozen Vue + Svelte projection catalog. Built once from the Vue/Svelte
-/// projection registration constructors; no insert after.
-#[must_use]
-pub fn built_in_projection_catalog(
-) -> &'static ImmutableCapabilityCatalog<(), InstalledProjectionBackend, (), (), ()> {
-    static CATALOG: OnceLock<
-        ImmutableCapabilityCatalog<(), InstalledProjectionBackend, (), (), ()>,
-    > = OnceLock::new();
-    CATALOG.get_or_init(|| {
-        ImmutableCapabilityCatalog::try_from_rows([
-            CatalogRow::from(
-                vue_projection_backend_registration()
-                    .map_projection(|_| InstalledProjectionBackend::new(vue_project_ide)),
-            ),
-            CatalogRow::from(
-                svelte_projection_backend_registration()
-                    .map_projection(|_| InstalledProjectionBackend::new(svelte_project_ide)),
-            ),
-        ])
-        .expect("built-in Vue and Svelte projection identities are unique")
-    })
+/// The Vue projection-backend row of the catalog snapshot.
+pub(super) fn vue_projection_row() -> ProjectionBackendRow {
+    vue_projection_backend_registration()
+        .map_projection(|_| InstalledProjectionBackend::new(vue_project_ide))
 }
 
-/// Catalog lookup for a registered projection backend by adapter × epoch.
-/// Unknown or mismatched identity returns `None` — no framework fallback.
+/// The Svelte projection-backend row of the catalog snapshot.
+pub(super) fn svelte_projection_row() -> ProjectionBackendRow {
+    svelte_projection_backend_registration()
+        .map_projection(|_| InstalledProjectionBackend::new(svelte_project_ide))
+}
+
+/// Snapshot lookup for a registered projection backend by carrier ×
+/// framework profile. Unknown or mismatched identity returns `None` — no
+/// framework fallback.
 #[must_use]
 pub fn registered_projection_for(
-    adapter_id: &FrameworkAdapterId,
-    epoch: &FrameworkEpochId,
+    carrier: &CarrierProfileId,
+    profile: &FrameworkProfileId,
 ) -> Option<&'static InstalledProjectionBackend> {
-    #[cfg(test)]
-    PROJECTION_CATALOG_CONSULTS.with(|count| count.set(count.get().saturating_add(1)));
-    built_in_projection_catalog().iter().find_map(|row| {
-        let identity = row.identity();
-        (identity.capability() == CatalogCapability::Projection
-            && identity.adapter_id() == adapter_id
-            && identity.epoch() == epoch)
-            .then(|| row.projection())
-            .flatten()
-    })
+    CatalogSnapshot::built_in().projection_for(carrier, profile)
 }
 
-/// One `built_in_projection_catalog` lookup keyed adapter × artifact epoch
-/// × Projection, then the selected row's IDE payload. Catalog miss is
+/// One projection-backend lookup keyed adapter × artifact epoch, then the
+/// selected row's IDE payload. Catalog miss is
 /// [`CompileUnsupported::NoIdeProjection`] — no frontend hop, no Vue/Svelte
 /// match, no silent empty companion.
 pub fn project_ide_from_catalog(
@@ -1223,14 +1084,14 @@ pub fn project_ide_from_catalog(
     request: &CompileRequest,
     inputs: &ProjectionCatalogInputs,
 ) -> Result<InstalledIdeCompanion, CompileUnsupported> {
-    registered_projection_for(artifact.adapter_id(), artifact.epoch())
+    registered_projection_for(artifact.carrier_profile(), artifact.framework_profile())
         .ok_or_else(|| CompileUnsupported::NoIdeProjection {
             adapter_id: artifact.adapter_id().clone(),
         })?
         .project_ide(grant, source, artifact, request, inputs)
 }
 
-fn catalog_miss_reject(
+pub(super) fn catalog_miss_reject(
     source: &str,
     adapter_id: &FrameworkAdapterId,
     carrier_language_id: &LanguageId,
@@ -1289,22 +1150,15 @@ pub fn project_registered_accepted(
     let carrier_language_id = language
         .carrier_language_id()
         .ok_or_else(|| catalog_miss_from_accepted(accepted))?;
-    let frontend = registered_frontend_for(adapter_id, carrier_language_id)
+    let row = CarrierFrontendRegistry::built_in()
+        .row_for(adapter_id, carrier_language_id)
         .ok_or_else(|| catalog_miss_from_accepted(accepted))?;
-    let known = match frontend {
-        InstalledCarrierFrontend::Vue(_) => {
-            KnownRegisteredCompiler::Vue(Arc::new(VueCarrierCompiler))
-        }
-        InstalledCarrierFrontend::Svelte(_) => {
-            KnownRegisteredCompiler::Svelte(Arc::new(SvelteCarrierCompiler))
-        }
-    };
     // A parse or lease refused its stack inside the frontend leaves the
     // artifact built from an empty program in place of the source's, or
     // reads the refusal as a syntax error: the projection is refused as
     // typed incompleteness instead, and no artifact is produced to retain.
     let (projected, refused) = verter_parser::oxc_parse::refusals_within(|| {
-        project_registered_carrier(Some(&known), accepted)
+        project_registered_carrier(Some(row), accepted)
     });
     let Some(unavailable) = refused else {
         return projected;
@@ -1349,35 +1203,28 @@ pub fn project_registered_accepted(
     })
 }
 
-/// Parse through the catalog frontend for `(adapter, language)`. A catalog
-/// miss is [`SyntaxReject::UnsupportedProfile`] (`FrontendMismatch`) — never
-/// a fallback parse and never a panic.
+/// Parse through the registered frontend for `(adapter, language)`. A
+/// registry miss is [`SyntaxReject::UnsupportedProfile`]
+/// (`FrontendMismatch`) — never a fallback parse and never a panic.
 pub fn parse_registered_frontend(
     adapter_id: &FrameworkAdapterId,
     carrier_language_id: &LanguageId,
     source: &str,
     opts: &ParseOptions,
 ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject> {
-    match registered_frontend_for(adapter_id, carrier_language_id) {
-        Some(frontend) => frontend.parse(source, opts),
-        None => Err(catalog_miss_reject(
-            source,
-            adapter_id,
-            carrier_language_id,
-            opts,
-        )),
-    }
+    CarrierFrontendRegistry::built_in().parse(adapter_id, carrier_language_id, source, opts)
 }
 
-/// The registered projection entry, dispatched over the closed compiler
-/// enum. Its sole caller is [`project_registered_accepted`], which builds
-/// `known` directly from the catalog-selected frontend — never from a
-/// combined registry lookup.
+/// The registered projection entry, dispatched on the registry-selected
+/// frontend row. Its sole caller is [`project_registered_accepted`], which
+/// passes the row it selected for the accepted source's own adapter ×
+/// carrier language. The row's identity is the only carrier identity on this
+/// path: it is checked against the source and supplies the profiles.
 ///
 /// `Err(SyntaxReject)` means the carrier frontend refused the request before
 /// producing an artifact — no geometry or publishable diagnostic product exists.
 pub(super) fn project_registered_carrier(
-    known: Option<&KnownRegisteredCompiler>,
+    row: Option<&CarrierFrontendRow>,
     accepted: &AcceptedRegisteredCarrierSource,
 ) -> Result<RegisteredCarrierProjection, SyntaxReject> {
     let language = accepted.source().resolved_file_language();
@@ -1387,47 +1234,30 @@ pub(super) fn project_registered_carrier(
     let carrier_language_id = language
         .carrier_language_id()
         .ok_or_else(|| catalog_miss_from_accepted(accepted))?;
-    let known = known.ok_or_else(|| catalog_miss_from_accepted(accepted))?;
-    if known.adapter_id() != *adapter_id || known.carrier_language_id() != *carrier_language_id {
+    let Some(row) = row else {
+        return Err(catalog_miss_from_accepted(accepted));
+    };
+    let identity = row.identity();
+    if identity.adapter_id() != adapter_id || identity.carrier_language_id() != carrier_language_id
+    {
         return Err(catalog_miss_from_accepted(accepted));
     }
+    let frontend = row.frontend();
     let options = parse_options_for_accepted(accepted);
-    let artifact = parse_registered_frontend(
-        adapter_id,
-        carrier_language_id,
-        accepted.source().bytes(),
-        &options,
-    )?;
-    assert_eq!(artifact.adapter_id, known.adapter_id());
-    assert_eq!(artifact.language_id, known.carrier_language_id());
+    let artifact = frontend.parse(accepted.source().bytes(), &options)?;
+    assert_eq!(artifact.adapter_id, *adapter_id);
+    assert_eq!(artifact.language_id, *carrier_language_id);
     let diagnostics = artifact.diagnostics.clone();
     let parse_key = Arc::clone(&artifact.parse_key);
     let syntax_profile = Arc::clone(&artifact.syntax_profile);
-    let (inventory, parsed_carrier): (CarrierBlockInventory, Arc<dyn CarrierParse>) = match known {
-        KnownRegisteredCompiler::Vue(vue) => (
-            project_vue(vue, accepted, &artifact).map_err(|error| {
-                SyntaxReject::InvalidCarrierGeometry {
-                    parse_key: Arc::clone(&parse_key),
-                    syntax_profile: Arc::clone(&syntax_profile),
-                    error: Arc::new(error),
-                }
-            })?,
-            vue.unregistered_carrier_arc(&artifact)
-                .expect("Vue carrier payload"),
-        ),
-        KnownRegisteredCompiler::Svelte(svelte) => (
-            project_svelte(svelte, accepted, &artifact).map_err(|error| {
-                SyntaxReject::InvalidCarrierGeometry {
-                    parse_key: Arc::clone(&parse_key),
-                    syntax_profile: Arc::clone(&syntax_profile),
-                    error: Arc::new(error),
-                }
-            })?,
-            svelte
-                .unregistered_carrier_arc(&artifact)
-                .expect("Svelte carrier payload"),
-        ),
+    let invalid_geometry = |error| SyntaxReject::InvalidCarrierGeometry {
+        parse_key: Arc::clone(&parse_key),
+        syntax_profile: Arc::clone(&syntax_profile),
+        error: Arc::new(error),
     };
+    let (inventory, parsed_carrier) = frontend
+        .project_geometry(accepted, &artifact)
+        .map_err(invalid_geometry)?;
     let inventory = Arc::new(inventory);
     let carrier_structure_hash = compute_carrier_structure_hash(&inventory);
     let carrier = RegisteredCarrierPayload::new(
@@ -1435,8 +1265,6 @@ pub(super) fn project_registered_carrier(
         artifact.adapter_id.clone(),
         artifact.language_id.clone(),
     );
-    let epoch = frontend_epoch(adapter_id, carrier_language_id)
-        .ok_or_else(|| catalog_miss_from_accepted(accepted))?;
     Ok(RegisteredCarrierProjection {
         carrier,
         inventory,
@@ -1444,7 +1272,8 @@ pub(super) fn project_registered_carrier(
         diagnostics,
         parse_key,
         syntax_profile,
-        epoch,
+        carrier_profile: identity.carrier().clone(),
+        framework_profile: identity.framework_profile().clone(),
     })
 }
 
@@ -1538,8 +1367,8 @@ impl<'a> Builder<'a> {
     }
 }
 
-fn project_vue(
-    vue: &VueCarrierCompiler,
+pub(crate) fn project_vue(
+    vue: &VueCarrierFrontend,
     accepted: &AcceptedRegisteredCarrierSource,
     artifact: &UnregisteredFrameworkParseArtifact,
 ) -> Result<CarrierBlockInventory, InventoryValidationError> {
@@ -2323,8 +2152,8 @@ fn attribute_full_end(source: &str, p: &verter_parser::types::NodeProp) -> u32 {
         .unwrap_or(p.name_end)
 }
 
-fn project_svelte(
-    svelte: &SvelteCarrierCompiler,
+pub(crate) fn project_svelte(
+    svelte: &SvelteCarrierFrontend,
     accepted: &AcceptedRegisteredCarrierSource,
     artifact: &UnregisteredFrameworkParseArtifact,
 ) -> Result<CarrierBlockInventory, InventoryValidationError> {

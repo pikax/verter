@@ -9,9 +9,45 @@ use rustc_hash::FxHashMap;
 use verter_parser::oxc_parse::Parser;
 
 use crate::style_planner::VBindVar;
-use crate::template::code_gen::binding::{is_simple_ident, BindingType};
+use crate::template::binding::{is_simple_ident, BindingType};
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::utils::oxc::bindings::{extract_bindings_from_expression, BindingContext};
+
+#[cfg(test)]
+thread_local! {
+    static EXPRESSION_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_expression_parse_count() -> usize {
+    EXPRESSION_PARSE_COUNT.with(|count| count.replace(0))
+}
+
+/// Parsed references of the CSS expressions shared by a component's runtime products.
+pub(crate) struct PreparedCssVarExpressions {
+    expressions: FxHashMap<String, Vec<CssVarBinding>>,
+}
+
+struct CssVarBinding {
+    name: String,
+    start: usize,
+    end: usize,
+    ignore: bool,
+}
+
+impl PreparedCssVarExpressions {
+    pub(crate) fn new(v_binds: &[VBindVar]) -> Self {
+        let mut expressions = FxHashMap::default();
+        for var in v_binds {
+            if !is_simple_ident(&var.expression) {
+                expressions
+                    .entry(var.expression.clone())
+                    .or_insert_with(|| parse_complex_css_var_expr(&var.expression));
+            }
+        }
+        Self { expressions }
+    }
+}
 
 /// Build and inject a `_useCssVars()` call at the given position.
 ///
@@ -32,6 +68,28 @@ pub fn inject_use_css_vars<'alloc>(
     insert_pos: u32,
     out: &mut CodeGenOutput<'alloc>,
     imports: &mut Vec<&'static str>,
+) {
+    inject_use_css_vars_in(v_binds, bindings, insert_pos, out, imports, None);
+}
+
+pub(crate) fn inject_prepared_use_css_vars<'alloc>(
+    v_binds: &[VBindVar],
+    bindings: &FxHashMap<&str, BindingType>,
+    insert_pos: u32,
+    out: &mut CodeGenOutput<'alloc>,
+    imports: &mut Vec<&'static str>,
+    prepared: &PreparedCssVarExpressions,
+) {
+    inject_use_css_vars_in(v_binds, bindings, insert_pos, out, imports, Some(prepared));
+}
+
+fn inject_use_css_vars_in<'alloc>(
+    v_binds: &[VBindVar],
+    bindings: &FxHashMap<&str, BindingType>,
+    insert_pos: u32,
+    out: &mut CodeGenOutput<'alloc>,
+    imports: &mut Vec<&'static str>,
+    prepared: Option<&PreparedCssVarExpressions>,
 ) {
     if v_binds.is_empty() {
         return;
@@ -111,7 +169,7 @@ pub fn inject_use_css_vars<'alloc>(
         } else {
             // Complex expression: parse with OXC to find identifiers and
             // apply binding prefix resolution (e.g., count → count.value).
-            let resolved = resolve_complex_css_var_expr(expr, bindings, &mut needs_unref);
+            let resolved = resolve_complex_css_var_expr(expr, bindings, &mut needs_unref, prepared);
             buf.push_str(&resolved);
         }
 
@@ -140,49 +198,34 @@ fn resolve_complex_css_var_expr(
     expr: &str,
     bindings: &FxHashMap<&str, BindingType>,
     needs_unref: &mut bool,
+    prepared: Option<&PreparedCssVarExpressions>,
 ) -> String {
-    // Wrap in a variable declaration so OXC can parse it as a statement.
-    let wrapper = format!("var __v = {}", expr);
-    let alloc = Allocator::default();
-    let source_type = SourceType::tsx();
-    let parser_ret = Parser::new(&alloc, &wrapper, source_type).parse();
-
-    if !parser_ret.diagnostics.is_empty() || parser_ret.program.body.is_empty() {
-        return expr.to_string();
-    }
-
-    // Extract the initialiser expression from `var __v = EXPR`
-    let init_expr = match &parser_ret.program.body[0] {
-        oxc_ast::ast::Statement::VariableDeclaration(decl) => {
-            decl.declarations.first().and_then(|d| d.init.as_ref())
-        }
-        _ => None,
+    let parsed;
+    let references = if let Some(prepared) = prepared {
+        prepared
+            .expressions
+            .get(expr)
+            .expect("CSS expressions were prepared for these style bindings")
+    } else {
+        parsed = parse_complex_css_var_expr(expr);
+        &parsed
     };
-    let Some(init_expr) = init_expr else {
-        return expr.to_string();
-    };
-
-    // The wrapper `var __v = ` is 10 bytes; OXC spans start after it.
-    let wrapper_prefix_len = "var __v = ".len() as u32;
-    let ctx = BindingContext::new(0);
-    let extraction = extract_bindings_from_expression(init_expr, &wrapper, ctx);
-
-    if extraction.bindings.is_empty() {
+    if references.is_empty() {
         return expr.to_string();
     }
 
     // Build resolved string by walking bindings in source order.
-    let mut result = String::with_capacity(expr.len() + extraction.bindings.len() * 8);
+    let mut result = String::with_capacity(expr.len() + references.len() * 8);
     let mut last_end = 0usize;
 
-    for binding in &extraction.bindings {
+    for binding in references {
         if binding.ignore {
             continue;
         }
 
-        // Convert wrapper-relative span to expr-relative offset
-        let rel_start = (binding.span.start.saturating_sub(wrapper_prefix_len)) as usize;
-        let rel_end = (binding.span.end.saturating_sub(wrapper_prefix_len)) as usize;
+        // The prepared references already use expression-relative offsets.
+        let rel_start = binding.start;
+        let rel_end = binding.end;
         if rel_start < last_end || rel_end > expr.len() {
             continue;
         }
@@ -190,7 +233,7 @@ fn resolve_complex_css_var_expr(
         // Append text before this identifier
         result.push_str(&expr[last_end..rel_start]);
 
-        let name = binding.name;
+        let name = binding.name.as_str();
         if let Some(bt) = bindings.get(name) {
             match bt {
                 BindingType::SetupRef => {
@@ -228,6 +271,39 @@ fn resolve_complex_css_var_expr(
     result
 }
 
+fn parse_complex_css_var_expr(expr: &str) -> Vec<CssVarBinding> {
+    #[cfg(test)]
+    EXPRESSION_PARSE_COUNT.with(|count| count.set(count.get() + 1));
+    // Keep the established CSS parser's expression context and fallback.
+    let wrapper = format!("var __v = {}", expr);
+    let alloc = Allocator::default();
+    let parser_ret = Parser::new(&alloc, &wrapper, SourceType::tsx()).parse();
+    if !parser_ret.diagnostics.is_empty() || parser_ret.program.body.is_empty() {
+        return Vec::new();
+    }
+    let init_expr = match &parser_ret.program.body[0] {
+        oxc_ast::ast::Statement::VariableDeclaration(decl) => {
+            decl.declarations.first().and_then(|d| d.init.as_ref())
+        }
+        _ => None,
+    };
+    let Some(init_expr) = init_expr else {
+        return Vec::new();
+    };
+    let extraction = extract_bindings_from_expression(init_expr, &wrapper, BindingContext::new(0));
+    let prefix = "var __v = ".len() as u32;
+    extraction
+        .bindings
+        .into_iter()
+        .map(|binding| CssVarBinding {
+            name: binding.name.to_owned(),
+            start: binding.span.start.saturating_sub(prefix) as usize,
+            end: binding.span.end.saturating_sub(prefix) as usize,
+            ignore: binding.ignore,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,7 +327,7 @@ mod tests {
 
         inject_use_css_vars(&[], &bindings, 0, &mut out, &mut imports);
 
-        assert!(out.prepends.is_empty());
+        assert!(out.edits.prepends.is_empty());
         assert!(imports.is_empty());
     }
 
@@ -266,8 +342,8 @@ mod tests {
         let v_binds = vec![make_v_bind("count", "abc-count")];
         inject_use_css_vars(&v_binds, &bindings, 10, &mut out, &mut imports);
 
-        assert_eq!(out.prepends.len(), 1);
-        let content = out.prepends[0].1;
+        assert_eq!(out.edits.prepends.len(), 1);
+        let content = out.edits.prepends[0].1;
         assert!(content.contains("count.value"), "content: {}", content);
         assert!(imports.contains(&"_useCssVars"));
         assert!(!imports.contains(&"_unref"));
@@ -284,7 +360,7 @@ mod tests {
         let v_binds = vec![make_v_bind("data", "abc-data")];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         assert!(content.contains("_unref(data)"), "content: {}", content);
         assert!(imports.contains(&"_unref"));
     }
@@ -300,7 +376,7 @@ mod tests {
         let v_binds = vec![make_v_bind("color", "abc-color")];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         assert!(content.contains("__props.color"), "content: {}", content);
     }
 
@@ -315,7 +391,7 @@ mod tests {
         let v_binds = vec![make_v_bind("theme", "abc-theme")];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         assert!(
             content.contains("\"abc-theme\": (theme)"),
             "content: {}",
@@ -333,7 +409,7 @@ mod tests {
         let v_binds = vec![make_v_bind("unknown", "abc-unknown")];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         assert!(content.contains("_ctx.unknown"), "content: {}", content);
     }
 
@@ -352,7 +428,7 @@ mod tests {
         ];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         assert!(content.contains("count.value"), "content: {}", content);
         assert!(content.contains("__props.color"), "content: {}", content);
         // Should have commas between entries (except last)
@@ -374,7 +450,7 @@ mod tests {
         ];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         // Should only contain abc-duration once
         let count = content.matches("abc-duration").count();
         assert_eq!(
@@ -401,7 +477,7 @@ mod tests {
         ];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         let dur_count = content.matches("abc-duration").count();
         let color_count = content.matches("abc-color").count();
         assert_eq!(
@@ -429,7 +505,7 @@ mod tests {
         let v_binds = vec![make_v_bind("`scale(${scale})`", "abc-scale")];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         // Template literal should be preserved
         assert!(
             content.contains("`scale("),
@@ -450,7 +526,7 @@ mod tests {
         let v_binds = vec![make_v_bind("count + 1", "abc-count")];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         assert!(
             content.contains("count.value + 1"),
             "ref in complex expr should get .value: {}",
@@ -475,7 +551,7 @@ mod tests {
         let v_binds = vec![make_v_bind("color ?? 'red'", "abc-color")];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         assert!(
             content.contains("__props.color ?? 'red'"),
             "prop in complex expr should get __props. prefix: {}",
@@ -496,7 +572,7 @@ mod tests {
         let v_binds = vec![make_v_bind("count + offset", "abc-expr")];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         assert!(
             content.contains("count.value + offset.value"),
             "both refs should get .value: {}",
@@ -515,7 +591,7 @@ mod tests {
         let v_binds = vec![make_v_bind("data * 2", "abc-data")];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         assert!(
             content.contains("_unref(data) * 2"),
             "MaybeRef in complex expr should use _unref: {}",
@@ -537,7 +613,7 @@ mod tests {
         let v_binds = vec![make_v_bind("obj.color", "abc-color")];
         inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
 
-        let content = out.prepends[0].1;
+        let content = out.edits.prepends[0].1;
         assert!(
             content.contains("obj.color"),
             "member access should be preserved: {}",
@@ -561,6 +637,46 @@ mod tests {
         let v_binds = vec![make_v_bind("x", "abc-x")];
         inject_use_css_vars(&v_binds, &bindings, 42, &mut out, &mut imports);
 
-        assert_eq!(out.prepends[0].0, 42);
+        assert_eq!(out.edits.prepends[0].0, 42);
+    }
+    #[test]
+    fn prepared_css_expressions_are_reused_with_each_binding_view() {
+        let vars = vec![
+            make_v_bind("theme.color", "--first"),
+            make_v_bind("theme.color", "--second"),
+        ];
+        take_expression_parse_count();
+        let prepared = PreparedCssVarExpressions::new(&vars);
+        assert_eq!(take_expression_parse_count(), 1);
+        for (binding, expression, helpers) in [
+            (
+                BindingType::SetupMaybeRef,
+                "_unref(theme).color",
+                vec!["_useCssVars", "_unref"],
+            ),
+            (
+                BindingType::Props,
+                "__props.theme.color",
+                vec!["_useCssVars"],
+            ),
+        ] {
+            let alloc = Allocator::default();
+            let mut out = CodeGenOutput::new(&alloc);
+            let mut imports = Vec::new();
+            let mut bindings = FxHashMap::default();
+            bindings.insert("theme", binding);
+            inject_prepared_use_css_vars(&vars, &bindings, 0, &mut out, &mut imports, &prepared);
+            let code = out.edits.prepends[0].1;
+            assert_eq!(code, format!("\n_useCssVars(_ctx => ({{\n  \"first\": ({expression}),\n  \"second\": ({expression})\n}}))\n"));
+            assert_eq!(imports, helpers);
+            let parsed =
+                verter_parser::oxc_parse::Parser::new(&alloc, code, SourceType::mjs()).parse();
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "{:?}\n{code}",
+                parsed.diagnostics
+            );
+        }
+        assert_eq!(take_expression_parse_count(), 0);
     }
 }

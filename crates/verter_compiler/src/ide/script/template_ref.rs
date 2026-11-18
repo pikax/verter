@@ -14,9 +14,9 @@ use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast::types::{AstNodeKind, TemplateAst};
+use crate::code_transform::EditRecorder;
 use crate::common::Span;
-use crate::template::code_gen::binding::{is_simple_ident, BindingType};
-use crate::template::code_gen::types::CodeGenOutput;
+use crate::template::binding::{is_simple_ident, BindingType};
 
 use super::PREFIX;
 
@@ -80,7 +80,7 @@ pub(super) fn apply_template_ref_call_inference(
     script_source: &str,
     content_start: u32,
     available_bindings: &FxHashSet<String>,
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
 ) {
     let Some(template_ast) = template_ast else {
         return;

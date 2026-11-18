@@ -1,6 +1,8 @@
 use super::*;
 use crate::oxc_parse::Parser;
 use crate::types::BindingType;
+use crate::utils::oxc::vue::script::shared::try_process_import;
+use crate::utils::oxc::vue::script::ScriptItem;
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 
@@ -14,7 +16,7 @@ fn classify(source: &str) -> Vec<(String, BindingType)> {
         ret.diagnostics
     );
     let ctx = ScriptParseContext::new(0, source.as_bytes());
-    let entries = extract_bindings(&ret.program, &ctx);
+    let entries = extract_bindings(&ret.program, &ctx, &vue_aliases(&ret.program, &ctx));
     entries
         .into_iter()
         .map(|(span, bt)| {
@@ -22,6 +24,32 @@ fn classify(source: &str) -> Vec<(String, BindingType)> {
             (name.to_string(), bt)
         })
         .collect()
+}
+
+/// The `vue` import aliases of a parsed `<script setup>` program, from the
+/// same import facts `parse_script` collects.
+fn vue_aliases<'a>(
+    program: &oxc_ast::ast::Program<'a>,
+    ctx: &ScriptParseContext<'a>,
+) -> VueImportAliases<'a> {
+    let mut aliases = VueImportAliases::default();
+    for stmt in &program.body {
+        if let Some(ScriptItem::Import(import)) = try_process_import(stmt, ctx) {
+            aliases.register_setup_import(&import);
+        }
+    }
+    aliases
+}
+
+/// Imports every Vue reactivity API the classifier recognises, so a snippet
+/// can call them the way an authored `<script setup>` does.
+const VUE_IMPORTS: &str =
+    "import { ref, computed, shallowRef, toRef, customRef, reactive, useTemplateRef } from 'vue';
+";
+
+/// `classify` over `source` preceded by the `vue` imports.
+fn classify_with_vue_imports(source: &str) -> Vec<(String, BindingType)> {
+    classify(&format!("{VUE_IMPORTS}{source}"))
 }
 
 /// @ai-generated — Helper: find binding type by name.
@@ -73,11 +101,12 @@ fn const_static_template_literal() {
     assert_eq!(find(&b, "x"), Some(BindingType::LiteralConst));
 }
 
-/// @ai-generated — dynamic template literal might evaluate to a ref
+/// A dynamic template literal is a string, never a ref (Vue's `canNeverBeRef`
+/// accepts every literal node).
 #[test]
 fn const_dynamic_template_literal() {
     let b = classify("const x = `${dynamic}`;");
-    assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupConst));
 }
 
 // ── Static compositions + TS-unwrapped scalars → LiteralConst ─────────
@@ -159,7 +188,7 @@ fn const_array_literal_stays_setup_const() {
 /// (unwrapTSNode runs before the ref-call check, matching official)
 #[test]
 fn const_ref_call_under_ts_cast_is_setup_ref() {
-    let b = classify("const x = ref(0) as any;");
+    let b = classify_with_vue_imports("const x = ref(0) as any;");
     assert_eq!(find(&b, "x"), Some(BindingType::SetupRef));
 }
 
@@ -168,50 +197,51 @@ fn const_ref_call_under_ts_cast_is_setup_ref() {
 /// @ai-generated
 #[test]
 fn const_ref() {
-    let b = classify("const x = ref(0);");
+    let b = classify_with_vue_imports("const x = ref(0);");
     assert_eq!(find(&b, "x"), Some(BindingType::SetupRef));
 }
 
 /// @ai-generated
 #[test]
 fn const_computed() {
-    let b = classify("const x = computed(() => 1);");
+    let b = classify_with_vue_imports("const x = computed(() => 1);");
     assert_eq!(find(&b, "x"), Some(BindingType::SetupRef));
 }
 
 /// @ai-generated
 #[test]
 fn const_shallow_ref() {
-    let b = classify("const x = shallowRef({});");
+    let b = classify_with_vue_imports("const x = shallowRef({});");
     assert_eq!(find(&b, "x"), Some(BindingType::SetupRef));
 }
 
 /// @ai-generated
 #[test]
 fn const_to_ref() {
-    let b = classify("const x = toRef(props, 'a');");
+    let b = classify_with_vue_imports("const x = toRef(props, 'a');");
     assert_eq!(find(&b, "x"), Some(BindingType::SetupRef));
 }
 
 /// @ai-generated
 #[test]
 fn const_custom_ref() {
-    let b = classify("const x = customRef((track, trigger) => ({}));");
+    let b = classify_with_vue_imports("const x = customRef((track, trigger) => ({}));");
     assert_eq!(find(&b, "x"), Some(BindingType::SetupRef));
 }
 
 /// @ai-generated
 #[test]
 fn const_reactive() {
-    let b = classify("const x = reactive({});");
+    let b = classify_with_vue_imports("const x = reactive({});");
     assert_eq!(find(&b, "x"), Some(BindingType::SetupReactiveConst));
 }
 
 /// @ai-generated
 #[test]
-fn const_shallow_reactive() {
+fn const_shallow_reactive_is_maybe_ref_like_official() {
+    // Official only special-cases `reactive`; `shallowReactive` is an ordinary call.
     let b = classify("const x = shallowReactive({});");
-    assert_eq!(find(&b, "x"), Some(BindingType::SetupReactiveConst));
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
 }
 
 /// @ai-generated
@@ -230,16 +260,17 @@ fn const_use_router() {
 
 /// @ai-generated
 #[test]
-fn const_other_call() {
+fn const_other_call_is_maybe_ref() {
+    // `canNeverBeRef` is false for a call: the callee may return a ref.
     let b = classify("const x = someOtherCall();");
-    assert_eq!(find(&b, "x"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
 }
 
 /// @ai-generated
 #[test]
-fn const_member_call() {
+fn const_member_call_is_maybe_ref() {
     let b = classify("const x = obj.method();");
-    assert_eq!(find(&b, "x"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
 }
 
 /// @ai-generated
@@ -272,7 +303,7 @@ fn var_declaration() {
 /// @ai-generated
 #[test]
 fn multiple_const_declarators() {
-    let b = classify("const a = 1, b = ref(0);");
+    let b = classify_with_vue_imports("const a = 1, b = ref(0);");
     assert_eq!(find(&b, "a"), Some(BindingType::LiteralConst));
     assert_eq!(find(&b, "b"), Some(BindingType::SetupRef));
 }
@@ -335,6 +366,156 @@ fn const_define_emits() {
 fn const_define_slots() {
     let b = classify("const slots = defineSlots();");
     assert_eq!(find(&b, "slots"), Some(BindingType::SetupConst));
+}
+
+/// A call to a function declared in the same script may return a ref, so it
+/// is maybe-ref and `v-model` on it cannot be rejected as a const reassignment.
+#[test]
+fn const_call_of_local_function_is_maybe_ref() {
+    let b = classify(
+        "function make() { return ref(''); }
+const other = make();",
+    );
+    assert_eq!(find(&b, "other"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "make"), Some(BindingType::SetupConst));
+}
+
+/// A TS wrapper around a call classifies like the call itself.
+#[test]
+fn const_call_under_ts_wrapper_is_maybe_ref() {
+    let b = classify("const x = (someFn() as number);");
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
+}
+
+/// `useTemplateRef` creates a ref (official ref-creating API list).
+#[test]
+fn const_use_template_ref_is_setup_ref() {
+    let b = classify_with_vue_imports("const el = useTemplateRef('el');");
+    assert_eq!(find(&b, "el"), Some(BindingType::SetupRef));
+}
+
+/// A call inside a nested expression that cannot be a ref stays const.
+#[test]
+fn const_binary_of_calls_stays_setup_const() {
+    let b = classify("const x = a() + b();");
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupConst));
+}
+
+/// `let` bindings stay `SetupLet` whatever the initializer call is.
+#[test]
+fn let_call_stays_setup_let() {
+    let b = classify("let x = someFn();");
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupLet));
+}
+
+/// An aliased `vue` import is recognised under its local name.
+#[test]
+fn const_aliased_vue_import_call_is_setup_ref() {
+    let b = classify(
+        "import { ref as r, reactive as rx } from 'vue';
+const a = r(0);
+const b = rx({});",
+    );
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupRef));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupReactiveConst));
+}
+
+/// The original name of an aliased import is no longer the `vue` export.
+#[test]
+fn const_call_of_original_name_after_alias_import_is_maybe_ref() {
+    let b = classify(
+        "import { ref as r } from 'vue';
+const a = ref(0);",
+    );
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+}
+
+/// A same-named local function is an ordinary call, not `vue`'s `ref`.
+#[test]
+fn const_call_of_local_function_named_like_a_vue_api_is_maybe_ref() {
+    let b = classify(
+        "function ref(v) { return v; }
+const a = ref(0);",
+    );
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+}
+
+/// `ref` imported from another module is not `vue`'s `ref`.
+#[test]
+fn const_call_of_same_named_import_from_another_module_is_maybe_ref() {
+    let b = classify(
+        "import { ref } from './my-reactivity';
+const a = ref(0);",
+    );
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+}
+
+/// An auto-imported `ref` has no import statement, so Vue treats it as an
+/// ordinary call.
+#[test]
+fn const_call_of_unimported_ref_is_maybe_ref() {
+    let b = classify("const a = ref(0);");
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+}
+
+/// Two aliases of the same `vue` export: only the last one is recognised,
+/// as Vue's alias table keeps one local name per export.
+#[test]
+fn const_call_of_earlier_alias_of_a_twice_imported_api_is_maybe_ref() {
+    let b = classify(
+        "import { ref as a } from 'vue';
+import { ref as b } from 'vue';
+const x = a(0);
+const y = b(0);",
+    );
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "y"), Some(BindingType::SetupRef));
+}
+
+/// A local name bound by an earlier import keeps that binding, so a later
+/// `vue` import under the same name does not make it `vue`'s API.
+#[test]
+fn const_call_of_name_first_imported_elsewhere_is_maybe_ref() {
+    let b = classify(
+        "import { ref } from './my-reactivity';
+import { ref } from 'vue';
+const a = ref(0);",
+    );
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+}
+
+/// A sequence ending in `vue`'s `reactive` (under its alias) can never be a
+/// ref, while one ending in an unknown call may be.
+#[test]
+fn const_sequence_ending_in_aliased_reactive_is_setup_const() {
+    let b = classify(
+        "import { reactive as rx } from 'vue';
+const a = (0, rx({}));
+const b = (0, reactive({}));",
+    );
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupMaybeRef));
+}
+
+/// Parentheses are transparent, around the call and around its callee: Vue
+/// reads a Babel AST that keeps none.
+#[test]
+fn const_parenthesized_ref_call_is_setup_ref() {
+    let b = classify_with_vue_imports(
+        "const x = (ref(0));
+const y = (ref)(0);
+const z = (reactive)({});",
+    );
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupRef));
+    assert_eq!(find(&b, "y"), Some(BindingType::SetupRef));
+    assert_eq!(find(&b, "z"), Some(BindingType::SetupReactiveConst));
+}
+
+/// A non-static literal (a regular expression) can never be a ref.
+#[test]
+fn const_regexp_literal_is_setup_const() {
+    let b = classify("const r = /a+/;");
+    assert_eq!(find(&b, "r"), Some(BindingType::SetupConst));
 }
 
 // ── Standalone expression macros ─────────────────────────────────────
@@ -722,36 +903,55 @@ fn const_nested_destructure() {
     assert_eq!(find(&b, "a"), None);
 }
 
-/// @ai-generated — array rest from identifier → SetupMaybeRef
+/// A rest element collects a fresh array, so it can never be a ref.
 #[test]
 fn const_array_rest() {
     let b = classify("const [a, ...rest] = someArr;");
     assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
-    assert_eq!(find(&b, "rest"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "rest"), Some(BindingType::SetupConst));
 }
 
-/// @ai-generated — object rest from identifier → SetupMaybeRef
+/// A rest property collects a fresh object, so it can never be a ref.
 #[test]
 fn const_object_rest() {
     let b = classify("const { a, ...rest } = someObj;");
     assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
-    assert_eq!(find(&b, "rest"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "rest"), Some(BindingType::SetupConst));
 }
 
-/// @ai-generated — destructured from array literal (canNeverBeRef) → SetupConst
+/// A destructured binding is maybe-ref whatever the initializer: the
+/// literal's elements may hold refs, and Vue never inspects them.
 #[test]
 fn const_destructure_from_array_literal() {
     let b = classify("const [a, b] = [1, 2];");
-    assert_eq!(find(&b, "a"), Some(BindingType::SetupConst));
-    assert_eq!(find(&b, "b"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupMaybeRef));
 }
 
-/// @ai-generated — destructured from object literal (canNeverBeRef) → SetupConst
+/// A destructured binding is maybe-ref even from an object literal.
 #[test]
 fn const_destructure_from_object_literal() {
     let b = classify("const { a, b } = { a: 1, b: 2 };");
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupMaybeRef));
+}
+
+/// Destructuring a `vue` ref-creating call does not make the bindings refs.
+#[test]
+fn const_destructure_of_ref_call_is_maybe_ref() {
+    let b = classify_with_vue_imports("const { a } = ref({ a: 1 });");
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupMaybeRef));
+}
+
+/// Under a declaring macro the outermost bindings and the rest are consts;
+/// a nested pattern's bindings are maybe-ref, as in Vue.
+#[test]
+fn const_destructure_of_define_emits_keeps_outer_bindings_const() {
+    let b = classify("const { a, b: { c }, d = 1, ...r } = defineEmits(['a']);");
     assert_eq!(find(&b, "a"), Some(BindingType::SetupConst));
-    assert_eq!(find(&b, "b"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "c"), Some(BindingType::SetupMaybeRef));
+    assert_eq!(find(&b, "d"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "r"), Some(BindingType::SetupConst));
 }
 
 /// @ai-generated — ternary expression might be ref → SetupMaybeRef
@@ -823,13 +1023,13 @@ fn spans_are_local_coordinates() {
     let alloc = Allocator::default();
     let ret = Parser::new(&alloc, source, SourceType::tsx()).parse();
     let ctx = ScriptParseContext::new(0, source.as_bytes());
-    let entries = extract_bindings(&ret.program, &ctx);
+    let entries = extract_bindings(&ret.program, &ctx, &VueImportAliases::default());
     assert_eq!(entries.len(), 1);
     let (span, bt) = &entries[0];
     // 'x' is at position 6 in source
     assert_eq!(span.start, 6);
     assert_eq!(span.end, 7);
-    assert_eq!(*bt, BindingType::SetupRef);
+    assert_eq!(*bt, BindingType::SetupMaybeRef);
 }
 
 /// @ai-generated — standalone defineEmits produces no binding (no type params to extract)

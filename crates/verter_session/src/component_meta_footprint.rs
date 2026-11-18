@@ -632,7 +632,6 @@ impl PayloadHeap for tx::ExpandedComponentTypes {
             define_slots,
             slot_bindings,
             bindings,
-            exposed,
         } = self;
         props.heap(m)
             + define_props.heap(m)
@@ -641,7 +640,6 @@ impl PayloadHeap for tx::ExpandedComponentTypes {
             + define_slots.heap(m)
             + slot_bindings.heap(m)
             + bindings.heap(m)
-            + exposed.heap(m)
     }
 }
 
@@ -687,16 +685,6 @@ impl PayloadHeap for tx::ExpandedMacroObjectShape {
             result,
         } = self;
         macro_index.heap(m) + result.heap(m)
-    }
-}
-
-impl PayloadHeap for tx::ExpandedMacroExposed {
-    fn heap(&self, m: &mut Meter<'_>) -> usize {
-        let Self {
-            macro_index,
-            fields,
-        } = self;
-        macro_index.heap(m) + fields.heap(m)
     }
 }
 

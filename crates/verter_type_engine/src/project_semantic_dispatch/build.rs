@@ -2994,135 +2994,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Whether a read of the value `path` names, in `canonical`'s `owner`
-    /// scope, yields a WIDENING literal: the value's declared type is the
-    /// fresh literal type a `const` takes from its literal initializer
-    /// (`const c = 1`), directly or through the values it copies
-    /// (`const d = c`). The checker widens such a read wherever it widens a
-    /// bare literal — a return, a mutable binding, an object or array
-    /// member, a call argument. The path resolves as a `typeof` reference to
-    /// it does: a namespace member, an import, a global.
-    pub fn value_read_widens(
-        &self,
-        canonical: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        path: &[String],
-    ) -> bool {
-        let Some((root, rest)) = path.split_first() else {
-            return false;
-        };
-        let value_root = ValueRootKey {
-            scope: crate::semantic_query::ScopeId {
-                canonical_id: verter_type_expr::OwnedStr::from(canonical),
-                owner,
-                local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
-            },
-            name: verter_type_expr::OwnedStr::from(root.as_str()),
-        };
-        let rest: Vec<verter_type_expr::OwnedStr> = rest
-            .iter()
-            .map(|segment| verter_type_expr::OwnedStr::from(segment.as_str()))
-            .collect();
-        self.declared_literal_widens(&value_root, &rest, &mut FxHashSet::default())
-    }
-
-    /// [`Self::value_read_widens`] from a resolved value root. `visited`
-    /// holds the references this read has already followed: a copy cycle
-    /// (`const a = b; const b = a`) is the checker's own error and reads no
-    /// literal.
-    fn declared_literal_widens(
-        &self,
-        value_root: &ValueRootKey,
-        path: &[verter_type_expr::OwnedStr],
-        visited: &mut FxHashSet<(ValueRootKey, Vec<verter_type_expr::OwnedStr>)>,
-    ) -> bool {
-        use verter_type_expr::facts::DeclaredLiteralFreshness;
-        let Some((identity, path)) = self.value_path_declaration(value_root, path, visited) else {
-            return false;
-        };
-        // A member of a value (`obj.a`) is not a declaration of its own,
-        // except a class's static member (`C.s`) and an enum's member
-        // (`E.A`).
-        let static_member = match path.as_slice() {
-            [] => None,
-            [member] => Some(member),
-            _ => return false,
-        };
-        let Some((declaring_canonical, declaring_owner, _, prepared)) = self
-            .effective_prepared_value_decl(
-                &identity.canonical_id,
-                identity.owner,
-                &identity.symbol_name,
-            )
-        else {
-            return false;
-        };
-        if let Some(member) = static_member {
-            // Every enum member declares the fresh literal type of its
-            // value, so a read of one widens as a bare literal does.
-            if prepared.kind == verter_session_query::declarations::ValueDeclKind::Enum {
-                return prepared.enum_members.as_ref().is_some_and(|members| {
-                    members
-                        .members
-                        .iter()
-                        .any(|entry| entry.name.as_str() == member.as_ref())
-                });
-            }
-            return matches!(
-                &prepared.type_annotation.literal_freshness,
-                DeclaredLiteralFreshness::WideningMembers { statics, .. }
-                    if statics.iter().any(|widening| widening.as_str() == member.as_ref())
-            );
-        }
-        match &prepared.type_annotation.literal_freshness {
-            // A `const` initialized by a call reads as fresh as the call's
-            // result is (`const m = f(1)` over `f<T>(x: T): T`).
-            DeclaredLiteralFreshness::Regular
-                if prepared.kind == verter_session_query::declarations::ValueDeclKind::Const =>
-            {
-                prepared
-                    .type_annotation
-                    .expression_source
-                    .as_ref()
-                    .is_some_and(|source| {
-                        self.semantic_expression_source_is_fresh(source, declaring_owner)
-                    })
-            }
-            DeclaredLiteralFreshness::Regular
-            | DeclaredLiteralFreshness::WideningMembers { .. }
-            | DeclaredLiteralFreshness::WideningNullish => false,
-            DeclaredLiteralFreshness::Widening => true,
-            DeclaredLiteralFreshness::Follows(copied) => {
-                // A copy written in a namespace body reads that body's own
-                // scope first, which holds members no qualified name
-                // records; the file scope would name another value.
-                if identity.symbol_name.contains('.') {
-                    return false;
-                }
-                let Some((first, rest)) = copied.split_first() else {
-                    return false;
-                };
-                let copied_root = ValueRootKey {
-                    scope: crate::semantic_query::ScopeId {
-                        canonical_id: declaring_canonical,
-                        owner: declaring_owner,
-                        local_scope: None,
-                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                            declaring_owner,
-                        ),
-                    },
-                    name: verter_type_expr::OwnedStr::from(first.as_str()),
-                };
-                let rest: Vec<verter_type_expr::OwnedStr> = rest
-                    .iter()
-                    .map(|segment| verter_type_expr::OwnedStr::from(segment.as_str()))
-                    .collect();
-                self.declared_literal_widens(&copied_root, &rest, visited)
-            }
-        }
-    }
-
     /// The value declaration the longest declared prefix of a value path
     /// names, and the path's remaining segments: the value declared under
     /// the root's name in its scope — or, when no scope declares it, among
@@ -13801,9 +13672,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Apply instantiation-expression type arguments to a signature-bearing
     /// OBJECT (`typeof f<string>` over a function declaration, `typeof
     /// C<string>` over a generic class): every call and construct signature
-    /// the object carries — read from `SignaturesOfType` — whose own
-    /// type-parameter list accepts the arguments is instantiated, the
-    /// others are dropped, and the object's members and index signatures
+    /// the object carries — supplied by the retained `SignaturesOfType`
+    /// lists — whose own type-parameter list accepts the arguments is
+    /// instantiated. The others are dropped, and the object's members and index signatures
     /// are kept as they are. TypeScript's `getInstantiationExpressionType`
     /// instantiates the same way. An object with no signature that accepts
     /// the arguments is the same honest `Opaque(Miss)` a lone signature
@@ -13812,19 +13683,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         node: SemanticNodeId,
         surface: &crate::semantic_query::SurfaceView,
+        calls: &[SemanticNodeId],
+        constructs: &[SemanticNodeId],
         args: &[SemanticNodeId],
     ) -> SemanticNodeId {
-        let Ok((calls, constructs)) = self.shared_signature_buckets(node) else {
-            return self.opaque(QueryError::Miss);
-        };
         let instantiate = |signatures: &[SemanticNodeId]| -> Vec<SemanticNodeId> {
             signatures
                 .iter()
                 .filter_map(|signature| self.instantiate_call_candidate(*signature, args))
                 .collect()
         };
-        let mut call_signatures = Some(instantiate(&calls));
-        let mut construct_signatures = Some(instantiate(&constructs));
+        let mut call_signatures = Some(instantiate(calls));
+        let mut construct_signatures = Some(instantiate(constructs));
         if call_signatures.as_ref().is_some_and(Vec::is_empty)
             && construct_signatures.as_ref().is_some_and(Vec::is_empty)
         {
@@ -15949,20 +15819,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The `keyof base` query's answer when it is complete. A read that
+    /// The answer of a `keyof` `read` when it is complete. A read that
     /// stopped short holds no key set — an empty one would read as
     /// `never` — so its partiality folds into the caller and the answer
     /// is `None`.
-    fn complete_key_of(
-        &self,
-        base: SemanticNodeId,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
-        self.complete_key_of_read(self.execute_read(SemanticQueryKey::KeyOf { base, context }))
-    }
-
-    /// The answer of a `keyof` `read` when it is complete
-    /// ([`Self::complete_key_of`]).
     fn complete_key_of_read(
         &self,
         read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
@@ -15981,37 +15841,109 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// comparability question reads, whichever `keyof` carrier stands for
     /// it in print. `None` when the keys do not settle or their read
     /// stopped short.
+    ///
+    /// The in-place driver of [`Self::begin_key_set_read`]: each `keyof`
+    /// read the walk names is made where the walk stands, over the same
+    /// steps, with the walk's state on the stack.
     pub(super) fn key_set_of(&self, base: SemanticNodeId) -> Option<SemanticNodeId> {
-        let published =
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
-        let read = |base: SemanticNodeId| self.complete_key_of(base, published);
-        // Each step settles the carrier a `keyof` kept to the type it
-        // stands for — a declaration or application to its body, a class
-        // expression's instance (which keeps its `keyof` origin) to the
-        // surface it reads through — until the keys settle; a carrier that
-        // settles to itself keeps its keys open.
-        let mut keys = read(base)?;
-        let mut seen = FxHashSet::default();
+        self.drive_key_set_in_place(base, |key| self.execute_read(key))
+    }
+
+    /// [`Self::key_set_of`] with each `keyof` read answered by `answer`.
+    fn drive_key_set_in_place(
+        &self,
+        base: SemanticNodeId,
+        mut answer: impl FnMut(
+            SemanticQueryKey,
+        ) -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> Option<SemanticNodeId> {
+        let mut read = KeySetRead::new(base);
         loop {
-            let kept = match self.graph().node_data(keys).as_deref() {
-                Some(SemanticNodeData::KeyOf { base: kept }) => *kept,
-                _ => return Some(keys),
-            };
-            if !seen.insert(kept) {
-                return None;
+            let delivered = answer(Self::key_set_query(read.standing));
+            if let KeySetAdvance::Done(keys) = self.key_set_delivered(&mut read, delivered) {
+                return keys;
             }
-            let settled = match self.class_expression_read_surface(kept) {
-                Some(surface) => surface,
-                None => self.resolve_signature_source_carrier(
-                    kept,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                ),
-            };
-            if settled == kept {
-                return None;
-            }
-            keys = read(settled)?;
         }
+    }
+
+    /// The first stage of [`Self::key_set_of`] as a sub-continuation its
+    /// consumer steps: the walk standing at its first `keyof` read, of
+    /// `base`, which it names without making ([`KeySetRead`]).
+    pub(super) fn begin_key_set_read(&self, base: SemanticNodeId) -> KeySetStep {
+        KeySetStep::Read(Self::key_set_query(base), Box::new(KeySetRead::new(base)))
+    }
+
+    /// The next stage of a key-set walk standing at its `keyof` read, given
+    /// `deliver`, that read: the walk continues from the carriers it has
+    /// already settled, to its keys or to the next `keyof` read it names.
+    pub(super) fn resume_key_set_read(
+        &self,
+        mut read: Box<KeySetRead>,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> KeySetStep {
+        match self.key_set_delivered(&mut read, deliver()) {
+            KeySetAdvance::Done(keys) => KeySetStep::Done(keys),
+            KeySetAdvance::Read => KeySetStep::Read(Self::key_set_query(read.standing), read),
+        }
+    }
+
+    /// Release a key-set walk standing at its `keyof` read. Between reads
+    /// the walk holds only node ids: no recording, cost scope or
+    /// observation stays open.
+    pub(super) fn abandon_key_set_read(&self, read: Box<KeySetRead>) {
+        drop(read);
+    }
+
+    /// The `keyof` read a key-set walk makes of `base`: published
+    /// `Expanded`, the keys a relation reads.
+    fn key_set_query(base: SemanticNodeId) -> SemanticQueryKey {
+        SemanticQueryKey::KeyOf {
+            base,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Expanded,
+            ),
+        }
+    }
+
+    /// One step of a key-set walk: its `keyof` read of `read.standing`
+    /// answered `delivered`. Each step settles the carrier a `keyof` kept
+    /// to the type it stands for — a declaration or application to its
+    /// body, a class expression's instance (which keeps its `keyof` origin)
+    /// to the surface it reads through — and reads that type's keys next,
+    /// until the keys settle; a carrier that settles to itself, or one
+    /// already settled, keeps its keys open. A read that stopped short
+    /// folds its partiality and answers `None`.
+    ///
+    /// The declaration and application settle reads in place
+    /// ([`Self::resolve_signature_source_carrier`]); it is the one read the
+    /// walk does not name.
+    fn key_set_delivered(
+        &self,
+        read: &mut KeySetRead,
+        delivered: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> KeySetAdvance {
+        let Some(keys) = self.complete_key_of_read(delivered) else {
+            return KeySetAdvance::Done(None);
+        };
+        let kept = match self.graph().node_data(keys).as_deref() {
+            Some(SemanticNodeData::KeyOf { base: kept }) => *kept,
+            _ => return KeySetAdvance::Done(Some(keys)),
+        };
+        if !read.seen.insert(kept) {
+            return KeySetAdvance::Done(None);
+        }
+        let settled = match self.class_expression_read_surface(kept) {
+            Some(surface) => surface,
+            None => self.resolve_signature_source_carrier(
+                kept,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            ),
+        };
+        if settled == kept {
+            return KeySetAdvance::Done(None);
+        }
+        read.standing = settled;
+        KeySetAdvance::Read
     }
 
     pub(super) fn intern_keyspace_keys<I>(
@@ -23392,6 +23324,43 @@ pub(super) enum SourceCarrierStep {
     Read(SemanticQueryKey, Box<SourceCarrierRead>),
 }
 
+/// The literal keys `keyof` a base denotes
+/// ([`ProjectSemanticDispatch::key_set_of`]) between two of its `keyof`
+/// reads: the base whose keys the walk reads next and the `keyof` carriers
+/// it has already settled. The keys each read answers are consumed by the
+/// step that receives them: either they are the walk's answer, or the
+/// carrier they kept is settled into `standing` and recorded in `seen`.
+pub(super) struct KeySetRead {
+    standing: SemanticNodeId,
+    seen: FxHashSet<SemanticNodeId>,
+}
+
+impl KeySetRead {
+    fn new(base: SemanticNodeId) -> Self {
+        Self {
+            standing: base,
+            seen: FxHashSet::default(),
+        }
+    }
+}
+
+/// Where a key-set walk stands after its latest stage.
+pub(super) enum KeySetStep {
+    /// The keys; `None` when they do not settle or their read stopped
+    /// short.
+    Done(Option<SemanticNodeId>),
+    /// The walk reads this `keyof` query next, holding everything it
+    /// computed.
+    Read(SemanticQueryKey, Box<KeySetRead>),
+}
+
+/// What one delivered `keyof` read decided for a key-set walk.
+enum KeySetAdvance {
+    Done(Option<SemanticNodeId>),
+    /// The walk settled a carrier and reads its `standing` base next.
+    Read,
+}
+
 /// A mapped key space's admission check
 /// ([`ProjectSemanticDispatch::begin_keyspace_admission`]) between two of its
 /// evaluations: the nodes left to evaluate, the next one last, the selected
@@ -23483,4 +23452,95 @@ pub(super) enum KeyOfCarrierStep {
     Done(Option<SemanticNodeId>),
     /// The settle reads this query next, holding everything it computed.
     Read(SemanticQueryKey, Box<KeyOfCarrierRead>),
+}
+
+/// One key-set walk as a test observes it
+/// ([`ProjectSemanticDispatch::trace_key_set_read_for_tests`]).
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, PartialEq, Eq)]
+pub struct KeySetTraceForTests {
+    /// The keys the walk answered.
+    pub keys: Option<SemanticNodeId>,
+    /// Every `keyof` read the walk made, in order.
+    pub requested: Vec<SemanticQueryKey>,
+    /// The node each read answered (`None` for an answer that is no node).
+    pub answers: Vec<Option<SemanticNodeId>>,
+    pub observations_complete: bool,
+    pub cache_suppress: bool,
+    pub partial_reasons: crate::semantic_query::PartialReasonSet,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// The key set of `base`, through the stepped walk
+    /// ([`Self::begin_key_set_read`] / [`Self::resume_key_set_read`]) or
+    /// through the in-place driver [`Self::key_set_of`] drives, each
+    /// `keyof` read answered by [`Self::execute_read`] and recorded. With
+    /// `partial`, every answer is marked as having stopped short. The
+    /// in-place run also checks [`Self::key_set_of`] answers what the
+    /// traced driver answered.
+    pub fn trace_key_set_read_for_tests(
+        &self,
+        base: SemanticNodeId,
+        stepped: bool,
+        partial: bool,
+    ) -> KeySetTraceForTests {
+        let (_connected, _) = self.enter_connected_demand(false);
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let mut requested = Vec::new();
+        let mut answers = Vec::new();
+        let mut answer = |key: SemanticQueryKey| {
+            requested.push(key.clone());
+            assert!(
+                requested.len() <= 8,
+                "a finite key-set walk must not replay its reads"
+            );
+            let mut read = self.execute_read(key);
+            answers.push(match read.value {
+                QueryResult::Value(node) => Some(node),
+                _ => None,
+            });
+            if partial {
+                read.fact_status = crate::semantic_query::FactStatus::approximate(
+                    crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+                );
+            }
+            read
+        };
+        let keys = if stepped {
+            let mut step = self.begin_key_set_read(base);
+            loop {
+                match step {
+                    KeySetStep::Done(keys) => break keys,
+                    KeySetStep::Read(key, read) => {
+                        let mut key = Some(key);
+                        step = self.resume_key_set_read(read, &mut || {
+                            answer(key.take().expect("one answer per read"))
+                        });
+                    }
+                }
+            }
+        } else {
+            self.drive_key_set_in_place(base, &mut answer)
+        };
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        let frame = frame.finish();
+        scope.discard();
+        if !stepped && !partial {
+            assert_eq!(
+                self.key_set_of(base),
+                keys,
+                "the in-place entry uses the traced driver"
+            );
+        }
+        KeySetTraceForTests {
+            keys,
+            requested,
+            answers,
+            observations_complete: !completeness.is_partial() && !frame.result_is_partial,
+            cache_suppress: frame.cache_suppress,
+            partial_reasons: frame.partial_reasons,
+        }
+    }
 }

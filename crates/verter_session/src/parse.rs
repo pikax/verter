@@ -26,8 +26,8 @@ use crate::hash::semantic_hash;
 use crate::id::resolve_external;
 use crate::types::{
     DescriptorMin, DiagnosticsSnapshot, ExternalBlockKind, ExternalSourceRequest, FileMeta,
-    HostDiagnostic, HostSeverity, ParseSnapshot, PendingPreprocessorRequest, SliceHashes,
-    SrcBlockInfo,
+    HostDiagnostic, HostSeverity, ParseSnapshot, PendingPreprocessorRequest, RequestMarker,
+    SliceHashes, SrcBlockInfo,
 };
 use verter_semantic_source::source_hash::hash_16;
 
@@ -1117,6 +1117,7 @@ fn build_svelte_snapshot_from_eval_source(
         template_lang: None,
         style_langs,
         custom_types: Vec::new(),
+        request_marker: RequestMarker::Verter,
     };
     snapshot.preprocessor_requests = preprocessor_requests;
     if !artifact.diagnostics().is_empty() {
@@ -1927,6 +1928,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
             template_lang,
             style_langs,
             custom_types,
+            request_marker: RequestMarker::Vue,
         },
         external_requests,
         src_blocks,
@@ -4385,7 +4387,7 @@ onMounted(() => { console.log('mounted') })
             catalog_eval_source(artifact.as_ref(), source).is_some(),
             "the Vue artifact must hit the semantic catalog"
         );
-        let miss = artifact.remint_epoch_for_tests("unknown-epoch");
+        let miss = artifact.with_unregistered_profile_for_tests();
         assert!(
             catalog_eval_source(&miss, source).is_none(),
             "an unknown epoch must miss the semantic catalog"
@@ -4433,7 +4435,7 @@ onMounted(() => { console.log('mounted') })
             "catalog hit must retain the <Child> usage so miss-None is distinct from empty success"
         );
 
-        let miss_artifact = artifact.remint_epoch_for_tests("unknown-epoch");
+        let miss_artifact = artifact.with_unregistered_profile_for_tests();
         let miss = compile_template_data(
             &file_language,
             source,

@@ -4629,6 +4629,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// itself through its arms) stays as written: the re-entry reads
     /// through the same `carrier_normalizing` in-progress record the
     /// carrier normalizer keeps, never a depth limit.
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn composite_over_resolved_arms(
         &self,
         node: SemanticNodeId,

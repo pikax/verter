@@ -501,7 +501,20 @@ pub(crate) fn exposed_from_typeinfo_surface<
                         description,
                         tags,
                     },
-                    type_source,
+                    authority: verter_type_expr::ResolvedTypeAuthority::from_source_position(
+                        &type_source,
+                        if matches!(
+                            type_source.present(),
+                            Some(verter_type_expr::facts::SemanticTypeSource::Closed(_))
+                        ) {
+                            ResolutionExactness::ExactConcrete
+                        } else {
+                            ResolutionExactness::ExactSymbolic
+                        },
+                        ResolutionProvenance::FrameworkSurface,
+                        Arc::from([]),
+                    ),
+                    authored_evidence: None,
                 },
             )
         })

@@ -52,11 +52,12 @@ use oxc_ast_visit::{walk, Visit};
 use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_parser::oxc_parse::Parser;
-
-use crate::cursor::ScriptLanguage;
+use verter_parser::types::BindingType;
 
 use super::options_api::{project_options_pair, CombinedScriptProjection, OptionsMemberKind};
-use super::script_setup::{value_bindings, ScriptBlockInput, SetupProjectionRefusal, SourceRange};
+use super::script_setup::{
+    grammar_of, value_bindings, ScriptBlockInput, SetupProjectionRefusal, SourceRange,
+};
 
 /// Syntax classification of one template-visible binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -733,33 +734,14 @@ enum DirectiveKind {
 
 /// Classify one attribute name into its Vue directive class.
 fn directive_kind(name: &str) -> DirectiveKind {
-    if name.starts_with(':') {
-        DirectiveKind::Bind
-    } else if let Some(rest) = name.strip_prefix("v-bind") {
-        if rest.is_empty() || rest.starts_with([':', '.', '[']) {
-            DirectiveKind::Bind
-        } else {
-            DirectiveKind::Static
-        }
-    } else if name.starts_with('@')
-        || name
-            .strip_prefix("v-on")
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '.', '@', '[']))
-    {
-        DirectiveKind::On
-    } else if name == "v-for" {
-        DirectiveKind::For
-    } else if name.starts_with('#')
-        || name == "v-slot"
-        || name.starts_with("v-slot:")
-        || name.starts_with("v-slot[")
-        || name.starts_with("v-slot.")
-    {
-        DirectiveKind::Slot
-    } else if name.starts_with("v-") {
-        DirectiveKind::Other
-    } else {
-        DirectiveKind::Static
+    use verter_parser::types::{classify_directive_name, BuiltinDirective, DirectiveKind as Kind};
+    match classify_directive_name(name.as_bytes()) {
+        Kind::Bind => DirectiveKind::Bind,
+        Kind::On => DirectiveKind::On,
+        Kind::Builtin(BuiltinDirective::For) => DirectiveKind::For,
+        Kind::Builtin(BuiltinDirective::Slot) => DirectiveKind::Slot,
+        Kind::Builtin(_) | Kind::Custom => DirectiveKind::Other,
+        Kind::Static => DirectiveKind::Static,
     }
 }
 
@@ -1545,13 +1527,68 @@ fn resolve_props_call<'a>(
 
 /// Shared context for [`classify_declarator`]: the parsed block text,
 /// its carrier base offset, the setup value bindings, the runtime `'vue'`
-/// imports, and whether the declarator is mutable (`let`/`var`, not `const`).
+/// imports, the parser's classification of each setup binding, and whether
+/// the declarator is mutable (`let`/`var`, not `const`).
 struct DeclaratorCtx<'a> {
     content: &'a str,
     base: u32,
     values: &'a FxHashSet<String>,
     vue_imports: &'a FxHashMap<&'a str, &'a str>,
+    parsed_kinds: &'a FxHashMap<String, BindingType>,
     mutable: bool,
+}
+
+/// The write domain the parser's classification gives a binding whose
+/// initializer is not a Vue factory the views model themselves: a call or
+/// expression that may evaluate to a ref (`SetupMaybeRef`) is written
+/// through the ref. Every other classification keeps the declaration's own
+/// mutability.
+fn parsed_write_domain(kind: BindingType) -> Option<WriteDomain> {
+    match kind {
+        BindingType::SetupMaybeRef | BindingType::SetupRef => Some(WriteDomain::RefValue),
+        _ => None,
+    }
+}
+
+/// Push a binding no Vue factory made. A name the parser classifies as a
+/// maybe-ref is writable even when declared `const`: a `const` holding a
+/// ref is written through the ref and never reassigned.
+fn push_unclassified(
+    projection: &mut BindingViewsProjection,
+    ctx: &DeclaratorCtx<'_>,
+    name: String,
+    range: SourceRange,
+) {
+    let domain = ctx
+        .parsed_kinds
+        .get(&name)
+        .copied()
+        .and_then(parsed_write_domain);
+    let Some(domain) = domain.filter(|_| !ctx.mutable) else {
+        push_binding(
+            projection,
+            name,
+            BindingKind::Plain,
+            range,
+            None,
+            ctx.mutable,
+        );
+        return;
+    };
+    if projection.read.lookup(&name).is_some() {
+        return;
+    }
+    projection.read.bindings.push(TemplateReadBinding {
+        name: name.clone(),
+        kind: BindingKind::Plain,
+        unwrapped: false,
+        script_wraps_ref: false,
+        range,
+    });
+    projection
+        .write
+        .writable
+        .push(WritableBinding { name, domain });
 }
 
 /// Classify one setup declarator initializer into read/write rows.
@@ -1577,14 +1614,7 @@ fn classify_declarator(
         // Object literals (possibly holding nested refs), arrays and every
         // other initializer read directly: only top-level `ref` unwraps.
         for (name, range) in names {
-            push_binding(
-                projection,
-                name,
-                BindingKind::Plain,
-                range,
-                None,
-                ctx.mutable,
-            );
+            push_unclassified(projection, ctx, name, range);
         }
         return;
     };
@@ -1710,14 +1740,7 @@ fn classify_declarator(
         }
         _ => {
             for (name, range) in names {
-                push_binding(
-                    projection,
-                    name,
-                    BindingKind::Plain,
-                    range,
-                    None,
-                    ctx.mutable,
-                );
+                push_unclassified(projection, ctx, name, range);
             }
         }
     }
@@ -1934,23 +1957,17 @@ fn collect_standalone_props_call(
     }
 }
 
-/// Source type for one setup block; absent `lang` is Vue's JavaScript
-/// default and is refused, matching the setup authority.
-fn setup_source_type(lang: Option<ScriptLanguage>) -> Result<SourceType, SetupProjectionRefusal> {
-    match lang {
-        Some(ScriptLanguage::TypeScript) => Ok(SourceType::ts().with_module(true)),
-        Some(ScriptLanguage::TSX) => Ok(SourceType::tsx().with_module(true)),
-        None | Some(_) => Err(SetupProjectionRefusal::NotTypeScript),
-    }
-}
-
 /// Project live read/write views for one SFC script pair. Options members
 /// come from the single combined authority; setup initializer detail comes
-/// from one parse of the setup block under its own grammar.
+/// from one parse of the setup block under its own grammar. `kinds` is the
+/// parser's classification of each setup binding, read from the script
+/// preparation the caller already holds; it decides which call results
+/// are written through a ref.
 pub fn project_binding_views(
     normal: Option<ScriptBlockInput<'_>>,
     setup: Option<ScriptBlockInput<'_>>,
     generic: Option<&str>,
+    kinds: &[(String, BindingType)],
 ) -> Result<BindingViewsProjection, SetupProjectionRefusal> {
     if let (Some(n), Some(s)) = (&normal, &setup) {
         if n.lang != s.lang {
@@ -1963,7 +1980,8 @@ pub fn project_binding_views(
     // order, earliest row kept): classify `<script setup>` before
     // recording Options members, which skip names already bound.
     if let Some(block) = setup {
-        let source_type = setup_source_type(block.lang)?;
+        // The setup authority decides the block's grammar.
+        let source_type = grammar_of(block.lang)?.source_type();
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, block.content, source_type).parse();
         if parsed.fatal_error || !parsed.diagnostics.is_empty() {
@@ -1976,6 +1994,7 @@ pub fn project_binding_views(
         .semantic;
         let values = value_bindings(semantic.scoping());
         let vue_imports = vue_runtime_imports(program);
+        let parsed_kinds: FxHashMap<String, BindingType> = kinds.iter().cloned().collect();
         classify_setup_body(
             &mut projection,
             block.content,
@@ -1983,6 +2002,7 @@ pub fn project_binding_views(
             program,
             &values,
             &vue_imports,
+            &parsed_kinds,
         );
     }
     project_options_members(&mut projection, &combined);
@@ -2048,6 +2068,7 @@ fn classify_setup_body(
     program: &Program<'_>,
     values: &FxHashSet<String>,
     vue_imports: &FxHashMap<&str, &str>,
+    parsed_kinds: &FxHashMap<String, BindingType>,
 ) {
     for statement in &program.body {
         match statement {
@@ -2059,6 +2080,7 @@ fn classify_setup_body(
                     base,
                     values,
                     vue_imports,
+                    parsed_kinds,
                     mutable: !matches!(
                         declaration.kind,
                         oxc_ast::ast::VariableDeclarationKind::Const
@@ -2139,4 +2161,24 @@ fn declarator_bound(projection: &BindingViewsProjection, id: &BindingPattern<'_>
         && names
             .iter()
             .all(|(name, _)| projection.read.lookup(name).is_some())
+}
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct
+    for BindingViewsProjection
+{
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.binding_views(input.source, input.artifact)
+    }
+}
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct for BindingUsageSet {
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.binding_usage(input.source, input.artifact)
+    }
 }

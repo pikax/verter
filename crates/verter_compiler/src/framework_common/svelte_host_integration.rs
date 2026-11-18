@@ -25,10 +25,12 @@ use crate::compile_request::{
     FrameworkCompileRequest, ProductKind, RuntimeProductRequest, SvelteOptionAttempt,
     UnroutableHostRequestAxis,
 };
-use crate::standalone::registered_runtime_for;
-use crate::svelte::carrier::{svelte_carrier_bundle, SvelteCarrierCompiler};
-use crate::svelte::carrier_frontend::{SvelteCarrierFrontend, SvelteParseAdmission, SvelteSfc5};
+use crate::svelte::carrier_bundle::svelte_carrier_bundle;
+use crate::svelte::carrier_frontend::{
+    svelte_carrier_frontend_registration, SvelteCarrierFrontend, SvelteParseAdmission, SvelteSfc5,
+};
 use crate::svelte::semantic_authority::{SvelteSemanticAdmission, SvelteSemanticAuthority};
+use crate::svelte::svelte_runtime_backend::svelte_runtime_backend_registration;
 
 use super::capability::{
     FrameworkHostIntegrationBackend, NativeHostEpoch, ProductExecutionGrant, ProductExecutionGrants,
@@ -37,9 +39,13 @@ use super::carrier_compiler::{
     CarrierCompileOutcome, CompileUnsupported, IdeOutput, RuntimeCompileOptions,
     RuntimeCompileOutput, RuntimeDiagnostic,
 };
-use super::catalog::{CatalogCapability, HostCap, TypedCapabilityRegistration};
+use super::carrier_registry::RegisteredBackend;
+use super::catalog::{
+    CatalogCapability, CatalogRows, CatalogSnapshot, HostCap, ProductCapability,
+    TypedCapabilityRegistration,
+};
 use super::registered_carrier_projection::{
-    registered_projection_for, registered_semantic_for, TemplateFactsProduct,
+    svelte_projection_row, svelte_semantic_row, TemplateFactsProduct,
 };
 use super::{FrameworkParseArtifact, Present};
 
@@ -453,13 +459,13 @@ impl SvelteHostIntegrationBackend {
     /// Adapter this backend answers to.
     #[must_use]
     pub fn adapter_id(&self) -> FrameworkAdapterId {
-        SvelteCarrierCompiler.adapter_id()
+        SvelteCarrierFrontend.adapter_id()
     }
 
     /// Carrier language this backend integrates.
     #[must_use]
     pub fn carrier_language_id(&self) -> LanguageId {
-        SvelteCarrierCompiler.carrier_language_id()
+        SvelteCarrierFrontend.carrier_language_id()
     }
 
     /// Compose the parse + semantic admissions over the artifact — the
@@ -550,32 +556,19 @@ impl SvelteHostIntegrationBackend {
         products: &[CompileProduct],
     ) -> Result<(), SvelteHostAdmissionRefusal> {
         for product in products {
-            let required = match product.kind() {
-                ProductKind::RuntimeClient | ProductKind::RuntimeServer => {
-                    registered_runtime_for(artifact.adapter_id(), artifact.epoch())
-                        .is_some()
-                        .then_some(())
-                        .ok_or(CatalogCapability::Runtime)
-                }
-                ProductKind::IdeCompanion => {
-                    registered_projection_for(artifact.adapter_id(), artifact.epoch())
-                        .is_some()
-                        .then_some(())
-                        .ok_or(CatalogCapability::Projection)
-                }
-                ProductKind::Analysis => {
-                    registered_semantic_for(artifact.adapter_id(), artifact.epoch())
-                        .is_some()
-                        .then_some(())
-                        .ok_or(CatalogCapability::Semantic)
-                }
-                kind @ (ProductKind::PublicApi | ProductKind::Declarations) => {
-                    return Err(SvelteHostAdmissionRefusal::UnsupportedProduct(kind));
-                }
-            };
-            if let Err(capability) = required {
+            let kind = product.kind();
+            if matches!(kind, ProductKind::PublicApi | ProductKind::Declarations) {
+                return Err(SvelteHostAdmissionRefusal::UnsupportedProduct(kind));
+            }
+            if let ProductCapability::Unsupported(capability) = CatalogSnapshot::built_in()
+                .product_capability(
+                    artifact.carrier_profile(),
+                    artifact.framework_profile(),
+                    kind,
+                )
+            {
                 return Err(SvelteHostAdmissionRefusal::CapabilityUnavailable {
-                    product: product.kind(),
+                    product: kind,
                     capability,
                 });
             }
@@ -660,7 +653,7 @@ impl SvelteHostIntegrationBackend {
         // Bound before any product runs: a supplied result that does not
         // describe its block refuses the whole compile, so nothing publishes
         // or warms from it.
-        let continuations = crate::svelte::carrier::bind_svelte_style_continuations(
+        let continuations = crate::svelte::carrier_bundle::bind_svelte_style_continuations(
             artifact,
             &admission.request,
             &inputs.supplied_styles,
@@ -741,14 +734,21 @@ impl FrameworkHostIntegrationBackend<SvelteSfc5, NativeHostEpoch> for SvelteHost
         let (parse, semantic) = self.compose_admissions(artifact)?;
         // Demand-specific validation: the render lane requires ONLY the
         // runtime capability — projection is never consulted.
-        if registered_runtime_for(artifact.adapter_id(), artifact.epoch()).is_none() {
+        let runtime_kind = if demand.ssr {
+            ProductKind::RuntimeServer
+        } else {
+            ProductKind::RuntimeClient
+        };
+        if let ProductCapability::Unsupported(capability) = CatalogSnapshot::built_in()
+            .product_capability(
+                artifact.carrier_profile(),
+                artifact.framework_profile(),
+                runtime_kind,
+            )
+        {
             return Err(SvelteHostAdmissionRefusal::CapabilityUnavailable {
-                product: if demand.ssr {
-                    ProductKind::RuntimeServer
-                } else {
-                    ProductKind::RuntimeClient
-                },
-                capability: CatalogCapability::Runtime,
+                product: runtime_kind,
+                capability,
             });
         }
         let products = vec![if demand.ssr {
@@ -988,6 +988,28 @@ pub fn svelte_host_integration_registration(
         SvelteHostIntegrationBackend::new().carrier_language_id(),
         Present(SvelteHostIntegrationBackend::new()),
     )
+    .expect("the built-in Svelte profile manifest is admitted")
+}
+
+impl RegisteredBackend for SvelteHostIntegrationBackend {
+    fn registered() -> &'static Self {
+        SvelteHostIntegrationBackend::registered()
+    }
+}
+
+/// The Svelte carrier's catalog rows: its frontend, semantic authority and
+/// projection backend, and its runtime plus native-host compiler backend.
+pub fn svelte_catalog_rows(
+    rows: &mut CatalogRows,
+) -> Result<(), verter_identity::successor::ReleaseDescriptorError> {
+    rows.carrier(svelte_carrier_frontend_registration());
+    rows.semantic(svelte_semantic_row());
+    rows.projection(svelte_projection_row());
+    rows.compiler_backend(
+        svelte_runtime_backend_registration(),
+        svelte_host_integration_registration(),
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1009,27 +1031,26 @@ fn record_host_backend_execution() {
 
 #[cfg(test)]
 mod tests {
-    use super::super::registered_carrier_projection::{
-        parse_registered_source_for_tests, projection_catalog_consult_count,
-        take_projection_producer_invocations, take_template_facts_producer_invocations,
+    use super::super::carrier_registry::{
+        take_registry_dispatches, CarrierCompilerBackendRegistry,
     };
-    use super::super::vue_host_integration::{
-        built_in_host_integration_catalog, registered_host_integration_for,
-        InstalledHostIntegration,
+    use super::super::registered_carrier_projection::{
+        parse_registered_source_for_tests, take_projection_producer_invocations,
+        take_template_facts_producer_invocations,
     };
     use super::super::{CarrierCompileOutcome, HostEpochId, RuntimeCompileOptions};
     use super::*;
     use crate::compile_request::svelte::{SvelteCssRequest, SvelteCustomElementDescriptor};
     use crate::compile_request::{AnalysisProductRequest, IdeProductRequest, SvelteOption};
-    use crate::framework_common::capability::HostEpoch;
+    use crate::framework_common::capability::FrameworkEpoch;
     use crate::standalone::runtime_backend_delegation_count;
-    use verter_language::carrier_grammar::CarrierGrammarConfig;
+    use crate::svelte::SvelteRuntimeBackend;
     use verter_language::FileLanguage;
 
     fn svelte_artifact(source: &str) -> Arc<FrameworkParseArtifact> {
         parse_registered_source_for_tests(
             FileLanguage::svelte(),
-            CarrierGrammarConfig::Svelte,
+            crate::svelte::svelte_grammar_config(),
             source,
         )
     }
@@ -1052,31 +1073,37 @@ mod tests {
     }
 
     #[test]
-    fn host_integration_catalog_registers_the_svelte_native_row() {
-        let catalog = built_in_host_integration_catalog();
-        let identity = catalog
-            .iter()
-            .map(|row| row.identity())
-            .find(|identity| identity.adapter_id() == &FrameworkAdapterId::svelte())
-            .expect("the catalog holds the Svelte host-integration row");
+    fn compiler_backend_registry_registers_the_svelte_native_row() {
+        let row = CarrierCompilerBackendRegistry::built_in()
+            .host_integration_for::<NativeHostEpoch>(
+                &crate::framework_common::profile::carrier_profile(&LanguageId::new("svelte")),
+                &crate::framework_common::profile::framework_profile(&SvelteSfc5::MANIFEST)
+                    .expect("the built-in manifest is admitted"),
+            )
+            .expect("the native Svelte host row resolves");
+        let identity = row.host_identity();
         assert_eq!(identity.capability(), CatalogCapability::HostIntegration);
-        assert_eq!(identity.epoch().as_str(), "svelte");
+        assert_eq!(identity.framework_family(), "svelte");
         assert_eq!(
             identity.host_epoch(),
-            Some(&HostEpochId::new(NativeHostEpoch::ID))
-        );
-        let (row_identity, installed) = registered_host_integration_for::<NativeHostEpoch>(
-            &FrameworkAdapterId::svelte(),
-            identity.epoch(),
-        )
-        .expect("the native Svelte host row resolves");
-        assert_eq!(
-            row_identity, identity,
-            "the lookup returns the matched row's own identity"
+            Some(&HostEpochId::from_type::<NativeHostEpoch>())
         );
         assert!(
-            matches!(installed, InstalledHostIntegration::Svelte(_)),
-            "the installed payload is the Svelte arm of the one host catalog"
+            row.native_host::<SvelteHostIntegrationBackend>()
+                .is_some_and(|backend| std::ptr::eq(
+                    backend,
+                    SvelteHostIntegrationBackend::registered()
+                )),
+            "the row hands out the registered Svelte host backend"
+        );
+        assert!(
+            row.runtime::<SvelteRuntimeBackend>().is_some(),
+            "the same row carries the Svelte runtime backend"
+        );
+        assert!(
+            row.native_host::<super::super::VueHostIntegrationBackend>()
+                .is_none(),
+            "typed access never hands out another carrier's backend"
         );
     }
 
@@ -1101,7 +1128,7 @@ mod tests {
     #[test]
     fn runtime_render_admission_is_runtime_only_and_never_consults_projection() {
         let artifact = svelte_artifact(COMPONENT);
-        let before = projection_catalog_consult_count();
+        let _ = take_registry_dispatches();
         let admission = SvelteHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, SvelteHostRuntimeRenderDemand::default())
             .expect("a Svelte parse with a registered runtime backend admits");
@@ -1112,8 +1139,8 @@ mod tests {
             "the backend constructs the runtime-only product set itself"
         );
         assert_eq!(
-            projection_catalog_consult_count(),
-            before,
+            take_registry_dispatches().projection,
+            0,
             "a runtime-render demand must not require projection capability"
         );
 
@@ -1122,7 +1149,7 @@ mod tests {
         let _ = SvelteHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("multi-product admits");
-        assert_eq!(projection_catalog_consult_count(), before + 1);
+        assert_eq!(take_registry_dispatches().projection, 1);
     }
 
     #[test]
@@ -1437,7 +1464,8 @@ mod tests {
     fn admission_is_issued_only_over_a_svelte_parse() {
         let foreign = parse_registered_source_for_tests(
             FileLanguage::vue(),
-            CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap(),
+            crate::framework_common::vue_grammar_config("{{", "}}", std::iter::empty::<&str>())
+                .unwrap(),
             "<template><p>a</p></template>",
         );
         let refusal = SvelteHostIntegrationBackend::new()
@@ -1468,7 +1496,7 @@ mod tests {
         let project = || {
             super::super::registered_carrier_projection::project_registered_source_for_tests(
                 FileLanguage::svelte(),
-                CarrierGrammarConfig::Svelte,
+                crate::svelte::svelte_grammar_config(),
                 &component,
             )
         };
@@ -1816,7 +1844,7 @@ mod tests {
             &artifact,
             &opts,
             &alloc,
-            crate::framework_common::carrier_compiler::registry_route_execution_grants(&opts),
+            crate::framework_common::carrier_compiler::direct_bundle_execution_grants(&opts),
         )
         .expect("the shared bundle orchestration still compiles directly");
         assert!(matches!(outcome, CarrierCompileOutcome::Produced(_)));

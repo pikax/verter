@@ -1,48 +1,18 @@
-//! Per-macro projectors for component-meta extraction.
+//! Component-meta shape projection and shared semantic publication helpers.
 //!
-//! Each projector resolves a single macro's surface members through
-//! the shared dispatch primitives (`SemanticQueryKey::ResolveMacroPayload`
-//! followed by an empty-path `ProjectPath` in `Shallow` mode), raises
-//! members to `TypeExpr`, and produces `Vec<ExpandedField>` (or the
-//! macro-specific equivalent).
-//!
-//! Authority chain:
-//!
-//! 1. `verter_type_engine::structural_carrier_producer::macro_type_arg_hot_ref(ctx, file, macro_index)`
-//!    reads the macro arg's mode-neutral hot-mirror handle (the ONE producer)
-//!    so the dispatch can resolve the macro payload from the structural
-//!    carrier.
-//! 2. `dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload { .. })`
-//!    yields the macro payload's semantic node (the resolved type that
-//!    backs the macro instance).
-//! 3. `dispatch.execute_read(SemanticQueryKey::ProjectPath { base, path: [], context: verter_type_engine::semantic_query::ProjectionReductionContext::published(Shallow)})`
-//!    enumerates the payload's surface members.
-//! 4. For each surface member, the projector raises the member's value
-//!    node back to `TypeExpr` and classifies its exactness via
-//!    `meta_resolve::exactness::classify_node`.
-//!
-//! All `dispatch.execute_read` calls publish their dependency evidence through
-//! `emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature)`.
-//! The request-level fact tracer finalises that evidence for both resolved-meta
-//! and final-result cache admission. Cycle and error
-//! branches publish a `MacroExpansionDiagnostics` envelope into
-//! `diag_sink` (per §7.5 silent-miss prevention).
-//!
-//! The macro_index inside each projector identifies which macro this
-//! projection corresponds to, for diagnostic correlation and for the
-//! shape-merge logic in the parser-side analysis.
+//! Declared macro membership, member authority, and diagnostics come from the
+//! framework-surface producer. The shape projector consumes those normalized
+//! rows directly. Payload resolution remains available to executor, codegen,
+//! and slot-binding consumers that demand a payload rather than publication.
+//! The terminal output sink owns materialization and source finalization.
 
 use std::sync::Arc;
 
 use verter_session_query::analysis::component_meta::{
     MacroExpansionDiagnostics, MacroExpansionKind,
 };
-use verter_session_query::analysis::type_expand::{
-    ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus, ExpansionStopReason,
-};
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
-use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::resolver_core::ResolverContext;
 use verter_type_engine::semantic_query::{
@@ -55,20 +25,7 @@ use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
 use verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts;
 
 pub(crate) mod define_shapes;
-pub(crate) mod emits;
-pub(crate) mod exposed;
-pub(crate) mod macro_payload_substrate;
-pub(crate) mod options;
 pub(crate) mod output_sink;
-pub(crate) mod props;
-// The publication-authority admitted-token chain. A SIBLING module (NOT
-// nested under another projector module) so its private token fields + private
-// `Seal` are unreachable from `props.rs` / `emits.rs` / …: a child module can
-// read ancestor-private items, but a sibling's privates stay sealed. The ONLY
-// way to mint a token is its admission functions, and the terminal sink
-// (`output_sink::surface_member_to_expanded_field`) consumes the admitted
-// token instead of a forgeable `(&SurfaceMember, ProjectionCursor)` pair.
-pub(crate) mod publication_authority;
 pub(crate) mod published_reducer;
 // Published-SOURCE upgrades for reduced publication nodes (leaf / leaf-union
 // / member ref-identity) — pure node-domain projections consumed by the
@@ -79,58 +36,21 @@ mod published_source;
 // closed/ref/member-path ladder the member sink publishes). Terminal demand
 // remains strict, while stable unresolved addresses remain valid carriers.
 pub(crate) use published_source::structural_member_value_source;
-pub(crate) mod slots;
 
 // The projectors' reverse-materialization capability is DEFINED in the terminal
 // `output_sink` sink module (the only module that can MINT it). It is
 // re-exported here so the owner `project_semantic_dispatch::projector`
-// `OutputProjector` impl and the per-kind projector children can NAME the cap
+// `OutputProjector` impl and the shape projector can NAME the cap
 // type at the stable `crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap`
 // path; the inherent `new` constructor stays scoped to `output_sink`, so naming
 // the type here does NOT grant the ability to mint it (a non-sink helper that
 // names the cap and calls `new` is `E0624`).
 pub(crate) use output_sink::MetaResolveProjectorsOutputCap;
 
-// Substrate re-exports for the transit-shallow macro publication
-// pipeline (see [`macro_payload_substrate`]). The `unused_imports`
-// allowance parallels the `dead_code` allowance on each primitive at
-// the definition site: not every macro kind currently consumes every
-// substrate primitive, but the re-exports keep the boundary stable as
-// new consumers wire in.
-#[cfg(test)]
-pub(crate) use macro_payload_substrate::EMIT_CARRIER_WALK_FUSE;
-#[allow(unused_imports)]
-pub(crate) use macro_payload_substrate::{
-    resolve_emit_payload_to_conditional_root, resolve_payload_surface_with_scope, MemberValueRole,
-    PayloadSurfaceScope,
-};
-
 pub(crate) use define_shapes::project_define_macro_shapes;
-pub(crate) use emits::project_emits;
-pub(crate) use exposed::project_exposed;
-pub(crate) use options::project_options;
-pub(crate) use props::project_props;
 pub(crate) use published_reducer::classify_node_reduction_gates;
-pub(crate) use slots::project_slots;
 
-// The boundary-consuming publication functions live in the terminal
-// `output_sink` sink module (the only module that touches the reverse
-// boundary — `MetaResolveProjectorsOutputCap` mint + carrier unwrap).
-// `output_sink` exposes ONLY policy-complete publication operations (returning
-// `ExpandedField` / mutating the published surface), never a bare `TypeExpr`
-// or a raw boundary helper; the per-field `reduce_field_value_node`
-// reducer stays sink-private (callers use `reduce_published_field_types`).
-// (The former TypeExpr helper `reduce_field_type_expr_with_mode` is deleted.)
-//
-// `project_model` is re-exported for the local `project_evaluated_types`
-// driver; `reduce_published_field_types` is re-exported at the stable
-// `crate::meta_resolve::projectors::*` path for the external host-manage
-// caller. The per-member publication API
-// (`output_sink::surface_member_to_expanded_field`) is NOT re-exported here —
-// it now consumes a policy-admitted `publication_authority` token, and the
-// per-kind projector children name it through `super::output_sink::` directly
-// so the admitted-token discipline reads at the call site.
-pub(crate) use output_sink::{project_model, reduce_published_field_types};
+pub(crate) use output_sink::reduce_published_field_types;
 
 // The output-ENVELOPE builder: the terminal sink materializes the
 // component-meta output type lanes and seals them (with the analysis and the
@@ -147,210 +67,6 @@ pub(crate) use output_sink::{
     LAST_OUTPUT_MATERIALIZE_CALLS, LAST_OUTPUT_MEMO_HASH_OPS, OUTPUT_MATERIALIZE_FORCE_FAIL,
     OUTPUT_PUBLICATION_FAILURE,
 };
-
-/// Merge a projector's `Vec<ExpandedField>` output into the target
-/// `Vec<ExpandedField>` on `evaluated_types`.
-///
-/// Per the project's component-meta shallow-by-default rule (see
-/// `CLAUDE.md`), the projector pipeline is the **sole post-projection
-/// authority** for finalising published field shapes. Parser-side
-/// pre-population of `evaluated_types.props` (from
-/// `verter_semantic::analysis::type_eval_build::expand_field_expr`
-/// and friends) eagerly inlines alias bodies, which violates the
-/// shallow-by-default contract for bare `Ref` references —
-/// `defineProps<{ user: Foo }>` where `type Foo = string` lives in
-/// the same file pre-populates `user`'s type as `Primitive(String)`,
-/// not the bare `Ref { name: "Foo" }` that the rule mandates.
-///
-/// To honour the shallow-by-default invariant, the projector's
-/// output always wins for fields the projector produced: when both
-/// `target` and `projected` carry an entry with the same name, the
-/// projected entry replaces the existing entry wholesale. Parser-
-/// side fields the projector did NOT produce (entries that have no
-/// name match in `projected`) are preserved as-is so prop annotations
-/// the dispatch path didn't surface still appear in the published
-/// analysis.
-fn merge_projected_fields_by_name(
-    target: &mut Vec<verter_session_query::analysis::type_expand::ExpandedField>,
-    projected: Vec<verter_session_query::analysis::type_expand::ExpandedField>,
-) {
-    for field in projected {
-        if let Some(existing) = target.iter_mut().find(|t| t.name == field.name) {
-            if std::env::var("VERTER_PROJECTOR_MERGE_TRACE").is_ok() {
-                eprintln!(
-                    "[MERGE] name={} existing={:?} projected={:?}",
-                    field.name, existing.authority, field.authority
-                );
-            }
-            // Projector pipeline is the sole post-projection authority
-            // — its output always replaces parser-side pre-population.
-            *existing = field;
-        } else {
-            target.push(field);
-        }
-    }
-}
-
-/// Top-level driver that dispatches every type-based macro in the
-/// snapshot through its per-kind projector and writes the resulting
-/// fields into `evaluated_types`.
-///
-/// The flat fields this driver populates are a METADATA + display surface
-/// (exactness / execution status / diagnostics / raw display types for the
-/// `evaluate_types` payload) — NEVER a published-source authority: every
-/// published `SourcePosition` is owned by the NORMALIZED macro rows
-/// (`ResolvedPropField` / `ResolvedEmitOccurrence` / `ResolvedExposeField` and
-/// the `define_*` shape lanes built from them). The driver:
-///
-/// 1. For each `defineProps<T>`, calls [`project_props`] and extends
-///    `evaluated_types.props` with the resulting fields.
-/// 2. For each `defineEmits<T>`, calls [`project_emits`] and extends
-///    `evaluated_types.emits`.
-/// 3. For each `defineSlots<T>`, calls [`project_slots`]; the slot
-///    fields are not directly published into `evaluated_types`
-///    because the slot-shape level is consumed by
-///    [`crate::meta_resolve::slot_binding_graph::resolve_slot_bindings_graph_native`]
-///    via the same dispatch primitives. The diagnostic sink is the
-///    only side-channel the projector contributes for slots.
-/// 4. `defineModel`, `defineExpose`, `defineOptions` macros run their
-///    projectors, but their downstream merge into the analysis lives
-///    on the parser side; their projector results are only inspected
-///    for diagnostic sink contributions.
-///
-/// Silent-miss prevention: every `Recursive` / `Error` branch the
-/// projectors hit is appended to `diag_sink`, which the caller merges
-/// into `analysis.macro_expansion_diagnostics`. A projector must never
-/// silently return an empty surface on `QueryResult::Error` — that
-/// would be indistinguishable from a successful empty result.
-pub(crate) fn project_evaluated_types<M: verter_audit::observe::ObserveExec>(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
-    file: &str,
-    snapshot: &FileAnalysisSnapshot,
-    evaluated_types: &mut verter_session_query::analysis::type_expand::ExpandedComponentTypes,
-    diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) {
-    // Construct a `SurfaceProjection` per macro kind so each
-    // projector entry receives a path-precise cursor.
-    // `whole_surface(kind)` admits every published member name;
-    // narrower cursors are threaded in when consumer demand is known.
-    use crate::meta_resolve::projection_demand::SurfaceProjection;
-    use verter_type_engine::component_meta_caches::PublishedSurfaceKind;
-
-    for (macro_index, mac) in snapshot.macros.iter().enumerate() {
-        let owner = build_owner_decl_identity(query_engine.ctx, file, mac.owner);
-        match mac.kind {
-            AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
-                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
-                let fields = project_props(
-                    query_engine,
-                    &owner,
-                    file,
-                    macro_index,
-                    mac,
-                    snapshot,
-                    diag_sink,
-                    projection.cursor(),
-                );
-                merge_projected_fields_by_name(&mut evaluated_types.props, fields);
-            }
-            AnalyzedMacroKind::DefineEmits => {
-                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Emits);
-                let fields = project_emits(
-                    query_engine,
-                    &owner,
-                    file,
-                    macro_index,
-                    mac,
-                    snapshot,
-                    diag_sink,
-                    projection.cursor(),
-                );
-                merge_projected_fields_by_name(&mut evaluated_types.emits, fields);
-            }
-            AnalyzedMacroKind::DefineSlots => {
-                // Slot-shape projection is consumed by the
-                // slot-binding-graph synthesis layer which
-                // shares the same dispatch primitives; running the
-                // projector here populates the diagnostic stream and
-                // primes the dispatch family memo.
-                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Slots);
-                let _ = project_slots(
-                    query_engine,
-                    &owner,
-                    file,
-                    macro_index,
-                    mac,
-                    snapshot,
-                    diag_sink,
-                    projection.cursor(),
-                );
-            }
-            AnalyzedMacroKind::DefineModel => {
-                // The parser-side analysis owns the
-                // `synthesize_model_prop_and_event` that publishes
-                // the prop+event pair. Running the projector here
-                // populates the diagnostic stream and primes the
-                // dispatch family memo so the parser-side merge can
-                // observe the resolved type without a second
-                // resolution pass.
-                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Model);
-                let _ = project_model(
-                    query_engine,
-                    &owner,
-                    file,
-                    macro_index,
-                    mac,
-                    snapshot,
-                    diag_sink,
-                    projection.cursor(),
-                );
-            }
-            AnalyzedMacroKind::DefineExpose => {
-                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Exposed);
-                // The projected surface members carry the exposed members'
-                // typed sources (`ExpandedField.authority`); publish them on
-                // the canonical aggregate's per-macro `exposed` lane so the
-                // exposed-analysis join pairs them by the stable
-                // `(macro_index, member name)` identity. Idempotent per
-                // macro: a re-projection replaces the macro's lane entry.
-                let fields = project_exposed(
-                    query_engine,
-                    &owner,
-                    file,
-                    macro_index,
-                    mac,
-                    snapshot,
-                    diag_sink,
-                    projection.cursor(),
-                );
-                evaluated_types
-                    .exposed
-                    .retain(|entry| entry.macro_index != macro_index);
-                if !fields.is_empty() {
-                    evaluated_types.exposed.push(
-                        verter_session_query::analysis::type_expand::ExpandedMacroExposed {
-                            macro_index,
-                            fields,
-                        },
-                    );
-                }
-            }
-            AnalyzedMacroKind::DefineOptions => {
-                let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Options);
-                let _ = project_options(
-                    query_engine,
-                    &owner,
-                    file,
-                    macro_index,
-                    mac,
-                    snapshot,
-                    diag_sink,
-                    projection.cursor(),
-                );
-            }
-        }
-    }
-}
 
 /// Identifier name used as the synthetic decl-name for a `<script setup>`
 /// scope when the dispatch's `DeclIdentity` only consults the canonical
@@ -389,108 +105,9 @@ pub(crate) fn empty_path() -> verter_type_expr::OwnedSlice<PathSegment> {
     verter_type_expr::OwnedSlice::default()
 }
 
-// =============================================================================
-// `peek_member_shape_known` — graph-native type-peek primitive.
-//
-// The peek is the projector pipeline's shallow-by-default enforcement
-// substrate: the caller asks "do you already know the shape of this type
-// expression at this scope / mode?" and the implementation answers
-// WITHOUT triggering any reducer / resolver / route rebuild.
-//
-//  - `PeekedShape::Leaf` — the expression is a leaf primitive or literal;
-//    publishing it is a clone.
-//  - `PeekedShape::BareCarrier` — the expression is an unparameterised
-//    `Ref` (a plain alias name). Per the shallow-by-default rule, the
-//    projector publishes the Ref shallow; consumers re-resolve through
-//    the registry on demand. No reduction needed.
-//  - `PeekedShape::Cached` — the expression already has an entry in
-//    `ShapeCacheDb` keyed on `(scope, expr, mode)`. The peek re-emits
-//    the cached entry's `fact_dep_signature` into the active fact tracer
-//    (the same `peek` protocol that the per-member slot of `ShapeCacheDb`
-//    indexed by `ShapeSubject::MemberValueNode` follows) so the cm-result
-//    cache validation invariants are preserved.
-//  - `None` — the cache is cold for this triple; the caller must decide
-//    whether to reduce (operator-shape / generic instantiation cases) or
-//    publish shallow (bare alias case already covered above).
-//
-// Strictly request-bound: the sealed `ResolverContext` and the `debug_assert!`
-// require the caller's request view.
-// =============================================================================
-
-/// Build a [`MacroExpansionDiagnostics`] for a `QueryError` encountered
-/// during projection. Mirrors `slot_binding_graph::macro_expansion_for_query_error`.
-pub(crate) fn macro_expansion_for_query_error(
-    macro_index: usize,
-    macro_kind: MacroExpansionKind,
-    context: String,
-) -> MacroExpansionDiagnostics {
-    MacroExpansionDiagnostics {
-        macro_kind,
-        macro_index,
-        diagnostics: vec![ExpansionDiagnostic {
-            reason: ExpansionStopReason::InstantiationError,
-            context,
-            property_name: None,
-        }],
-        exactness: ExpansionExactness::Incomplete,
-        execution_status: ExpansionExecutionStatus::Interrupted,
-    }
-}
-
-/// Build a [`MacroExpansionDiagnostics`] for a `Recursive` back-edge
-/// encountered during projection. Mirrors
-/// `slot_binding_graph::macro_expansion_for_cycle`. Cycles are not
-/// fatal — they bound the published surface to the non-recursive arms.
-pub(crate) fn macro_expansion_for_cycle(
-    macro_index: usize,
-    macro_kind: MacroExpansionKind,
-    context: String,
-) -> MacroExpansionDiagnostics {
-    MacroExpansionDiagnostics {
-        macro_kind,
-        macro_index,
-        diagnostics: vec![ExpansionDiagnostic {
-            reason: ExpansionStopReason::CyclicReference,
-            context,
-            property_name: None,
-        }],
-        exactness: ExpansionExactness::Incomplete,
-        execution_status: ExpansionExecutionStatus::Completed,
-    }
-}
-
-/// Surface-provenance for a macro payload's own-body members (by
-/// design).
-///
-/// `defineProps<T>()` and `withDefaults(defineProps<T>(), …)` resolve a
-/// PROP surface whose members the author literally wrote in the macro
-/// type argument `T`; those members must carry
-/// [`verter_session::semantic_query::SurfaceMember::declared_in_macro_type_arg`]
-/// `= true`. The bit is consumed by
-/// `verter_audit::PublishedSurfacePolicy::Refined` to distinguish
-/// author-declared props from heritage-reached props on the PROPS axis
-/// only. Every other macro kind (emits / slots / options / model /
-/// expose) resolves a structural surface — the bit is always `false`
-/// downstream for those kinds — so they lower with
-/// [`SurfaceProvenanceContext::Structural`].
-#[inline]
-#[must_use]
-pub(crate) fn macro_payload_surface_provenance(
-    macro_kind: AnalyzedMacroKind,
-) -> verter_type_engine::semantic_query::SurfaceProvenanceContext {
-    match macro_kind {
-        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
-            verter_type_engine::semantic_query::SurfaceProvenanceContext::MacroTypeArgOwnBody
-        }
-        AnalyzedMacroKind::DefineEmits
-        | AnalyzedMacroKind::DefineSlots
-        | AnalyzedMacroKind::DefineModel
-        | AnalyzedMacroKind::DefineExpose
-        | AnalyzedMacroKind::DefineOptions => {
-            verter_type_engine::semantic_query::SurfaceProvenanceContext::Structural
-        }
-    }
-}
+use crate::typeinfo::framework_surface::vue_exec::{
+    macro_expansion_for_cycle, macro_expansion_for_query_error,
+};
 
 /// Resolve a type-based macro's payload through `ResolveMacroPayload`.
 ///
@@ -759,97 +376,3 @@ pub(crate) fn resolve_macro_payload<M: verter_audit::observe::ObserveExec>(
 
     dispatch.graph().root_in_scope(payload_node).ok()
 }
-
-pub(crate) fn resolve_payload_surface<M: verter_audit::observe::ObserveExec>(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
-    payload_node: SemanticNodeId,
-    macro_index: usize,
-    expansion_kind: MacroExpansionKind,
-    provenance: verter_type_engine::semantic_query::SurfaceProvenanceContext,
-    diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<NodeRoot> {
-    let _scope = dispatch.enter_construction_scope();
-    let claims = dispatch.host_attachment().surface_claims();
-    // The empty-path `ProjectPath` carries the macro's surface
-    // provenance (by design): for a props payload that
-    // resolved to a `DeclRef` carrier (`defineProps<FooProps>()`), the
-    // walker's `DeclPlaceholder` expansion preserves the
-    // `MacroTypeArgOwnBody` provenance onto its `Instantiate`, so
-    // `FooProps`'s OWN-body members surface with
-    // `declared_in_macro_type_arg = true`. Structural-provenance kinds
-    // (emits / slots / …) pass `Structural` and observe `false`.
-    // Vue macro object-surface publication. The macro
-    // surface enumerates the UNION of object-arm members
-    // (`defineProps<FixedProps | BubbleProps>()` declares every arm's
-    // props), NOT the TS property-access common-member intersection that
-    // an ordinary `Published(Shallow)` ProjectPath would synthesise. The
-    // `MacroObjectSurface` demand selects the union-arm rule at the
-    // empty-path Shallow terminal surface and is cache-keyed in a distinct
-    // `ModeSlot` so the macro surface never collides with an ordinary
-    // `Published(Shallow)` read of the same payload node. `provenance`
-    // (macro-T own-body for props; structural for slots / emits) rides on
-    // the context unchanged.
-    let surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-        base: payload_node,
-        path: empty_path(),
-        context:
-            verter_type_engine::semantic_query::ProjectionReductionContext::macro_object_surface(
-                ProjectionMode::Shallow,
-                provenance,
-            ),
-    });
-    verter_type_engine::request_context::observe_component_meta_read_suppress(&surface_read);
-    emit_dispatch_dep_signature_facts(dispatch, surface_read.dep_signature());
-    if !surface_read.walker_diagnostics().is_empty() {
-        diag_sink.push(shallow_diagnostics_to_macro_expansion(
-            surface_read.walker_diagnostics(),
-            macro_index,
-            expansion_kind.clone(),
-            surface_read.cache_suppress(),
-            &|diagnostic| dispatch.checker_message(diagnostic),
-        ));
-    }
-    let resolution = match surface_read.value() {
-        QueryResult::Value(id) => claims.resolved(*id),
-        QueryResult::Recursive(_) => {
-            // Cycles are NON-FATAL by rule: they bound the publish surface
-            // to the non-recursive arms — the degraded COMPLETE answer, not
-            // a failure. The cycle diagnostic still names the bound.
-            diag_sink.push(macro_expansion_for_cycle(
-                macro_index,
-                expansion_kind,
-                "cyclic-macro-payload-surface".to_string(),
-            ));
-            claims.no_surface()
-        }
-        QueryResult::Error(e) => {
-            diag_sink.push(macro_expansion_for_query_error(
-                macro_index,
-                expansion_kind,
-                format!("macro-payload-surface-error::{:?}", e),
-            ));
-            // An honest stable miss / well-formed open marker keeps the
-            // complete no-surface answer; an OPERATIONAL fault (budget /
-            // cancellation / torn state) is an INCOMPLETE resolution with
-            // its typed reason on the returned claim.
-            match verter_type_engine::semantic_query::surface_resolution::stable_query_error_partiality(e) {
-                Some(reasons) => {
-                    claims.incomplete(reasons)
-                }
-                None => claims.no_surface(),
-            }
-        }
-    };
-    resolution.map(|node| {
-        dispatch
-            .graph()
-            .root_in_scope(node)
-            .expect("produced surface is live")
-    })
-}
-
-// Macro-payload boundary substrate primitives — diagnostic probe,
-// scope tag, branch-merged scope-gated resolver, MemberValueRole —
-// live in the sibling [`macro_payload_substrate`] module to keep this file
-// a readable size. The primitives are re-exported at the module top so call
-// sites continue to import them as `crate::meta_resolve::projectors::*`.

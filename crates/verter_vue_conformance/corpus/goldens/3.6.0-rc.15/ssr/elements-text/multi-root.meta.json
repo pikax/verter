@@ -1,0 +1,51 @@
+{
+  "schema": 2,
+  "caseId": "elements-text/multi-root",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/elements-text/multi-root.vue",
+    "sha256": "0ff2a0e0e30c3bcd3851d83fdf7be02e757c1ebe2aa37c56cfd3b8a4f1d1ff8d"
+  },
+  "options": {
+    "sha256": "c9878a6b2b629f7017c5458ae8650c97bb09b9b42915013fc7772ed08f797a5c",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/elements-text/multi-root.vue",
+      "id": "elements-text/multi-root",
+      "pipeline": "compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/elements-text/multi-root.js",
+      "sha256": "a091dc2bf7b585b1793c448b2797bee34b0fbda98d06842ed98f3cc3fd00cef5",
+      "bytes": 223
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/elements-text/multi-root.map.json",
+      "sha256": "85842dd4e61a715e8dd1800599aa594f6fa3644c3ebbcbbc47f7ae25043a9c7c"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": []
+}

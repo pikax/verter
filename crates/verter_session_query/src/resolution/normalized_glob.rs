@@ -169,6 +169,22 @@ impl CompiledGlob {
         self
     }
 
+    /// The deepest static directory from which a walk can find every match.
+    /// Literal file patterns use their parent; wildcard patterns use the
+    /// directory before the first wildcard component. Invalid globs have no root.
+    pub fn walk_root(&self) -> Option<CanonicalPath> {
+        self.pattern.as_ref()?;
+        let raw = self.raw.as_str();
+        let end = raw.find(['*', '?', '[']).unwrap_or(raw.len());
+        let separator = raw[..end].rfind('/')?;
+        let root = if separator == 0 || (separator == 2 && raw.as_bytes()[1] == b':') {
+            &raw[..=separator]
+        } else {
+            &raw[..separator]
+        };
+        Some(CanonicalPath::new(root))
+    }
+
     /// Whether a file below directory `dir` could match this glob — false
     /// only when `dir` ends in a component an include wildcard cannot match
     /// (see [`Self::as_typescript_include`]) and the pattern does not spell

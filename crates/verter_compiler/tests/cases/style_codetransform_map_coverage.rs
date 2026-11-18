@@ -24,19 +24,21 @@
 use std::sync::Arc;
 
 use oxc_allocator::Allocator;
+use verter_compiler::compile_request::{CompileProduct, RuntimeProductRequest};
 use verter_compiler::framework_common::carrier_compiler::{
-    RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
+    RuntimeBlockContentInput, RuntimeBlockContentInputs,
 };
 use verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted;
-use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-use verter_compiler::framework_common::FrameworkParseArtifact;
+use verter_compiler::framework_common::{
+    FrameworkHostIntegrationBackend, FrameworkParseArtifact, VueHostExecutionInputs,
+    VueHostIntegrationBackend, VueHostMultiProductDemand,
+};
 use verter_compiler::style_planner::{
     run_vue_style_cascade, transform_vue_v_bind, AuthoredStyleInput, StyleRewriteOutcome,
 };
 use verter_css_syntax::CssDialect;
 use verter_language::carrier_grammar::{
-    CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-    FrameworkAdapterSemanticVersion,
+    CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
 };
 use verter_language::registered_source_authority::{
     CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -447,7 +449,7 @@ fn vue_v_bind_no_rewrite_targets_never_reaches_map_generation_work() {
     //
     // The `build_string` invocation counter is `#[cfg(test)]` on the library and therefore
     // invisible to this integration crate; the Unchanged discriminant is the caller-visible
-    // no-map proof here. The compile_bundle A/B below is the genuine option-off toggle.
+    // no-map proof here. The host runtime A/B below is the genuine option-off toggle.
     let source = ".a { color: red; width: 1px; }"; // no v-bind() anywhere
     let input = AuthoredStyleInput::new(
         source,
@@ -479,8 +481,12 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
         )
         .expect("registered source");
     let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
-    let config =
-        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).expect("vue grammar");
+    let config = verter_compiler::framework_common::vue_grammar_config(
+        "{{",
+        "}}",
+        std::iter::empty::<&str>(),
+    )
+    .expect("vue grammar");
     grammar_authority
         .register_carrier_grammar(
             language,
@@ -498,12 +504,13 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
 }
 
 /// The GENUINE option-off/on A/B proof, driven through the real public entry point the toggle
-/// actually reaches: `VueCarrierCompiler::compile_bundle`'s `RuntimeCompileOptions.source_map`
-/// field (`vue_bridge.rs`), with a SUPPLIED external style block (`<style src="...">`) — the
-/// only style shape `compile_bundle`'s own `opts.block_content.styles` override loop touches at
-/// all (an authored, non-`src` inline style compiles through a different internal path that
-/// never reaches this particular field; that path is exercised elsewhere in this file via
-/// `style_planner`'s own public functions directly).
+/// actually reaches: the Vue host integration's runtime product, whose
+/// `RuntimeProductRequest.runtime_source_map` becomes the bundle orchestration's
+/// `RuntimeCompileOptions.source_map` (`vue_bridge.rs`), with a SUPPLIED external style block
+/// (`<style src="...">`) — the only style shape the orchestration's own
+/// `opts.block_content.styles` override loop touches at all (an authored, non-`src` inline style
+/// compiles through a different internal path that never reaches this particular field; that
+/// path is exercised elsewhere in this file via `style_planner`'s own public functions directly).
 ///
 /// `style_planner::emit()` (`style_planner.rs`) takes a `want_source_map: bool` threaded down
 /// from `RuntimeCompileOptions::source_map` through `vue_bridge.rs`'s cascade calls; when it is
@@ -512,51 +519,73 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
 /// (identical code either way; no map hand-back when off; a valid map hand-back when on) holds
 /// either way.
 #[test]
-fn vue_style_source_map_toggle_is_a_genuine_caller_facing_ab_option_through_compile_bundle() {
+fn vue_style_source_map_toggle_is_a_genuine_caller_facing_ab_option_through_the_host_runtime() {
     // Single-stage rewrite only. A v-bind+scoped fixture abandons map
     // composition (the cascade will not present a later stage's local map as
     // the whole-cascade map), so `source_map: true` would still hand the
     // caller `None` and this A/B would not discriminate the toggle.
     let source =
         "<template><div class=\"x\"/></template><style scoped src=\"./theme.css\"></style>";
-    let make_opts = |source_map: bool| RuntimeCompileOptions {
-        filename: Some("ToggleStyle.vue".to_string()),
-        component_id: Some("scope123".to_string()),
-        source_map,
-        block_content: RuntimeBlockContentInputs {
-            styles: vec![Some(RuntimeBlockContentInput {
-                code: Arc::from(".x { color: red; }"),
-                source_map: None,
-                lang: "css".to_string(),
-                content_artifact_token: "artifact:theme-css".to_string(),
-                source_space_token: "space:theme-css".to_string(),
-                parsed: None,
-                producer: None,
-                authored_basis: None,
-                diagnostics: Vec::new(),
-            })],
-            ..Default::default()
-        },
+    let block_content = RuntimeBlockContentInputs {
+        styles: vec![Some(RuntimeBlockContentInput {
+            code: Arc::from(".x { color: red; }"),
+            source_map: None,
+            lang: "css".to_string(),
+            content_artifact_token: "artifact:theme-css".to_string(),
+            source_space_token: "space:theme-css".to_string(),
+            parsed: None,
+            producer: None,
+            authored_basis: None,
+            diagnostics: Vec::new(),
+        })],
         ..Default::default()
     };
-    let compiler = VueCarrierCompiler;
     let alloc = Allocator::default();
+    let backend = VueHostIntegrationBackend::registered();
+    let compile = |canonical: &str, source_map: bool| {
+        let artifact = registered_artifact(canonical, source);
+        let admission = backend
+            .admit_host_products(
+                &artifact,
+                VueHostMultiProductDemand {
+                    products: vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+                        runtime_source_map: source_map,
+                        ..Default::default()
+                    })],
+                    filename: Some("ToggleStyle.vue".to_string()),
+                    component_id: Some("scope123".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("the runtime demand admits");
+        backend
+            .compile_host_products(
+                admission,
+                &artifact,
+                &VueHostExecutionInputs {
+                    block_content: block_content.clone(),
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("the admitted runtime compile produces")
+    };
 
-    let artifact_off = registered_artifact("file:///ToggleOff.vue", source);
-    let off = compiler
-        .compile_bundle(source, &artifact_off, &make_opts(false), &alloc)
-        .expect("compiles with source_map: false")
-        .into_produced()
-        .expect("runtime surface produced");
-    let style_off = off.qualified_styles.first().expect("style output");
+    let off = compile("file:///ToggleOff.vue", false);
+    let style_off = off
+        .runtime_client_bundle()
+        .expect("runtime surface produced with source_map: false")
+        .qualified_styles
+        .first()
+        .expect("style output");
 
-    let artifact_on = registered_artifact("file:///ToggleOn.vue", source);
-    let on = compiler
-        .compile_bundle(source, &artifact_on, &make_opts(true), &alloc)
-        .expect("compiles with source_map: true")
-        .into_produced()
-        .expect("runtime surface produced");
-    let style_on = on.qualified_styles.first().expect("style output");
+    let on = compile("file:///ToggleOn.vue", true);
+    let style_on = on
+        .runtime_client_bundle()
+        .expect("runtime surface produced with source_map: true")
+        .qualified_styles
+        .first()
+        .expect("style output");
 
     // Sanity: a real byte-changing rewrite actually happened (the scoped
     // stage ran) — otherwise this would not be a rewriting fixture at all.

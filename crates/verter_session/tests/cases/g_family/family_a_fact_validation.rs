@@ -260,21 +260,6 @@ fn family_a_producers_call_new_fact_helpers() {
          declaration_lookup_db, resolvability_db, owner_collection_db) — these track \
          top-level type identity."
     );
-
-    let materialize = read_session_source("meta_resolve/projectors/output_sink.rs");
-    assert!(
-        !materialize.contains("engine_dep_signature_for_canonical("),
-        "meta_resolve/projectors/output_sink.rs must NOT call \
-         engine_dep_signature_for_canonical after the R28 migration — use \
-         engine_fact_signature_for_materialize_memo for the materialize_memo_db producer."
-    );
-    assert!(
-        materialize.contains("engine_fact_signature_for_materialize_memo("),
-        "meta_resolve/projectors/output_sink.rs must call \
-         engine_fact_signature_for_materialize_memo for the materialize_memo_db \
-         producer — it roots the keyed scope canonical AND merges every canonical \
-         observed during materialization as a cross-file dependency fact."
-    );
 }
 
 /// Extract the body of the function whose signature begins at

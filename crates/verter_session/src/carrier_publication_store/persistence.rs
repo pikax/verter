@@ -320,8 +320,7 @@ impl CarrierStableUnitStore for InMemoryStableUnitStore {
 mod tests {
     use super::*;
     use verter_language::carrier_grammar::{
-        CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-        FrameworkAdapterSemanticVersion,
+        CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
     };
     use verter_language::registered_source_authority::{
         CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -332,7 +331,9 @@ mod tests {
         let source_authority = RegisteredSourceAuthority::new().unwrap();
         let grammar_authority = CarrierGrammarAuthority::new().unwrap();
         let language = FileLanguage::vue();
-        let config = CarrierGrammarConfig::vue("{{", "}}", ["fixture-box"]).unwrap();
+        let config =
+            verter_compiler::framework_common::vue_grammar_config("{{", "}}", ["fixture-box"])
+                .unwrap();
         grammar_authority
             .register_carrier_grammar(
                 language.clone(),
@@ -380,7 +381,12 @@ mod tests {
         let source_authority = RegisteredSourceAuthority::new().unwrap();
         let grammar_authority = CarrierGrammarAuthority::new().unwrap();
         let language = FileLanguage::vue();
-        let config = CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap();
+        let config = verter_compiler::framework_common::vue_grammar_config(
+            "{{",
+            "}}",
+            std::iter::empty::<&str>(),
+        )
+        .unwrap();
         grammar_authority
             .register_carrier_grammar(
                 language.clone(),

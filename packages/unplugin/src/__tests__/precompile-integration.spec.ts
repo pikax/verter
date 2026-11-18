@@ -3,11 +3,10 @@
  * Uses the coreui-free-vue-admin-template test repo to verify that preCompile
  * works end-to-end with real .vue files.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { unpluginFactory } from "../index";
-import { resetHost } from "../core/compiler";
 import { scanCarrierFiles } from "../core/scanner";
 
 const COREUI_ROOT = process.env.VERTER_TEST_REPOS
@@ -16,18 +15,10 @@ const COREUI_ROOT = process.env.VERTER_TEST_REPOS
 const hasCoreui = existsSync(join(COREUI_ROOT, "src", "App.vue"));
 
 describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-template", () => {
-  beforeEach(() => {
-    resetHost();
-  });
-
-  afterEach(() => {
-    resetHost();
-  });
-
   // @ai-generated - the carrier scanner finds all .vue files in a real project
   it("scanCarrierFiles discovers .vue files in the coreui project", async () => {
     const srcRoot = join(COREUI_ROOT, "src");
-    const files = await scanCarrierFiles(srcRoot, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(srcRoot, (f) => f.endsWith(".vue"), null);
 
     expect(files.size).toBeGreaterThan(5);
 
@@ -52,6 +43,7 @@ describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-templ
     await plugin.buildStart();
 
     process.cwd = origCwd;
+    await plugin.closeBundle();
   });
 
   // @ai-generated - preCompile + transform produces same output as transform-only
@@ -60,15 +52,14 @@ describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-templ
     const appVueSource = readFileSync(appVuePath, "utf-8");
 
     // First: compile without preCompile
-    resetHost();
     const pluginDirect = unpluginFactory(undefined, {
       framework: "rollup",
       versions: { unplugin: "0.0.0", rollup: "0.0.0" },
     } as any) as any;
     const directResult = await pluginDirect.transform(appVueSource, appVuePath);
+    await pluginDirect.closeBundle();
 
     // Second: compile with preCompile
-    resetHost();
     const origCwd = process.cwd;
     process.cwd = () => join(COREUI_ROOT, "src");
     const pluginPre = unpluginFactory({ preCompile: true }, {
@@ -78,6 +69,7 @@ describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-templ
     await pluginPre.buildStart();
     const preResult = await pluginPre.transform(appVueSource, appVuePath);
     process.cwd = origCwd;
+    await pluginPre.closeBundle();
 
     // Both should produce the same compiled output
     expect(preResult).toBeDefined();
@@ -99,9 +91,10 @@ describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-templ
     const elapsed = performance.now() - start;
 
     process.cwd = origCwd;
+    await plugin.closeBundle();
 
     const srcRoot = join(COREUI_ROOT, "src");
-    const files = await scanCarrierFiles(srcRoot, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(srcRoot, (f) => f.endsWith(".vue"), null);
 
     console.log(
       `[benchmark] preCompile coreui (${files.size} .vue files): ${elapsed.toFixed(1)}ms (${(elapsed / files.size).toFixed(2)}ms/file)`,

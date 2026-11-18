@@ -10,9 +10,9 @@
       {
         "id": "vue-3.6",
         "package": "vue",
-        "version": "3.6.0-rc.5",
+        "version": "3.6.0-rc.15",
         "source": "package.json",
-        "compilerSfc": { "package": "@vue/compiler-sfc", "version": "3.6.0-rc.5" }
+        "compilerSfc": { "package": "@vue/compiler-sfc", "version": "3.6.0-rc.15" }
       }
     ],
     "visibleLockfileLanes": [

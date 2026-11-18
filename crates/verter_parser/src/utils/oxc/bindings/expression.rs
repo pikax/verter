@@ -4,12 +4,15 @@
 //! JavaScript/TypeScript expressions parsed by OXC.
 
 use oxc_ast::ast::*;
+use oxc_ast_visit::Visit;
 use oxc_span::{GetSpan, Span as OxcSpan};
+use oxc_syntax::scope::ScopeFlags;
 use smallvec::SmallVec;
 
 use super::keywords::{is_global, is_keyword};
 use super::types::{
     Binding, BindingContext, BindingExtractionResult, FunctionBinding, LiteralBinding, ParamBytes,
+    ReferenceUse,
 };
 
 /// Extract bindings from an OXC Expression.
@@ -39,7 +42,12 @@ pub fn extract_bindings_from_expression<'a>(
     let mut result = BindingExtractionResult::default();
     let source_bytes = source.as_bytes();
     let mut visitor = BindingVisitor::new(source_bytes, ctx, &mut result);
-    visitor.visit_expression(expr);
+    let walked = crate::oxc_parse::leased_span_walk(source, expr.span(), || {
+        visitor.visit_expression(expr);
+    });
+    if walked.is_err() {
+        result.has_errors = true;
+    }
     result
 }
 
@@ -56,8 +64,12 @@ pub fn extract_bindings_from_program<'a>(
     let source_bytes = source.as_bytes();
     let mut visitor = BindingVisitor::new(source_bytes, ctx, &mut result);
 
-    for stmt in &program.body {
-        visitor.visit_statement(stmt);
+    let walked = crate::oxc_parse::leased_program_walk(program, || {
+        visitor.declare_function_vars(&program.body);
+        visitor.visit_statements(&program.body);
+    });
+    if walked.is_err() {
+        result.has_errors = true;
     }
 
     result
@@ -90,6 +102,103 @@ fn arena_ident_name<'a>(ident: &IdentifierName<'a>) -> &'a str {
     unsafe { std::mem::transmute::<&str, &'a str>(name_str) }
 }
 
+fn collect_binding_pattern_bytes<'a>(pattern: &BindingPattern<'a>, bytes: &mut ParamBytes<'a>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(ident) => bytes.push(arena_name(ident)),
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_binding_pattern_bytes(&prop.value, bytes);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_binding_pattern_bytes(&rest.argument, bytes);
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for elem in arr.elements.iter().flatten() {
+                collect_binding_pattern_bytes(elem, bytes);
+            }
+            if let Some(rest) = &arr.rest {
+                collect_binding_pattern_bytes(&rest.argument, bytes);
+            }
+        }
+        BindingPattern::AssignmentPattern(assign) => {
+            collect_binding_pattern_bytes(&assign.left, bytes);
+        }
+    }
+}
+
+/// The runtime expressions in a binding pattern, in authored order. Pattern
+/// nesting uses an explicit work stack; occurrence resolution stays with the
+/// caller's existing visitor and lexical context.
+fn binding_pattern_expressions<'p, 'a>(pattern: &'p BindingPattern<'a>) -> Vec<&'p Expression<'a>> {
+    enum Part<'p, 'a> {
+        Pattern(&'p BindingPattern<'a>),
+        Expression(&'p Expression<'a>),
+    }
+    let mut expressions = Vec::new();
+    let mut pending = vec![Part::Pattern(pattern)];
+    while let Some(part) = pending.pop() {
+        let pattern = match part {
+            Part::Expression(expression) => {
+                expressions.push(expression);
+                continue;
+            }
+            Part::Pattern(pattern) => pattern,
+        };
+        match pattern {
+            BindingPattern::BindingIdentifier(_) => {}
+            BindingPattern::AssignmentPattern(assignment) => {
+                pending.push(Part::Expression(&assignment.right));
+                pending.push(Part::Pattern(&assignment.left));
+            }
+            BindingPattern::ObjectPattern(object) => {
+                if let Some(rest) = &object.rest {
+                    pending.push(Part::Pattern(&rest.argument));
+                }
+                for property in object.properties.iter().rev() {
+                    pending.push(Part::Pattern(&property.value));
+                    if property.computed {
+                        if let Some(expression) = property.key.as_expression() {
+                            pending.push(Part::Expression(expression));
+                        }
+                    }
+                }
+            }
+            BindingPattern::ArrayPattern(array) => {
+                if let Some(rest) = &array.rest {
+                    pending.push(Part::Pattern(&rest.argument));
+                }
+                for element in array.elements.iter().rev().flatten() {
+                    pending.push(Part::Pattern(element));
+                }
+            }
+        }
+    }
+    expressions
+}
+
+/// Syntax-only inventory of function-scoped `var` declarations. Expressions
+/// cannot introduce one into this scope; nested functions, classes and modules
+/// own their declarations. Each function's statements are surveyed once without
+/// replaying nested function bodies or resolving any identifier occurrence.
+struct FunctionVars<'a> {
+    names: ParamBytes<'a>,
+}
+
+impl<'a> Visit<'a> for FunctionVars<'a> {
+    fn visit_expression(&mut self, _: &Expression<'a>) {}
+    fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {}
+    fn visit_class(&mut self, _: &Class<'a>) {}
+    fn visit_ts_module_block(&mut self, _: &TSModuleBlock<'a>) {}
+    fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
+        if declaration.kind == VariableDeclarationKind::Var {
+            for declarator in &declaration.declarations {
+                collect_binding_pattern_bytes(&declarator.id, &mut self.names);
+            }
+        }
+    }
+}
+
 /// Internal visitor for extracting bindings with byte-level optimization.
 struct BindingVisitor<'a, 'r> {
     source_bytes: &'a [u8],
@@ -108,6 +217,68 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
             ctx,
             result,
         }
+    }
+
+    fn declare_function_vars(&mut self, statements: &[Statement<'a>]) {
+        let mut inventory = FunctionVars {
+            names: SmallVec::new(),
+        };
+        for statement in statements {
+            inventory.visit_statement(statement);
+        }
+        for name in inventory.names {
+            self.ctx.add_ignored(name);
+        }
+    }
+
+    /// Direct lexical declarations belong to this statement list even before
+    /// their declaration executes. Do not descend into another lexical scope.
+    fn declare_statement_bindings(&mut self, statements: &[Statement<'a>]) {
+        for statement in statements {
+            let mut names = ParamBytes::new();
+            match statement {
+                Statement::VariableDeclaration(declaration) => {
+                    for declarator in &declaration.declarations {
+                        collect_binding_pattern_bytes(&declarator.id, &mut names);
+                    }
+                }
+                Statement::FunctionDeclaration(function) => {
+                    if let Some(id) = &function.id {
+                        names.push(arena_name(id));
+                    }
+                }
+                Statement::ClassDeclaration(class) => {
+                    if let Some(id) = &class.id {
+                        names.push(arena_name(id));
+                    }
+                }
+                Statement::TSEnumDeclaration(declaration) => {
+                    names.push(arena_name(&declaration.id))
+                }
+                Statement::TSNamespaceDeclaration(declaration) => {
+                    names.push(arena_name(&declaration.id))
+                }
+                Statement::TSImportEqualsDeclaration(declaration) => {
+                    names.push(arena_name(&declaration.id))
+                }
+                _ => {}
+            }
+            for name in names {
+                self.ctx.add_ignored(name);
+            }
+        }
+    }
+
+    fn visit_statements(&mut self, statements: &[Statement<'a>]) {
+        self.declare_statement_bindings(statements);
+        for statement in statements {
+            self.visit_statement(statement);
+        }
+    }
+
+    fn visit_child_statements(&mut self, statements: &[Statement<'a>]) {
+        let context = self.ctx.child_with_ignored(SmallVec::new());
+        BindingVisitor::new(self.source_bytes, context, self.result).visit_statements(statements);
     }
 
     /// Walk a statement, resolving every identifier it can reach.
@@ -130,9 +301,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
                 self.visit_variable_declaration(var_decl);
             }
             Statement::BlockStatement(block) => {
-                for stmt in &block.body {
-                    self.visit_statement(stmt);
-                }
+                self.visit_child_statements(&block.body);
             }
             Statement::ReturnStatement(ret) => {
                 if let Some(arg) = &ret.argument {
@@ -203,37 +372,41 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
             }
             Statement::SwitchStatement(switch_stmt) => {
                 self.visit_expression(&switch_stmt.discriminant);
+                let context = self.ctx.child_with_ignored(SmallVec::new());
+                let mut visitor = BindingVisitor::new(self.source_bytes, context, self.result);
+                for case in &switch_stmt.cases {
+                    visitor.declare_statement_bindings(&case.consequent);
+                }
                 for case in &switch_stmt.cases {
                     if let Some(test) = &case.test {
-                        self.visit_expression(test);
+                        visitor.visit_expression(test);
                     }
                     for stmt in &case.consequent {
-                        self.visit_statement(stmt);
+                        visitor.visit_statement(stmt);
                     }
                 }
             }
             Statement::TryStatement(try_stmt) => {
-                for stmt in &try_stmt.block.body {
-                    self.visit_statement(stmt);
-                }
+                self.visit_child_statements(&try_stmt.block.body);
                 if let Some(handler) = &try_stmt.handler {
                     // The catch parameter is a clause-local binding — it must not
                     // be prefixed, and it must not leak into the enclosing scope.
                     let mut param_bytes: ParamBytes<'a> = SmallVec::new();
                     if let Some(param) = &handler.param {
-                        self.collect_binding_pattern_bytes(&param.pattern, &mut param_bytes);
+                        collect_binding_pattern_bytes(&param.pattern, &mut param_bytes);
                     }
                     let child_ctx = self.ctx.child_with_ignored(param_bytes);
                     let mut child_visitor =
                         BindingVisitor::new(self.source_bytes, child_ctx, self.result);
-                    for stmt in &handler.body.body {
-                        child_visitor.visit_statement(stmt);
+                    if let Some(param) = &handler.param {
+                        for expression in binding_pattern_expressions(&param.pattern) {
+                            child_visitor.visit_expression(expression);
+                        }
                     }
+                    child_visitor.visit_statements(&handler.body.body);
                 }
                 if let Some(finalizer) = &try_stmt.finalizer {
-                    for stmt in &finalizer.body {
-                        self.visit_statement(stmt);
-                    }
+                    self.visit_child_statements(&finalizer.body);
                 }
             }
             Statement::ForInStatement(for_in) => {
@@ -291,9 +464,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
                 let child_ctx = self.ctx.child_with_ignored(SmallVec::new());
                 let mut child_visitor =
                     BindingVisitor::new(self.source_bytes, child_ctx, self.result);
-                for stmt in &global_decl.body.body {
-                    child_visitor.visit_statement(stmt);
-                }
+                child_visitor.visit_statements(&global_decl.body.body);
             }
             Statement::TSImportEqualsDeclaration(import_equals) => {
                 // `import X = A.B` binds `X`. The right-hand side is a TS entity
@@ -348,9 +519,8 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     fn visit_ts_module_block(&mut self, block: &TSModuleBlock<'a>) {
         let child_ctx = self.ctx.child_with_ignored(SmallVec::new());
         let mut child_visitor = BindingVisitor::new(self.source_bytes, child_ctx, self.result);
-        for stmt in &block.body {
-            child_visitor.visit_statement(stmt);
-        }
+        child_visitor.declare_function_vars(&block.body);
+        child_visitor.visit_statements(&block.body);
     }
 
     /// Shared walk for a `class` in either DECLARATION or EXPRESSION position.
@@ -385,9 +555,10 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     fn visit_class_element(&mut self, element: &ClassElement<'a>) {
         match element {
             ClassElement::StaticBlock(block) => {
-                for stmt in &block.body {
-                    self.visit_statement(stmt);
-                }
+                let context = self.ctx.child_with_ignored(SmallVec::new());
+                let mut visitor = BindingVisitor::new(self.source_bytes, context, self.result);
+                visitor.declare_function_vars(&block.body);
+                visitor.visit_statements(&block.body);
             }
             ClassElement::MethodDefinition(method) => {
                 for decorator in &method.decorators {
@@ -451,7 +622,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         match left {
             ForStatementLeft::VariableDeclaration(decl) => {
                 for declarator in &decl.declarations {
-                    self.collect_binding_pattern_bytes(&declarator.id, &mut declared);
+                    collect_binding_pattern_bytes(&declarator.id, &mut declared);
                 }
             }
             _ => {
@@ -469,6 +640,13 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
 
         let child_ctx = self.ctx.child_with_ignored(declared);
         let mut child_visitor = BindingVisitor::new(self.source_bytes, child_ctx, self.result);
+        if let ForStatementLeft::VariableDeclaration(declaration) = left {
+            for declarator in &declaration.declarations {
+                for expression in binding_pattern_expressions(&declarator.id) {
+                    child_visitor.visit_expression(expression);
+                }
+            }
+        }
         child_visitor.visit_statement(body);
     }
 
@@ -530,7 +708,32 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
             }
 
             Expression::NewExpression(new_expr) => {
-                self.visit_expression(&new_expr.callee);
+                let mut callee = &new_expr.callee;
+                let mut computed = Vec::new();
+                loop {
+                    match callee {
+                        Expression::StaticMemberExpression(member) => callee = &member.object,
+                        Expression::ComputedMemberExpression(member) => {
+                            computed.push(&member.expression);
+                            callee = &member.object;
+                        }
+                        Expression::PrivateFieldExpression(member) => callee = &member.object,
+                        _ => break,
+                    }
+                }
+                if let Expression::Identifier(ident) = callee {
+                    self.add_binding_inner(
+                        ident.name.as_str(),
+                        ident.span,
+                        false,
+                        ReferenceUse::Construct,
+                    );
+                } else {
+                    self.visit_expression(callee);
+                }
+                for expression in computed.into_iter().rev() {
+                    self.visit_expression(expression);
+                }
                 for arg in &new_expr.arguments {
                     self.visit_argument(arg);
                 }
@@ -764,19 +967,39 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     fn visit_simple_assignment_target(&mut self, target: &SimpleAssignmentTarget<'a>) {
         match target {
             SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) => {
-                self.add_binding(ident.name.as_str(), ident.span);
+                self.add_write_target(ident.name.as_str(), ident.span);
             }
             SimpleAssignmentTarget::TSAsExpression(ts_as) => {
-                self.visit_expression(&ts_as.expression);
+                match unwrapped_target(&ts_as.expression) {
+                    Expression::Identifier(ident) => {
+                        self.add_write_target(ident.name.as_str(), ident.span)
+                    }
+                    expression => self.visit_expression(expression),
+                }
             }
             SimpleAssignmentTarget::TSSatisfiesExpression(satisfies) => {
-                self.visit_expression(&satisfies.expression);
+                match unwrapped_target(&satisfies.expression) {
+                    Expression::Identifier(ident) => {
+                        self.add_write_target(ident.name.as_str(), ident.span)
+                    }
+                    expression => self.visit_expression(expression),
+                }
             }
             SimpleAssignmentTarget::TSNonNullExpression(non_null) => {
-                self.visit_expression(&non_null.expression);
+                match unwrapped_target(&non_null.expression) {
+                    Expression::Identifier(ident) => {
+                        self.add_write_target(ident.name.as_str(), ident.span)
+                    }
+                    expression => self.visit_expression(expression),
+                }
             }
             SimpleAssignmentTarget::TSTypeAssertion(assertion) => {
-                self.visit_expression(&assertion.expression);
+                match unwrapped_target(&assertion.expression) {
+                    Expression::Identifier(ident) => {
+                        self.add_write_target(ident.name.as_str(), ident.span)
+                    }
+                    expression => self.visit_expression(expression),
+                }
             }
             SimpleAssignmentTarget::ComputedMemberExpression(member) => {
                 self.visit_expression(&member.object);
@@ -794,19 +1017,37 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     fn visit_assignment_target(&mut self, target: &AssignmentTarget<'a>) {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(ident) => {
-                self.add_binding(ident.name.as_str(), ident.span);
+                self.add_write_target(ident.name.as_str(), ident.span);
             }
-            AssignmentTarget::TSAsExpression(ts_as) => {
-                self.visit_expression(&ts_as.expression);
-            }
+            AssignmentTarget::TSAsExpression(ts_as) => match unwrapped_target(&ts_as.expression) {
+                Expression::Identifier(ident) => {
+                    self.add_write_target(ident.name.as_str(), ident.span)
+                }
+                expression => self.visit_expression(expression),
+            },
             AssignmentTarget::TSSatisfiesExpression(satisfies) => {
-                self.visit_expression(&satisfies.expression);
+                match unwrapped_target(&satisfies.expression) {
+                    Expression::Identifier(ident) => {
+                        self.add_write_target(ident.name.as_str(), ident.span)
+                    }
+                    expression => self.visit_expression(expression),
+                }
             }
             AssignmentTarget::TSNonNullExpression(non_null) => {
-                self.visit_expression(&non_null.expression);
+                match unwrapped_target(&non_null.expression) {
+                    Expression::Identifier(ident) => {
+                        self.add_write_target(ident.name.as_str(), ident.span)
+                    }
+                    expression => self.visit_expression(expression),
+                }
             }
             AssignmentTarget::TSTypeAssertion(assertion) => {
-                self.visit_expression(&assertion.expression);
+                match unwrapped_target(&assertion.expression) {
+                    Expression::Identifier(ident) => {
+                        self.add_write_target(ident.name.as_str(), ident.span)
+                    }
+                    expression => self.visit_expression(expression),
+                }
             }
             AssignmentTarget::ComputedMemberExpression(member) => {
                 self.visit_expression(&member.object);
@@ -830,7 +1071,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
                 for prop in &obj.properties {
                     match prop {
                         AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(ident) => {
-                            self.add_binding(ident.binding.name.as_str(), ident.binding.span);
+                            self.add_write_target(ident.binding.name.as_str(), ident.binding.span);
                             if let Some(init) = &ident.init {
                                 self.visit_expression(init);
                             }
@@ -868,18 +1109,10 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     fn visit_arrow_function(&mut self, arrow: &ArrowFunctionExpression<'a>) {
         let mut param_bytes: ParamBytes<'a> = SmallVec::new();
         for param in &arrow.params.items {
-            self.collect_binding_pattern_bytes(&param.pattern, &mut param_bytes);
+            collect_binding_pattern_bytes(&param.pattern, &mut param_bytes);
         }
         if let Some(rest) = &arrow.params.rest {
-            self.collect_binding_pattern_bytes(&rest.rest.argument, &mut param_bytes);
-        }
-
-        // Visit default values in parameters
-        for param in &arrow.params.items {
-            if let Some(init) = &param.initializer {
-                self.visit_expression(init);
-            }
-            self.visit_binding_pattern_defaults(&param.pattern);
+            collect_binding_pattern_bytes(&rest.rest.argument, &mut param_bytes);
         }
 
         // Record the function
@@ -896,13 +1129,13 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         // Visit body with extended context
         let child_ctx = self.ctx.child_with_ignored(param_bytes);
         let mut child_visitor = BindingVisitor::new(self.source_bytes, child_ctx, self.result);
+        child_visitor.visit_parameter_expressions(&arrow.params);
 
         if let Some(expression) = arrow.get_expression() {
             child_visitor.visit_expression(expression);
         } else if let Some(body) = arrow.get_function_body() {
-            for stmt in &body.statements {
-                child_visitor.visit_statement(stmt);
-            }
+            child_visitor.declare_function_vars(&body.statements);
+            child_visitor.visit_statements(&body.statements);
         }
     }
 
@@ -913,18 +1146,10 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         }
 
         for param in &func.params.items {
-            self.collect_binding_pattern_bytes(&param.pattern, &mut param_bytes);
+            collect_binding_pattern_bytes(&param.pattern, &mut param_bytes);
         }
         if let Some(rest) = &func.params.rest {
-            self.collect_binding_pattern_bytes(&rest.rest.argument, &mut param_bytes);
-        }
-
-        // Visit default values in parameters
-        for param in &func.params.items {
-            if let Some(init) = &param.initializer {
-                self.visit_expression(init);
-            }
-            self.visit_binding_pattern_defaults(&param.pattern);
+            collect_binding_pattern_bytes(&rest.rest.argument, &mut param_bytes);
         }
 
         // Record the function
@@ -935,12 +1160,30 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
                 pos: span.start + self.ctx.base_offset,
                 body_pos: body.span.start + self.ctx.base_offset,
             });
+        }
+        let child_ctx = self.ctx.child_function(param_bytes);
+        let mut child_visitor = BindingVisitor::new(self.source_bytes, child_ctx, self.result);
+        child_visitor.visit_parameter_expressions(&func.params);
+        if let Some(body) = &func.body {
+            child_visitor.declare_function_vars(&body.statements);
+            child_visitor.visit_statements(&body.statements);
+        }
+    }
 
-            let child_ctx = self.ctx.child_with_ignored(param_bytes);
-            let mut child_visitor = BindingVisitor::new(self.source_bytes, child_ctx, self.result);
-
-            for stmt in &body.statements {
-                child_visitor.visit_statement(stmt);
+    /// Defaults and computed keys see the parameter bindings, but not body
+    /// declarations. A later parameter is local here too, with its usual TDZ.
+    fn visit_parameter_expressions(&mut self, parameters: &FormalParameters<'a>) {
+        for parameter in &parameters.items {
+            for expression in binding_pattern_expressions(&parameter.pattern) {
+                self.visit_expression(expression);
+            }
+            if let Some(initializer) = &parameter.initializer {
+                self.visit_expression(initializer);
+            }
+        }
+        if let Some(rest) = &parameters.rest {
+            for expression in binding_pattern_expressions(&rest.rest.argument) {
+                self.visit_expression(expression);
             }
         }
     }
@@ -948,97 +1191,44 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     fn visit_variable_declaration(&mut self, var_decl: &VariableDeclaration<'a>) {
         for declarator in &var_decl.declarations {
             let mut declared_bytes: ParamBytes<'a> = SmallVec::new();
-            self.collect_binding_pattern_bytes(&declarator.id, &mut declared_bytes);
+            collect_binding_pattern_bytes(&declarator.id, &mut declared_bytes);
 
             for name_bytes in declared_bytes {
                 self.ctx.add_ignored(name_bytes);
             }
-
+            for expression in binding_pattern_expressions(&declarator.id) {
+                self.visit_expression(expression);
+            }
             if let Some(init) = &declarator.init {
                 self.visit_expression(init);
             }
         }
     }
 
-    fn collect_binding_pattern_bytes(
-        &self,
-        pattern: &BindingPattern<'a>,
-        bytes: &mut ParamBytes<'a>,
-    ) {
-        match pattern {
-            BindingPattern::BindingIdentifier(ident) => {
-                bytes.push(arena_name(ident));
-            }
-            BindingPattern::ObjectPattern(obj) => {
-                for prop in &obj.properties {
-                    self.collect_binding_pattern_bytes(&prop.value, bytes);
-                }
-                if let Some(rest) = &obj.rest {
-                    self.collect_binding_pattern_bytes(&rest.argument, bytes);
-                }
-            }
-            BindingPattern::ArrayPattern(arr) => {
-                for elem in arr.elements.iter().flatten() {
-                    self.collect_binding_pattern_bytes(elem, bytes);
-                }
-                if let Some(rest) = &arr.rest {
-                    self.collect_binding_pattern_bytes(&rest.argument, bytes);
-                }
-            }
-            BindingPattern::AssignmentPattern(assign) => {
-                self.collect_binding_pattern_bytes(&assign.left, bytes);
-            }
-        }
-    }
-
-    /// Walk the DEFAULT-value expressions of a binding pattern.
-    ///
-    /// The pattern's own names are locals, collected by
-    /// [`Self::collect_binding_pattern_bytes`]; only the `= expr` right sides
-    /// are references. Exhaustive for the same reason
-    /// [`Self::visit_statement`] is: this is the last catch-all on the descent,
-    /// and a `BindingPattern` variant added by a future OXC release would
-    /// otherwise be swallowed here, silently emitting whatever identifiers its
-    /// defaults mention as bare references.
-    fn visit_binding_pattern_defaults(&mut self, pattern: &BindingPattern<'a>) {
-        match pattern {
-            // A bare name has no default to walk; the name itself is a local.
-            BindingPattern::BindingIdentifier(_) => {}
-            BindingPattern::AssignmentPattern(assign) => {
-                self.visit_expression(&assign.right);
-                self.visit_binding_pattern_defaults(&assign.left);
-            }
-            BindingPattern::ObjectPattern(obj) => {
-                for prop in &obj.properties {
-                    self.visit_binding_pattern_defaults(&prop.value);
-                }
-                if let Some(rest) = &obj.rest {
-                    self.visit_binding_pattern_defaults(&rest.argument);
-                }
-            }
-            BindingPattern::ArrayPattern(arr) => {
-                for elem in arr.elements.iter().flatten() {
-                    self.visit_binding_pattern_defaults(elem);
-                }
-                if let Some(rest) = &arr.rest {
-                    self.visit_binding_pattern_defaults(&rest.argument);
-                }
-            }
-        }
-    }
-
     #[inline]
     fn add_binding(&mut self, name: &'a str, span: OxcSpan) {
-        self.add_binding_inner(name, span, false);
+        self.add_binding_inner(name, span, false, ReferenceUse::Read);
     }
 
     #[inline]
     fn add_shorthand_binding(&mut self, name: &'a str, span: OxcSpan) {
-        self.add_binding_inner(name, span, true);
+        self.add_binding_inner(name, span, true, ReferenceUse::Read);
+    }
+
+    /// Record an identifier the expression assigns.
+    #[inline]
+    fn add_write_target(&mut self, name: &'a str, span: OxcSpan) {
+        self.add_binding_inner(name, span, false, ReferenceUse::Write);
     }
 
     #[inline]
-    fn add_binding_inner(&mut self, name: &'a str, span: OxcSpan, is_shorthand: bool) {
+    fn add_binding_inner(
+        &mut self,
+        name: &'a str,
+        span: OxcSpan,
+        is_shorthand: bool,
+        usage: ReferenceUse,
+    ) {
         use super::types::Dynamism;
         let ignore = self.ctx.should_ignore(name);
         // `push_binding`, not `bindings.push`: the vector is source-ordered, and
@@ -1048,7 +1238,9 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
             span: verter_span::RelativeSpan::new(span.start, span.end),
             pos: span.start + self.ctx.base_offset,
             ignore,
+            is_expression_local: self.ctx.is_expression_local(name),
             is_shorthand,
+            usage,
         });
 
         // Incrementally update dynamism — avoids a separate post-extraction loop.
@@ -1094,6 +1286,20 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
             pos: span.start + self.ctx.base_offset,
             content,
         });
+    }
+}
+
+/// Erased wrappers do not change which identifier an assignment writes.
+fn unwrapped_target<'n, 'a>(mut expression: &'n Expression<'a>) -> &'n Expression<'a> {
+    loop {
+        expression = match expression {
+            Expression::TSAsExpression(inner) => &inner.expression,
+            Expression::TSSatisfiesExpression(inner) => &inner.expression,
+            Expression::TSNonNullExpression(inner) => &inner.expression,
+            Expression::TSTypeAssertion(inner) => &inner.expression,
+            Expression::ParenthesizedExpression(inner) => &inner.expression,
+            _ => return expression,
+        };
     }
 }
 

@@ -1,0 +1,17 @@
+{
+  "vueVersion": "3.6.0-rc.15",
+  "typescriptVersion": "5.9.3",
+  "sourceSha256": "12e8ddd43f2ff8e1902036badcdbf20c8f7657ed564f83ba60fe81cf4c799502",
+  "codeSha256": "d5bf273cf1a72ab4635a8285d8a5cff5f15b42aa4078f336e59010a195a849c3",
+  "options": {
+    "compileScript": {
+      "id": "test",
+      "isProd": false
+    },
+    "transpileModule": {
+      "target": "ESNext",
+      "module": "ESNext"
+    }
+  },
+  "diagnostics": []
+}

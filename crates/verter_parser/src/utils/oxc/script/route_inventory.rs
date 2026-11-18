@@ -368,6 +368,46 @@ pub fn build_program_references(
 /// before the file's first token (`getLeadingCommentRanges(text, 0)`, which
 /// steps over a hashbang).
 fn collect_triple_slash_references(program: &Program<'_>, references: &mut ProgramReferences) {
+    for reference in reference_pragmas(program) {
+        match reference {
+            ReferencePragma::Types(types) => references.types.push(types.to_owned()),
+            ReferencePragma::Lib(lib) => references.libs.push(lib.to_owned()),
+            ReferencePragma::Path(path) => references.paths.push(path.to_owned()),
+        }
+    }
+}
+
+/// The `/// <reference path="…" />` files `program` reads, each with the
+/// byte range of its quoted value in the source, in source order. A caller
+/// that moves the file can rewrite the value where it is written.
+#[must_use]
+pub fn triple_slash_path_references(
+    program: &Program<'_>,
+) -> Vec<(std::ops::Range<usize>, String)> {
+    let source = program.source_text;
+    reference_pragmas(program)
+        .into_iter()
+        .filter_map(|reference| match reference {
+            ReferencePragma::Path(path) => {
+                // The value is a subslice of the source text.
+                let start = (path.as_ptr() as usize).checked_sub(source.as_ptr() as usize)?;
+                Some((start - 1..start + path.len() + 1, path.to_owned()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// What one `/// <reference …/>` directive names.
+enum ReferencePragma<'s> {
+    Types(&'s str),
+    Lib(&'s str),
+    Path(&'s str),
+}
+
+/// The references TypeScript reads from `program`'s pragmas, in order.
+fn reference_pragmas<'s>(program: &Program<'s>) -> Vec<ReferencePragma<'s>> {
+    let mut pragmas = Vec::new();
     let first_token = program
         .directives
         .first()
@@ -398,13 +438,14 @@ fn collect_triple_slash_references(program: &Program<'_>, references: &mut Progr
             continue;
         }
         if let Some(types) = named_pragma_argument(arguments, "types") {
-            references.types.push(types.to_owned());
+            pragmas.push(ReferencePragma::Types(types));
         } else if let Some(lib) = named_pragma_argument(arguments, "lib") {
-            references.libs.push(lib.to_owned());
+            pragmas.push(ReferencePragma::Lib(lib));
         } else if let Some(path) = named_pragma_argument(arguments, "path") {
-            references.paths.push(path.to_owned());
+            pragmas.push(ReferencePragma::Path(path));
         }
     }
+    pragmas
 }
 
 /// The text after `<reference` of a `/// <reference … />` comment —

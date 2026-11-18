@@ -19,8 +19,8 @@
 
 use verter_span::{GeneratedByteLen, SourceByteOffset, SourceByteRange};
 
-use crate::template::code_gen::binding::BindingResolver;
-use crate::template::code_gen::types::CodeGenOutput;
+use crate::code_transform::EditRecorder;
+use crate::template::binding::BindingResolver;
 
 /// Text payload for an emit op. Avoids needless allocation: static scaffolding
 /// stays `&'static str`, source slices stay borrowed, and only genuinely
@@ -49,7 +49,7 @@ impl EmitText<'_> {
     }
 }
 
-/// A single typed emit operation. Each variant lowers to [`CodeGenOutput`] with a
+/// A single typed emit operation. Each variant lowers to [`EditRecorder`] with a
 /// fixed mapping discipline (see module docs):
 ///
 /// - [`InsertUnmapped`](EmitOp::InsertUnmapped) → `Inserted` chunk → maps to `None`.
@@ -124,11 +124,11 @@ pub enum EmitOp<'a> {
     },
 }
 
-/// Lower a single [`EmitOp`] into the deferred [`CodeGenOutput`] operation buffer.
+/// Lower a single [`EmitOp`] into the deferred [`EditRecorder`] operation buffer.
 ///
-/// This is the ONLY place `EmitOp` variants become `CodeGenOutput` mutations, so
+/// This is the ONLY place `EmitOp` variants become `EditRecorder` mutations, so
 /// the mapping discipline lives in one audited spot.
-pub fn emit_op<'alloc>(out: &mut CodeGenOutput<'alloc>, op: &EmitOp<'_>) {
+pub fn emit_op<'alloc>(out: &mut EditRecorder<'alloc>, op: &EmitOp<'_>) {
     match op {
         EmitOp::InsertUnmapped { at, text } => {
             // Order-preserving unmapped insert: interleaves with adjacent mapped
@@ -166,7 +166,9 @@ pub fn emit_op<'alloc>(out: &mut CodeGenOutput<'alloc>, op: &EmitOp<'_>) {
             }
         }
         EmitOp::MoveOriginal { source, at } => {
-            out.move_wrapped(source.start().0, source.end().0, at.0, "", "");
+            // The authored bytes land at `at`; their own position empties.
+            out.extract_original(source.start().0, source.end().0, at.0, "", "");
+            out.overwrite(source.start().0, source.end().0, "");
         }
     }
 }
@@ -519,7 +521,7 @@ pub fn plan_user_expr<'a>(
 /// Emit an [`ExprPlan`] at a [`Placement`]. The two sinks share the plan but
 /// differ in how each piece lowers (see [`ExprPiece`]).
 pub fn emit_expr_plan<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     plan: &ExprPlan<'_>,
     placement: Placement,
     source: &'alloc str,
@@ -534,7 +536,7 @@ pub fn emit_expr_plan<'alloc>(
 /// only prefix / suffix / shorthand-key inserts are emitted at source positions.
 /// This is the exact analogue of `collect_binding_patches` — verbatim slices,
 /// surviving identifiers, and ignored locals are all NO-OPS.
-fn emit_plan_in_place<'alloc>(out: &mut CodeGenOutput<'alloc>, plan: &ExprPlan<'_>) {
+fn emit_plan_in_place<'alloc>(out: &mut EditRecorder<'alloc>, plan: &ExprPlan<'_>) {
     for piece in &plan.pieces {
         match piece {
             // Verbatim / surviving identifier / ignored local: already in the
@@ -608,16 +610,16 @@ fn split_inclusive_line_runs<'s>(slice: &'s str) -> impl Iterator<Item = (u32, &
 /// prefixes/suffixes, shorthand keys, and object-literal scaffolding are unmapped
 /// inserts. Ignored locals are MAPPED bare identifiers.
 fn emit_plan_relocated<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     plan: &ExprPlan<'_>,
     at: SourceByteOffset,
     source: &'alloc str,
 ) {
-    let unmapped = |out: &mut CodeGenOutput<'alloc>, text: EmitText<'_>| {
+    let unmapped = |out: &mut EditRecorder<'alloc>, text: EmitText<'_>| {
         emit_op(out, &EmitOp::InsertUnmapped { at, text });
     };
     let mapped =
-        |out: &mut CodeGenOutput<'alloc>, text: EmitText<'_>, source_start: SourceByteOffset| {
+        |out: &mut EditRecorder<'alloc>, text: EmitText<'_>, source_start: SourceByteOffset| {
             emit_op(
                 out,
                 &EmitOp::InsertMapped {
@@ -712,7 +714,7 @@ fn emit_plan_relocated<'alloc>(
 /// sink. `opts` carries the shorthand policy (object-literal callers pass
 /// [`ShorthandMode::ValueOnly`]).
 pub fn emit_relocated_value<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     at: SourceByteOffset,
     source: &'alloc str,
     span: SourceByteRange,
@@ -839,7 +841,7 @@ pub fn plan_object_literal<'a>(
                         &source[(base + key_span.start) as usize..(base + key_span.end) as usize];
                     let event_key = parse_static_event_key(raw_key.trim())?;
                     let mapped_name = crate::ide::event_to_jsx_name(event_key);
-                    let key = if crate::template::code_gen::binding::is_simple_ident(&mapped_name) {
+                    let key = if crate::template::binding::is_simple_ident(&mapped_name) {
                         mapped_name
                     } else {
                         format!("\"{}\"", mapped_name)
@@ -916,7 +918,7 @@ fn parse_static_event_key(raw_key: &str) -> Option<&str> {
     {
         return Some(stripped.trim());
     }
-    if crate::template::code_gen::binding::is_simple_ident(trimmed) {
+    if crate::template::binding::is_simple_ident(trimmed) {
         return Some(trimmed);
     }
     None
@@ -933,7 +935,7 @@ fn parse_static_event_key(raw_key: &str) -> Option<&str> {
 /// (prove-or-drop: a None mapping is acceptable; mapping synthetic text to the user
 /// token is not).
 pub fn emit_synthesized_shorthand_value<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     at: SourceByteOffset,
     resolved: &str,
     core: &str,

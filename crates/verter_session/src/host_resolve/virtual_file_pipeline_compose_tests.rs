@@ -81,6 +81,7 @@ fn vue_compile_input(canonical_id: &str, source: &str, has_template: bool) -> Co
             template_lang: None,
             style_langs: Vec::new(),
             custom_types: Vec::new(),
+            request_marker: Default::default(),
         },
         parse_diagnostics: crate::types::DiagnosticsSnapshot::default(),
         src_blocks: Vec::new(),

@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/directives/show.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;YAOa,cAAO",
+  "sourcesContent": [
+    "\n  <p v-show=\"visible\">Peekaboo</p>\n"
+  ]
+}

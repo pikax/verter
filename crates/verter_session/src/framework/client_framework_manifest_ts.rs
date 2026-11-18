@@ -199,7 +199,7 @@ impl FrameworkRow {
         let participation_profile_id = descriptor
             .profile_manifest
             .mint(&crate::framework::descriptor::carrier_syntax_schema(
-                crate::framework::registry::BUILT_IN_PARSER_GRAMMAR_VERSION,
+                verter_compiler::framework_common::profile::CARRIER_PARSER_GRAMMAR_VERSION,
             ))
             .ok()?
             .digest()

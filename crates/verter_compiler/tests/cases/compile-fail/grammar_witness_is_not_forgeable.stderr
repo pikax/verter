@@ -1,0 +1,9 @@
+error[E0451]: fields `contract` and `dialect` of struct `GrammarWitness` are private
+  --> tests/cases/compile-fail/grammar_witness_is_not_forgeable.rs:9:9
+   |
+ 8 |     let _literal = GrammarWitness {
+   |                    -------------- in this type
+ 9 |         contract: SyntacticContract::CompleteModule,
+   |         ^^^^^^^^ private field
+10 |         dialect: FragmentDialect::JavaScript,
+   |         ^^^^^^^ private field

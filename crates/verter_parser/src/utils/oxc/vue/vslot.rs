@@ -127,15 +127,9 @@ impl<'a> VSlotWithBindings<'a> {
     }
 }
 
-/// Extract bindings from the file-relative FormalParameters.
-///
-/// Returns the local spans, the runtime reference spans, and the liveness
-/// reference NAMES. The params tree has already been shifted to file-relative for
-/// VALUE positions, so runtime locals/default-value reference spans slice `input`
-/// directly; type-annotation reference spans keep the synthetic arrow-wrapper
-/// prefix (display-only positions that are never source-mapped), so they take
-/// only the `file_offset` shift. LIVENESS carries owned names so it never depends
-/// on that partial span shift (which does not recurse into callback bodies).
+/// Extract local spans, runtime references and liveness names from parameters
+/// whose value subtrees use file-relative coordinates. Type annotations keep
+/// the published wrapper-relative type positions and receive their file shift here.
 fn extract_slot_bindings_internal(
     params: &FormalParameters<'_>,
     input: &str,
@@ -168,8 +162,7 @@ fn extract_slot_bindings_internal(
     // table, never copied into this value's own set.
     let ignored = |name: &str| own.contains(name) || enclosing.declares(name);
 
-    // Type-annotation reference spans keep the wrapper prefix; collect them apart
-    // and apply only the file shift so they land at their published position.
+    // Type-reference nodes remain parse-relative; add their file shift below.
     let mut type_refs: FxHashSet<Span> = FxHashSet::default();
 
     // Extract references from type annotations and default values.
@@ -286,7 +279,9 @@ pub fn parse_vslot_sliced<'a>(
     let mut result = parse_vslot_internal(allocator, source, source_type);
 
     if let Some(params) = &mut result.params {
-        shift_formal_parameters_spans(params, result.offset, span.start);
+        crate::oxc_parse::with_ast_stack(source, source_type, || {
+            shift_formal_parameters_spans(params, result.offset, span.start);
+        });
     }
     if let Some(errors) = &mut result.errors {
         adjust_diagnostics_spans(errors, span.start);
@@ -315,7 +310,9 @@ pub fn parse_vslot<'a>(
     // No file offset: shifting by the wrapper offset alone strips the synthetic
     // prefix and yields source-relative spans.
     if let Some(params) = &mut result.params {
-        shift_formal_parameters_spans(params, result.offset, 0);
+        crate::oxc_parse::with_ast_stack(source, source_type, || {
+            shift_formal_parameters_spans(params, result.offset, 0);
+        });
     }
     result
 }
@@ -406,7 +403,9 @@ pub fn parse_vslot_with_bindings_sliced<'a>(
     // in one walk; binding extraction reads that file-relative tree directly.
     let mut result = parse_vslot_internal(allocator, source, source_type);
     if let Some(params) = &mut result.params {
-        shift_formal_parameters_spans(params, result.offset, offset);
+        crate::oxc_parse::with_ast_stack(source, source_type, || {
+            shift_formal_parameters_spans(params, result.offset, offset);
+        });
     }
     if let Some(errors) = &mut result.errors {
         adjust_diagnostics_spans(errors, offset);
@@ -1310,6 +1309,65 @@ mod tests {
             !wb.liveness_reference_names.contains(&"r".to_string()),
             "callback param `r` stays excluded; got {:?}",
             wb.liveness_reference_names
+        );
+    }
+}
+
+#[cfg(test)]
+mod retained_span_tests {
+    use super::*;
+    use oxc_ast::ast::{BindingPattern, Expression};
+    use oxc_span::GetSpan;
+
+    #[test]
+    fn default_type_arguments_keep_file_coordinates_and_annotation_positions() {
+        let expression = "{ item = factory<Map<string, number>>() }: Props";
+        let input = format!("0123456789{expression} trailing");
+        let allocator = Allocator::default();
+        let parsed = parse_vslot_with_bindings_sliced(
+            &allocator,
+            Some(Span::new(10, 10 + expression.len() as u32)),
+            &input,
+            SourceType::ts(),
+            &[],
+        );
+        assert!(parsed.is_ok(), "{:?}", parsed.result.errors);
+        let parameter = &parsed.params().unwrap().items[0];
+        let annotation = parameter.type_annotation.as_ref().unwrap();
+        assert_eq!(
+            (annotation.span.start, annotation.span.end),
+            (
+                input.find(": Props").unwrap() as u32 + 1,
+                10 + expression.len() as u32 + 1
+            )
+        );
+        assert!(parsed
+            .references
+            .iter()
+            .any(|reference| reference.start == input.find("Props").unwrap() as u32 + 1));
+        let BindingPattern::ObjectPattern(pattern) = &parameter.pattern else {
+            panic!("object pattern");
+        };
+        let BindingPattern::AssignmentPattern(default) = &pattern.properties[0].value else {
+            panic!("default value");
+        };
+        let span = default.right.span();
+        assert_eq!(
+            &input[span.start as usize..span.end as usize],
+            "factory<Map<string, number>>()"
+        );
+        let Expression::CallExpression(call) = &default.right else {
+            panic!("call default");
+        };
+        let arguments = call.type_arguments.as_ref().unwrap();
+        assert_eq!(
+            &input[arguments.span.start as usize..arguments.span.end as usize],
+            "<Map<string, number>>"
+        );
+        let nested = arguments.params[0].span();
+        assert_eq!(
+            &input[nested.start as usize..nested.end as usize],
+            "Map<string, number>"
         );
     }
 }

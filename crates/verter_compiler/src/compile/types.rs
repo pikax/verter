@@ -19,7 +19,7 @@ bitflags::bitflags! {
     /// `#[cfg(test)]`-only legacy compatibility shim). Every production
     /// entry point this crate owns (`StandaloneCompiler`,
     /// `compile()`/`compile_with_parsed()`/`compile_from_parsed()`,
-    /// `compile_registered_vue_artifact`) takes `CompileRequest`
+    /// `standalone::registered_audit_compile`) takes `CompileRequest`
     /// exclusively and cannot construct a `CompileTarget` value at all.
     /// `verter_session::CompileTarget` is a SEPARATE, session-owned type
     /// with an identical bit/preset shape — the session's own cache-key
@@ -363,7 +363,7 @@ pub struct VueExecutionInputs {
 /// Owned script semantics needed by a separately compiled template unit.
 #[derive(Debug, Clone, Default)]
 pub struct TemplateBindingMetadata {
-    pub bindings: rustc_hash::FxHashMap<String, crate::template::code_gen::binding::BindingType>,
+    pub bindings: rustc_hash::FxHashMap<String, crate::template::binding::BindingType>,
     pub has_script: bool,
     pub const_props: Option<rustc_hash::FxHashSet<String>>,
     pub ref_bindable_imports: rustc_hash::FxHashSet<String>,

@@ -113,7 +113,7 @@ pub use build::{
 pub use classify::{classify_store_api, is_store_composable_call};
 pub use classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};
 pub use exports::extract_export_signatures;
-pub use imports::extract_import_sources;
+pub use imports::{extract_import_sources, is_vue_source};
 pub use macros::collect_type_references;
 
 pub use routes::{

@@ -21,7 +21,13 @@ impl CarrierFrontend for ToolingFrontend {
 
 struct HtmlEpoch;
 impl FrameworkEpoch for HtmlEpoch {
-    const ID: &'static str = "html-v1";
+    const MANIFEST: verter_compiler::framework_common::profile::FrameworkProfileManifest =
+        verter_compiler::framework_common::profile::FrameworkProfileManifest {
+        family: "html-v1",
+        release: "1",
+        admitted_majors: &[1],
+        claimed_carriers: &[],
+    };
 }
 
 fn main() {
@@ -29,6 +35,7 @@ fn main() {
         FrameworkAdapterId::new("tooling"),
         LanguageId::new("html"),
         Present(ToolingFrontend),
-    );
+    )
+    .expect("the test manifest is admitted");
     let _ = row.runtime();
 }

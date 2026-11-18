@@ -1,7 +1,6 @@
 //! Route-boundary evidence that Vue/Svelte IDE projection is selected from
 //! the built-in catalog (adapter × epoch × Projection) and that Vue's
-//! combined compile_ide / compile_bundle IDE products delegate to that
-//! backend.
+//! host-integration IDE product delegates to that backend.
 
 use std::sync::Arc;
 
@@ -9,22 +8,20 @@ use oxc_allocator::Allocator;
 use verter_compiler::compile::types::{VueExecutionInputs, VueMacroSemanticInput};
 use verter_compiler::compile_request::{
     CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
-    SvelteCompileRequest, VueCompileRequest,
+    RuntimeProductRequest, SvelteCompileRequest, VueCompileRequest,
 };
 use verter_compiler::framework_common::registered_carrier_projection::{
-    built_in_projection_catalog, project_ide_from_catalog, registered_projection_for,
-    take_projection_producer_invocations, ProjectionCatalogInputs,
+    project_ide_from_catalog, registered_projection_for, take_projection_producer_invocations,
+    ProjectionCatalogInputs,
 };
-use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{
-    CarrierCompileOutcome, CatalogCapability, CompileUnsupported, FrameworkParseArtifact,
-    IdeCompileOptions, ProjectionBackend, RuntimeCompileOptions, RuntimeDiagnostic,
-    VueProjectionBackend, VueProjectionInputs,
+    CatalogCapability, CatalogSnapshot, CompileUnsupported, FrameworkParseArtifact,
+    ProjectionBackend, RuntimeDiagnostic, VueHostCompiledProducts, VueProjectionBackend,
+    VueProjectionInputs,
 };
 use verter_compiler::svelte::{SvelteProjectionBackend, SvelteProjectionInputs};
 use verter_language::carrier_grammar::{
-    CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-    FrameworkAdapterSemanticVersion,
+    CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
 };
 use verter_language::registered_source_authority::{
     CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -65,9 +62,14 @@ fn registered_artifact(canonical: &str, source: &str, svelte: bool) -> Framework
         .expect("registered source");
     let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
     let config = if svelte {
-        CarrierGrammarConfig::Svelte
+        verter_compiler::svelte::svelte_grammar_config()
     } else {
-        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).expect("vue grammar")
+        verter_compiler::framework_common::vue_grammar_config(
+            "{{",
+            "}}",
+            std::iter::empty::<&str>(),
+        )
+        .expect("vue grammar")
     };
     grammar_authority
         .register_carrier_grammar(
@@ -119,19 +121,36 @@ fn svelte_ide_request(filename: &str) -> CompileRequest {
     .expect("svelte ide-only request")
 }
 
-fn produced_bundle(
-    compiler: &VueCarrierCompiler,
-    source: &str,
+/// Admit and compile `products` through the registered Vue host
+/// integration over the artifact's own registered bytes.
+fn host_products(
     artifact: &FrameworkParseArtifact,
-    opts: &RuntimeCompileOptions,
-) -> verter_compiler::framework_common::RuntimeCompileOutput {
-    match compiler
-        .compile_bundle(source, artifact, opts, &Allocator::new())
-        .expect("bundle compiles")
-    {
-        CarrierCompileOutcome::Produced(bundle) => bundle,
-        other => panic!("expected produced bundle, got {other:?}"),
-    }
+    filename: &str,
+    products: Vec<CompileProduct>,
+) -> VueHostCompiledProducts {
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, VueHostExecutionInputs, VueHostIntegrationBackend,
+        VueHostMultiProductDemand,
+    };
+    let backend = VueHostIntegrationBackend::registered();
+    let admission = backend
+        .admit_host_products(
+            artifact,
+            VueHostMultiProductDemand {
+                products,
+                filename: Some(filename.to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("the demand admits");
+    backend
+        .compile_host_products(
+            admission,
+            artifact,
+            &VueHostExecutionInputs::default(),
+            &Allocator::new(),
+        )
+        .expect("the admitted demand produces")
 }
 
 /// A genuine consume-once projection grant: issued through the registered
@@ -158,22 +177,22 @@ fn ide_grant() -> verter_compiler::framework_common::ProductExecutionGrant {
 }
 
 #[test]
-fn built_in_projection_catalog_installs_vue_and_svelte_rows() {
-    let catalog = built_in_projection_catalog();
+fn built_in_snapshot_installs_vue_and_svelte_projection_rows() {
+    let snapshot = CatalogSnapshot::built_in();
     assert_eq!(
-        catalog.len(),
+        snapshot.projection_rows().count(),
         2,
         "exactly one Vue and one Svelte projection row"
     );
-    let identities: Vec<_> = catalog
-        .iter()
+    let identities: Vec<_> = snapshot
+        .projection_rows()
         .map(|row| {
             let identity = row.identity();
             assert_eq!(identity.capability(), CatalogCapability::Projection);
             assert!(identity.host_epoch().is_none());
             (
                 identity.adapter_id().clone(),
-                identity.epoch().as_str().to_string(),
+                identity.framework_family().to_string(),
             )
         })
         .collect();
@@ -196,19 +215,19 @@ fn projection_lookup_is_adapter_times_epoch_identity() {
     let vue = registered_artifact("file:///lookup.vue", VUE_SIMPLE, false);
     let svelte = registered_artifact("file:///lookup.svelte", SVELTE_SIMPLE, true);
     assert!(
-        registered_projection_for(vue.adapter_id(), vue.epoch()).is_some(),
+        registered_projection_for(vue.carrier_profile(), vue.framework_profile()).is_some(),
         "Vue adapter × Vue epoch must select a projection row"
     );
     assert!(
-        registered_projection_for(svelte.adapter_id(), svelte.epoch()).is_some(),
+        registered_projection_for(svelte.carrier_profile(), svelte.framework_profile()).is_some(),
         "Svelte adapter × Svelte epoch must select a projection row"
     );
     assert!(
-        registered_projection_for(vue.adapter_id(), svelte.epoch()).is_none(),
+        registered_projection_for(vue.carrier_profile(), svelte.framework_profile()).is_none(),
         "a Vue adapter must not select a Svelte projection row"
     );
     assert!(
-        registered_projection_for(svelte.adapter_id(), vue.epoch()).is_none(),
+        registered_projection_for(svelte.carrier_profile(), vue.framework_profile()).is_none(),
         "a Svelte adapter must not select a Vue projection row"
     );
 }
@@ -216,7 +235,7 @@ fn projection_lookup_is_adapter_times_epoch_identity() {
 #[test]
 fn unknown_epoch_is_a_catalog_miss_not_a_projection() {
     let artifact = registered_artifact("file:///miss.vue", VUE_SIMPLE, false);
-    let reminted = artifact.remint_epoch_for_tests("unknown-epoch");
+    let reminted = artifact.with_unregistered_profile_for_tests();
     let _ = take_projection_producer_invocations();
     let err = project_ide_from_catalog(
         ide_grant(),
@@ -308,38 +327,7 @@ fn catalog_svelte_projection_matches_the_svelte_backend() {
 }
 
 #[test]
-fn vue_compile_ide_delegates_to_the_catalog_backend_once() {
-    let artifact = registered_artifact("file:///ide.vue", VUE_SIMPLE, false);
-    let opts = IdeCompileOptions {
-        filename: Some("Ide.vue".to_string()),
-        ..Default::default()
-    };
-    let request = vue_ide_request("Ide.vue");
-    let via_backend = VueProjectionBackend
-        .project_ide(
-            ide_grant(),
-            VUE_SIMPLE,
-            &artifact,
-            &request,
-            &VueProjectionInputs::default(),
-        )
-        .expect("vue backend");
-    let _ = take_projection_producer_invocations();
-    let via_compile_ide = VueCarrierCompiler
-        .compile_ide(VUE_SIMPLE, &artifact, &opts)
-        .expect("compile_ide");
-    assert_eq!(
-        take_projection_producer_invocations(),
-        1,
-        "compile_ide must project through the catalog once"
-    );
-    assert_eq!(via_compile_ide.code, via_backend.ide.code);
-    assert_eq!(via_compile_ide.source_map, via_backend.ide.source_map);
-    assert_eq!(via_compile_ide.is_jsx, via_backend.ide.is_jsx);
-}
-
-#[test]
-fn vue_compile_bundle_ide_product_delegates_to_the_catalog_backend_once() {
+fn vue_host_ide_product_delegates_to_the_catalog_backend_once() {
     let artifact = registered_artifact("file:///bundle.vue", VUE_SIMPLE, false);
     let request = vue_ide_request("Bundle.vue");
     let via_backend = VueProjectionBackend
@@ -356,31 +344,27 @@ fn vue_compile_bundle_ide_product_delegates_to_the_catalog_backend_once() {
         )
         .expect("vue backend");
     let _ = take_projection_producer_invocations();
-    let bundle = produced_bundle(
-        &VueCarrierCompiler,
-        VUE_SIMPLE,
+    let products = host_products(
         &artifact,
-        &RuntimeCompileOptions {
-            filename: Some("Bundle.vue".to_string()),
-            source_map: true,
-            want_runtime: false,
-            want_ide: true,
+        "Bundle.vue",
+        vec![CompileProduct::IdeCompanion(IdeProductRequest {
+            want_source_map: true,
             ..Default::default()
-        },
+        })],
     );
     assert_eq!(
         take_projection_producer_invocations(),
         1,
-        "the combined adapter must project its IDE product through the catalog once"
+        "the host integration must project its IDE product through the catalog once"
     );
-    let tsx = bundle.tsx.expect("IDE product present");
+    let tsx = products.ide_companion().expect("IDE product present");
     assert_eq!(tsx.code, via_backend.ide.code);
     assert_eq!(tsx.source_map, via_backend.ide.source_map);
     assert_eq!(tsx.is_jsx, via_backend.ide.is_jsx);
 }
 
 #[test]
-fn vue_ide_only_compile_bundle_diagnostics_equal_catalog_companion() {
+fn vue_ide_only_host_diagnostics_equal_catalog_companion() {
     const SOURCE: &str = concat!(
         "<script setup>\n",
         "let n = 1\n",
@@ -420,36 +404,29 @@ fn vue_ide_only_compile_bundle_diagnostics_equal_catalog_companion() {
         "fixture must emit the template v-slot diagnostic"
     );
 
-    let bundle = produced_bundle(
-        &VueCarrierCompiler,
-        SOURCE,
+    let products = host_products(
         &artifact,
-        &RuntimeCompileOptions {
-            filename: Some("DupDiag.vue".to_string()),
-            want_runtime: false,
-            want_ide: true,
-            ..Default::default()
-        },
+        "DupDiag.vue",
+        vec![CompileProduct::IdeCompanion(IdeProductRequest::default())],
     );
+    let diagnostics = products.diagnostics();
 
     let catalog: Vec<_> = companion
         .diagnostics
         .iter()
         .map(|d| (d.code.as_str(), d.message.as_str(), d.span))
         .collect();
-    let bundled: Vec<_> = bundle
-        .diagnostics
+    let bundled: Vec<_> = diagnostics
         .iter()
         .map(|d| (d.code.as_str(), d.message.as_str(), d.span))
         .collect();
     assert_eq!(
         bundled, catalog,
-        "IDE-only compile_bundle.diagnostics must equal the catalog companion (code, message, span, order)"
+        "IDE-only host diagnostics must equal the catalog companion (code, message, span, order)"
     );
 
-    for (index, diagnostic) in bundle.diagnostics.iter().enumerate() {
-        let copies = bundle
-            .diagnostics
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        let copies = diagnostics
             .iter()
             .filter(|other| {
                 other.code == diagnostic.code
@@ -485,14 +462,14 @@ fn format_diagnostic_identities(diagnostics: &[RuntimeDiagnostic]) -> Vec<String
         .collect()
 }
 
-/// Combined runtime+IDE `compile_bundle` unique-merges catalog diagnostics
+/// A combined runtime+IDE host compile unique-merges catalog diagnostics
 /// onto the runtime prefix. Shared `(code, message, span)` identity stays
 /// once as the runtime instance; catalog-only rows append once in catalog
 /// order. A naive `.extend()` would duplicate every overlapping identity
 /// into the suffix, and replacing the runtime vector with the catalog
 /// companion would drop runtime-only diagnostics.
 #[test]
-fn vue_compile_bundle_runtime_and_ide_merges_unique_diagnostics() {
+fn vue_host_runtime_and_ide_merges_unique_diagnostics() {
     const SOURCE: &str = concat!(
         "<script setup>\n",
         "let n = 1\n",
@@ -505,14 +482,17 @@ fn vue_compile_bundle_runtime_and_ide_merges_unique_diagnostics() {
     );
     let artifact = registered_artifact("file:///unique-diag.vue", SOURCE, false);
     let request = vue_ide_request("UniqueDiag.vue");
-    let opts = RuntimeCompileOptions {
-        filename: Some("UniqueDiag.vue".to_string()),
-        want_runtime: true,
-        want_ide: false,
-        ..Default::default()
-    };
 
-    let runtime = produced_bundle(&VueCarrierCompiler, SOURCE, &artifact, &opts);
+    let runtime_products = host_products(
+        &artifact,
+        "UniqueDiag.vue",
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
+    );
+    let runtime = runtime_products
+        .runtime_client_bundle()
+        .expect("the runtime product publishes");
     assert!(
         runtime.tsx.is_none(),
         "runtime-only compile must not publish an IDE product"
@@ -567,14 +547,13 @@ fn vue_compile_bundle_runtime_and_ide_merges_unique_diagnostics() {
     );
 
     let _ = take_projection_producer_invocations();
-    let combined = produced_bundle(
-        &VueCarrierCompiler,
-        SOURCE,
+    let combined_products = host_products(
         &artifact,
-        &RuntimeCompileOptions {
-            want_ide: true,
-            ..opts
-        },
+        "UniqueDiag.vue",
+        vec![
+            CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+            CompileProduct::IdeCompanion(IdeProductRequest::default()),
+        ],
     );
     assert_eq!(
         take_projection_producer_invocations(),
@@ -582,9 +561,12 @@ fn vue_compile_bundle_runtime_and_ide_merges_unique_diagnostics() {
         "catalog projection must run exactly once for the combined runtime+IDE compile"
     );
     assert!(
-        combined.tsx.is_some(),
+        combined_products.ide_companion().is_some(),
         "combined compile must publish the IDE product"
     );
+    let combined = combined_products
+        .runtime_client_bundle()
+        .expect("the runtime product publishes");
     assert!(
         combined.script.is_some() || combined.template.is_some(),
         "combined compile must publish a runtime product"
@@ -641,17 +623,16 @@ fn vue_compile_bundle_runtime_and_ide_merges_unique_diagnostics() {
 fn runtime_only_bundle_does_not_invoke_projection() {
     let artifact = registered_artifact("file:///runtime.vue", VUE_SIMPLE, false);
     let _ = take_projection_producer_invocations();
-    let bundle = produced_bundle(
-        &VueCarrierCompiler,
-        VUE_SIMPLE,
+    let products = host_products(
         &artifact,
-        &RuntimeCompileOptions {
-            filename: Some("Runtime.vue".to_string()),
-            want_runtime: true,
-            want_ide: false,
-            ..Default::default()
-        },
+        "Runtime.vue",
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
     );
+    let bundle = products
+        .runtime_client_bundle()
+        .expect("the runtime product publishes");
     assert!(bundle.tsx.is_none(), "runtime-only must not publish IDE");
     assert_eq!(take_projection_producer_invocations(), 0);
 }
@@ -660,16 +641,14 @@ fn runtime_only_bundle_does_not_invoke_projection() {
 fn rejected_projection_does_not_publish_an_ide_product() {
     let artifact = registered_artifact("file:///reject.vue", VUE_SIMPLE, false);
     let _ = take_projection_producer_invocations();
-    let err = VueCarrierCompiler
-        .compile_ide(
-            "<script setup>const n = 2</script>",
-            &artifact,
-            &IdeCompileOptions {
-                filename: Some("Reject.vue".to_string()),
-                ..Default::default()
-            },
-        )
-        .expect_err("mismatched source must refuse");
+    let err = project_ide_from_catalog(
+        ide_grant(),
+        &artifact,
+        "<script setup>const n = 2</script>",
+        &vue_ide_request("Reject.vue"),
+        &ProjectionCatalogInputs::default(),
+    )
+    .expect_err("mismatched source must refuse");
     match err {
         CompileUnsupported::NoIdeProjection { .. } => {}
         other => panic!("expected NoIdeProjection, got {other:?}"),

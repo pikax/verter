@@ -37,6 +37,37 @@ pub enum RowClassification {
     Gated(GatedCandidate),
 }
 
+/// Why an extra carrier extension cannot join a registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CarrierExtensionError {
+    /// The extension is empty or starts with a dot.
+    Malformed(String),
+    /// A row already classifies the extension.
+    AlreadyRegistered(String),
+    /// The language the extension names is not a framework carrier.
+    NotACarrier(String),
+}
+
+impl std::fmt::Display for CarrierExtensionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed(extension) => write!(
+                f,
+                "carrier extension '{extension}' must be a non-empty extension without its dot"
+            ),
+            Self::AlreadyRegistered(extension) => {
+                write!(f, "the extension '{extension}' already has a language")
+            }
+            Self::NotACarrier(extension) => write!(
+                f,
+                "the extension '{extension}' must name a framework carrier language"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CarrierExtensionError {}
+
 /// One extension row in the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageRow {
@@ -172,6 +203,37 @@ impl LanguageRegistry {
             LanguageRow::fixed("cjs", FileLanguage::script(ScriptSourceType::cjs())),
             LanguageRow::fixed("jsx", FileLanguage::script(ScriptSourceType::jsx())),
         ])
+    }
+
+    /// This registry with one extra carrier row per `(extension, language)`
+    /// pair: the extensions a host classifies as framework carriers beyond
+    /// the built-in ones, such as `md` read as a Vue carrier. Extensions are
+    /// given without the leading dot.
+    ///
+    /// # Errors
+    ///
+    /// [`CarrierExtensionError`] for an empty extension, an extension a row
+    /// already owns, or a language that is not a framework carrier.
+    pub fn with_carrier_extensions<'a>(
+        &self,
+        extensions: impl IntoIterator<Item = (&'a str, FileLanguage)>,
+    ) -> Result<Self, CarrierExtensionError> {
+        let mut rows: Vec<LanguageRow> = self.rows.iter().map(|(_, row)| row.clone()).collect();
+        for (extension, language) in extensions {
+            if extension.is_empty() || extension.starts_with('.') {
+                return Err(CarrierExtensionError::Malformed(extension.to_string()));
+            }
+            if rows.iter().any(|row| row.extension == extension) {
+                return Err(CarrierExtensionError::AlreadyRegistered(
+                    extension.to_string(),
+                ));
+            }
+            if !language.is_framework_carrier() {
+                return Err(CarrierExtensionError::NotACarrier(extension.to_string()));
+            }
+            rows.push(LanguageRow::carrier(extension, language));
+        }
+        Ok(Self::new(rows))
     }
 
     /// The process-wide built-in registry.

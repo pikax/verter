@@ -35,7 +35,7 @@ pub fn build_open_tag(element: &ElementNode, source: &str, html: &mut String) {
             continue; // Directives become effects, not HTML attributes
         }
         let name = &source[prop.start as usize..prop.name_end as usize];
-        // Skip ref — handled as _setTemplateRef statement, not HTML attribute
+        // Skip ref — handled as _setStaticTemplateRef statement, not HTML attribute
         if name == "ref" {
             continue;
         }
@@ -182,6 +182,9 @@ pub fn finalize_root_element<'a>(
     if state.child_nav.iter().any(|nav| nav.contains("_next(")) {
         out.add_vapor_import(VaporHelper::Next);
     }
+    if state.child_nav.iter().any(|nav| nav.contains("_nthChild(")) {
+        out.add_vapor_import(VaporHelper::NthChild);
+    }
     // `state.text_node_ref` is the root's OWN direct text extraction — set by
     // `finalize_text_parts` above whenever the root's dynamic text is its own
     // (not bubbled up from a child via `child_text_creations`, e.g. a bare
@@ -248,14 +251,21 @@ pub fn merge_into_parent<'a>(
         let ref_idx = parent
             .node_ref
             .unwrap_or_else(|| parent.ensure_node_ref(counters));
-        // First child reaches via `_child(parent)`, later siblings via
-        // `_next(parent, dom_index)` — `pN` is the navigation path variable.
+        // First child reaches via `_child(parent)`, the second via
+        // `_next(_child(parent))`, a later position via
+        // `_nthChild(parent, dom_index)` — `pN` is the navigation path
+        // variable. (`_next(node)` is the node's next sibling, never an
+        // indexed child of its argument.)
         let path_idx = counters.next_path();
         let nav = if dom_child_index == 0 {
             out.alloc_fmt(format_args!("const p{path_idx} = _child(n{ref_idx})"))
+        } else if dom_child_index == 1 {
+            out.alloc_fmt(format_args!(
+                "const p{path_idx} = _next(_child(n{ref_idx}))"
+            ))
         } else {
             out.alloc_fmt(format_args!(
-                "const p{path_idx} = _next(n{ref_idx}, {dom_child_index})"
+                "const p{path_idx} = _nthChild(n{ref_idx}, {dom_child_index})"
             ))
         };
         parent.child_nav.push(nav);
@@ -624,12 +634,9 @@ mod tests {
         let _ = merge_into_parent(dynamic_child, &mut parent, &mut counters, 1, true, &mut out);
 
         assert!(!parent.child_nav.is_empty());
-        // dom_child_index=1 → _next(n0, 1)
-        assert!(
-            parent.child_nav[0].contains(", 1)"),
-            "Expected _next with index 1, got: {}",
-            parent.child_nav[0]
-        );
+        // dom_child_index=1 → the first child's next sibling of the parent
+        // ref (n1; the dynamic child's text ref took n0).
+        assert_eq!(parent.child_nav[0], "const p0 = _next(_child(n1))");
         // The merge bubbles render-side work only, never HTML.
         assert_eq!(parent.html, "<div>");
     }

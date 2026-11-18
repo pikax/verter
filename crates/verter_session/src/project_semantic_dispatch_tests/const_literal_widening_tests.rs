@@ -1042,3 +1042,227 @@ fn a_satisfies_member_keeps_the_literals_its_contextual_type_keeps() {
         );
     }
 }
+
+const STEPPED_WIDENING: &str = "\
+const lit = 1;
+const hop1 = lit;
+const hop2 = hop1;
+const cycA = cycB;
+const cycB = cycA;
+enum E { A = 1 }
+class K { static readonly s = 1; static readonly sAnn: 1 = 1; }
+declare function f<T>(x: T): T;
+declare function n<T extends number>(x: T): T;
+declare const one: 1;
+const m = f(1);
+const mTop = f(f(1));
+const mCopy = m;
+const mReg = f(one);
+const mN = n(1);
+namespace NS { export const inner = 1; export const copy = inner; }
+export function use() { return [lit, hop2, cycA, E.A, K.s, m, mTop, mCopy, mReg, mN, NS.inner, NS.copy]; }
+";
+
+/// A value read's widening walk answers the same stepped read by read in
+/// place as `value_read_widens` does, and stops exactly at the `typeof`
+/// reads a call initializer's leaves lower through, in evaluation order:
+/// none for a literal `const`, a copy chain, a copy cycle, an enum or
+/// static member or a namespace member; the callee and each value argument
+/// of every call a `const`'s initializer makes, through the copies that
+/// reach it. A holder may not answer such a read itself: its delivery, to
+/// one walk or to each walk of a list, is refused as needing an observed
+/// delivery, the walk left waiting and still answering alike in place.
+///
+/// Mutation: a delivered answer accepted (the walk resumed with it) turns
+/// the reading rows' refusals to `"accepted"`.
+#[test]
+fn a_stepped_widening_read_answers_as_the_in_place_read() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, "/w/stepped.ts", STEPPED_WIDENING);
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
+    let rows: &[(&[&str], bool, &[&str])] = &[
+        (&["lit"], true, &[]),
+        (&["hop2"], true, &[]),
+        (&["cycA"], false, &[]),
+        (&["E", "A"], true, &[]),
+        (&["K", "s"], true, &[]),
+        (&["K", "sAnn"], false, &[]),
+        (&["NS", "inner"], true, &[]),
+        (&["NS", "copy"], false, &[]),
+        (&["m"], true, &["f"]),
+        (&["mTop"], true, &["f", "f"]),
+        (&["mCopy"], true, &["f"]),
+        (&["mReg"], false, &["f", "one"]),
+        (&["mN"], false, &["n"]),
+    ];
+    let typeof_root = |key: &SemanticQueryKey| match key {
+        SemanticQueryKey::TypeOf {
+            value_root, path, ..
+        } if path.is_empty() => Some(value_root.root.name.to_string()),
+        _ => None,
+    };
+    let mut failures = Vec::new();
+    for (path, widens, reads) in rows {
+        let path: Vec<String> = path.iter().map(|segment| segment.to_string()).collect();
+        let trace = dispatch.step_value_widening_for_tests(
+            "/w/stepped.ts",
+            TopLevelOwnerId::ordinary_file(),
+            &path,
+        );
+        let expected_reads: Vec<Option<String>> =
+            reads.iter().map(|root| Some(root.to_string())).collect();
+        let in_place_reads: Vec<Option<String>> = trace
+            .in_place_reads
+            .iter()
+            .map(|(key, shape)| typeof_root(key).filter(|_| *shape == "node"))
+            .collect();
+        let answers = (
+            trace.value_read_widens,
+            trace.in_place,
+            trace.refused_then_in_place,
+        );
+        if answers != (*widens, *widens, *widens) {
+            failures.push(format!(
+                "{path:?}: (in place, stepped in place, refused then in place) {answers:?}, expected {widens}"
+            ));
+        }
+        if in_place_reads != expected_reads {
+            failures.push(format!(
+                "{path:?}: stepped in-place reads {in_place_reads:?}, expected {expected_reads:?}"
+            ));
+        }
+        let reading = !reads.is_empty();
+        let refusal = "needs an observed delivery";
+        let delivery = (
+            trace.holder_delivery,
+            trace.listed_deliveries.clone(),
+            trace.listed_waiting,
+            trace.listed.clone(),
+        );
+        let expected_delivery = if reading {
+            (Some(refusal), vec![(0, refusal), (1, refusal)], 2, None)
+        } else {
+            (None, Vec::new(), 0, Some(vec![*widens, *widens]))
+        };
+        if delivery != expected_delivery {
+            failures.push(format!(
+                "{path:?}: (holder delivery, listed deliveries, still waiting, listed) {delivery:?}, expected {expected_delivery:?}"
+            ));
+        }
+        let first_read: Vec<(usize, &SemanticQueryKey)> = trace
+            .in_place_reads
+            .first()
+            .map(|(key, _)| vec![(0, key), (1, key)])
+            .unwrap_or_default();
+        let listed_reads: Vec<(usize, &SemanticQueryKey)> = trace
+            .listed_reads
+            .iter()
+            .map(|(walk, key, _)| (*walk, key))
+            .collect();
+        if listed_reads != first_read {
+            failures.push(format!(
+                "{path:?}: a list's walks wait on other reads than the walk's first"
+            ));
+        }
+        if trace.abandoned_waiting != usize::from(reading) {
+            failures.push(format!(
+                "{path:?}: an abandoned walk waited on {} reads",
+                trace.abandoned_waiting
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A call-initialized `const`'s widening walk reads its initializer while
+/// an expression is checked, under the checking site the inline freshness
+/// probe reads it at: `concat(z)` over a 5,000-element `z` and a lazy
+/// `Concat<T, T>` return checks that return as the expression's TS2800
+/// recovery, never the type node's TS2799, and the walk answers as the
+/// inline probe does.
+#[test]
+fn a_widening_walk_reads_its_initializer_at_the_expression_site() {
+    let source = format!(
+        "declare const z: [{}];\n\
+         type Concat<X extends unknown[], Y extends unknown[]> = [...X, ...Y];\n\
+         declare function concat<T extends unknown[]>(a: T): Concat<T, T>;\n\
+         const mConcat = concat(z);\n\
+         export function use() {{ return mConcat; }}\n",
+        vec!["0"; 5_000].join(", ")
+    );
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, "/w/concat.ts", &source);
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
+    let trace = dispatch.step_value_widening_for_tests(
+        "/w/concat.ts",
+        TopLevelOwnerId::ordinary_file(),
+        &["mConcat".to_string()],
+    );
+    let ts2800 = verter_type_engine::semantic_query::CheckerDiagnostic {
+        code: verter_type_engine::semantic_query::CheckerDiagnosticCode::ExpressionTupleTooLarge,
+        operation: verter_type_engine::semantic_query::CheckerDiagnosticOperation::TupleSpread,
+    };
+    let reads: Vec<(Option<String>, &str)> = trace
+        .in_place_reads
+        .iter()
+        .map(|(key, shape)| {
+            let root = match key {
+                SemanticQueryKey::TypeOf { value_root, .. } => {
+                    Some(value_root.root.name.to_string())
+                }
+                _ => None,
+            };
+            (root, *shape)
+        })
+        .collect();
+    assert_eq!(
+        reads,
+        [
+            (Some("concat".to_string()), "node"),
+            (Some("z".to_string()), "node"),
+            (None, "whole"),
+        ],
+        "the walk reads the callee, the argument and the call's lazy declared return"
+    );
+    assert!(
+        matches!(&trace.in_place_reads[2].0, SemanticQueryKey::Instantiate(_)),
+        "the third read instantiates the declared return"
+    );
+    assert_eq!(
+        trace.in_place_sites, ["expression"; 3],
+        "every read is made where the inline probe made it: while an expression is checked"
+    );
+    assert_eq!(
+        trace.inline,
+        Some((false, Some(ts2800))),
+        "the inline probe reads the refused return as the expression's TS2800 recovery"
+    );
+    assert_eq!(
+        trace.in_place_recoveries,
+        [None, None, Some(ts2800)],
+        "the walk's declared-return read answers the inline probe's recovery"
+    );
+    assert_eq!(
+        (trace.value_read_widens, trace.in_place),
+        (false, false),
+        "the walk answers as the inline probe does"
+    );
+}

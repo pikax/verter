@@ -37,6 +37,8 @@ pub const CREATE_STATIC_VNODE: &str = "_createStaticVNode";
 pub const NORMALIZE_PROPS: &str = "_normalizeProps";
 pub const GUARD_REACTIVE_PROPS: &str = "_guardReactiveProps";
 pub const TO_HANDLERS: &str = "_toHandlers";
+pub const IS_REF: &str = "_isRef";
+pub const UNREF: &str = "_unref";
 
 // ======================== Vue built-in components ========================
 // These are imported directly from "vue" (e.g., `Suspense as _Suspense`)
@@ -88,6 +90,9 @@ pub const VAPOR_TELEPORT: &str = "_VaporTeleport";
 pub const VAPOR_KEEP_ALIVE: &str = "_VaporKeepAlive";
 pub const GET_REST_ELEMENT: &str = "_getRestElement";
 pub const GET_DEFAULT_VALUE: &str = "_getDefaultValue";
+pub const NTH_CHILD: &str = "_nthChild";
+pub const SET_STATIC_TEMPLATE_REF: &str = "_setStaticTemplateRef";
+pub const CREATE_FOR_SLOTS: &str = "_createForSlots";
 
 // ======================== Runtime helpers (SSR) ========================
 // Imported from "vue/server-renderer"
@@ -150,9 +155,19 @@ pub enum VdomHelper {
     ToHandlers = 1 << 32,
     WithMemo = 1 << 33,
     IsMemoSame = 1 << 34,
+    IsRef = 1 << 35,
+    Unref = 1 << 36,
 }
 
 impl VdomHelper {
+    /// The helper an import name (as [`name`](Self::name) spells it) names.
+    pub fn from_name(name: &str) -> Option<Self> {
+        ALL_VDOM
+            .iter()
+            .copied()
+            .find(|helper| helper.name() == name)
+    }
+
     /// The runtime helper name string (e.g. `"_createElementVNode"`).
     #[inline]
     pub const fn name(self) -> &'static str {
@@ -192,12 +207,14 @@ impl VdomHelper {
             Self::ToHandlers => TO_HANDLERS,
             Self::WithMemo => WITH_MEMO,
             Self::IsMemoSame => IS_MEMO_SAME,
+            Self::IsRef => IS_REF,
+            Self::Unref => UNREF,
         }
     }
 }
 
 /// Ordered lookup table for `VdomHelperFlags::to_imports()`.
-const ALL_VDOM: [VdomHelper; 35] = [
+const ALL_VDOM: [VdomHelper; 37] = [
     VdomHelper::CreateElementVNode,
     VdomHelper::CreateElementBlock,
     VdomHelper::CreateVNode,
@@ -233,6 +250,8 @@ const ALL_VDOM: [VdomHelper; 35] = [
     VdomHelper::ToHandlers,
     VdomHelper::WithMemo,
     VdomHelper::IsMemoSame,
+    VdomHelper::IsRef,
+    VdomHelper::Unref,
 ];
 
 /// Bitflag set of VDOM runtime helpers. Wraps a `u64` with O(1) add/has.
@@ -288,6 +307,17 @@ impl VdomHelperFlags {
     }
 }
 
+/// Official `isKeepAliveTag`/`isTransitionTag`: a host whose sole child is a
+/// single root (`isSingleRootChild`).
+pub(crate) fn hosts_single_root_child(tag: &str) -> bool {
+    let lower = tag.to_ascii_lowercase();
+    if matches!(lower.as_str(), "transition" | "vaportransition") {
+        return true;
+    }
+    let unhyphenated: String = lower.chars().filter(|c| *c != '-').collect();
+    matches!(unhyphenated.as_str(), "keepalive" | "vaporkeepalive")
+}
+
 /// Vapor runtime helper identifier. Each variant is a distinct bit in a `u64`.
 #[repr(u64)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -331,6 +361,9 @@ pub enum VaporHelper {
     VaporKeepAlive = 1 << 36,
     GetRestElement = 1 << 37,
     GetDefaultValue = 1 << 38,
+    NthChild = 1 << 39,
+    SetStaticTemplateRef = 1 << 40,
+    CreateForSlots = 1 << 41,
 }
 
 impl VaporHelper {
@@ -377,12 +410,15 @@ impl VaporHelper {
             Self::VaporKeepAlive => VAPOR_KEEP_ALIVE,
             Self::GetRestElement => GET_REST_ELEMENT,
             Self::GetDefaultValue => GET_DEFAULT_VALUE,
+            Self::NthChild => NTH_CHILD,
+            Self::SetStaticTemplateRef => SET_STATIC_TEMPLATE_REF,
+            Self::CreateForSlots => CREATE_FOR_SLOTS,
         }
     }
 }
 
 /// Ordered lookup table for `VaporHelperFlags::to_imports()`.
-const ALL_VAPOR: [VaporHelper; 39] = [
+const ALL_VAPOR: [VaporHelper; 42] = [
     VaporHelper::Template,
     VaporHelper::Txt,
     VaporHelper::SetText,
@@ -422,6 +458,9 @@ const ALL_VAPOR: [VaporHelper; 39] = [
     VaporHelper::VaporKeepAlive,
     VaporHelper::GetRestElement,
     VaporHelper::GetDefaultValue,
+    VaporHelper::NthChild,
+    VaporHelper::SetStaticTemplateRef,
+    VaporHelper::CreateForSlots,
 ];
 
 /// Bitflag set of Vapor runtime helpers. Wraps a `u64` with O(1) add/has.
@@ -660,7 +699,7 @@ impl SsrHelperFlags {
     }
 }
 
-/// Check if a tag name is a Vue built-in component.
+/// The runtime helper a Vue built-in component tag compiles to.
 ///
 /// Returns `Some((flag_bit, helper_name))` if the tag is a built-in component,
 /// where `flag_bit` is the `BuiltinComponentFlags` bit and `helper_name` is
@@ -669,20 +708,20 @@ impl SsrHelperFlags {
 /// Handles both PascalCase (`<Suspense>`) and lowercase/kebab-case
 /// (`<suspense>`, `<keep-alive>`) variants.
 pub fn is_builtin_component(tag: &str) -> Option<(u8, &'static str)> {
-    match tag {
-        "Teleport" | "teleport" => Some((BuiltinComponentFlags::TELEPORT_BIT, TELEPORT)),
-        "Suspense" | "suspense" => Some((BuiltinComponentFlags::SUSPENSE_BIT, SUSPENSE)),
-        "KeepAlive" | "keep-alive" => Some((BuiltinComponentFlags::KEEP_ALIVE_BIT, KEEP_ALIVE)),
-        "BaseTransition" | "base-transition" => {
-            Some((BuiltinComponentFlags::BASE_TRANSITION_BIT, BASE_TRANSITION))
+    use crate::template::vue_syntax::{builtin_component, BuiltinComponent};
+    builtin_component(tag).map(|component| match component {
+        BuiltinComponent::Teleport => (BuiltinComponentFlags::TELEPORT_BIT, TELEPORT),
+        BuiltinComponent::Suspense => (BuiltinComponentFlags::SUSPENSE_BIT, SUSPENSE),
+        BuiltinComponent::KeepAlive => (BuiltinComponentFlags::KEEP_ALIVE_BIT, KEEP_ALIVE),
+        BuiltinComponent::BaseTransition => {
+            (BuiltinComponentFlags::BASE_TRANSITION_BIT, BASE_TRANSITION)
         }
-        "Transition" | "transition" => Some((BuiltinComponentFlags::TRANSITION_BIT, TRANSITION)),
-        "TransitionGroup" | "transition-group" => Some((
+        BuiltinComponent::Transition => (BuiltinComponentFlags::TRANSITION_BIT, TRANSITION),
+        BuiltinComponent::TransitionGroup => (
             BuiltinComponentFlags::TRANSITION_GROUP_BIT,
             TRANSITION_GROUP,
-        )),
-        _ => None,
-    }
+        ),
+    })
 }
 
 /// Built-ins whose children are RAW VNode arrays, not component slot objects.
@@ -708,23 +747,6 @@ pub fn is_keep_alive(tag: &str) -> bool {
 }
 
 // ======================== String case conversion ========================
-
-/// Convert a kebab-case or camelCase string to PascalCase.
-pub fn to_pascal_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut capitalize_next = true;
-    for ch in s.chars() {
-        if ch == '-' || ch == '_' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.extend(ch.to_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(ch);
-        }
-    }
-    result
-}
 
 // ======================== u32 push helper ========================
 
@@ -757,70 +779,6 @@ pub fn push_u32(buf: &mut String, n: u32) {
 }
 
 // ======================== JS string escaping ========================
-
-/// Quick check whether a string needs any JS string escaping.
-///
-/// Returns `true` if the string contains `\`, `"`, newline, carriage return,
-/// tab, null, or the first byte of U+2028/U+2029 (0xE2).
-#[inline]
-pub fn needs_js_escaping(s: &str) -> bool {
-    s.bytes()
-        .any(|b| matches!(b, b'\\' | b'"' | b'\n' | b'\r' | b'\t' | b'\0' | 0xe2) || b < 0x20)
-}
-
-/// Append a JS-string-escaped version of `s` to `buf`.
-///
-/// Escapes: `\` → `\\`, `"` → `\"`, `\n` → `\\n`, `\r` → `\\r`, `\t` → `\\t`,
-/// `\0` → `\\0`, U+2028 → `\\u2028`, U+2029 → `\\u2029`, ASCII control → `\\xHH`.
-pub fn escape_js_string_into(buf: &mut String, s: &str) {
-    // Fast path: ~90% of template strings need no escaping
-    if !needs_js_escaping(s) {
-        buf.push_str(s);
-        return;
-    }
-
-    // Bulk-copy optimization: track start of unmodified region
-    let bytes = s.as_bytes();
-    let mut copy_from = 0;
-
-    for (i, ch) in s.char_indices() {
-        let escape = match ch {
-            '\\' => "\\\\",
-            '"' => "\\\"",
-            '\n' => "\\n",
-            '\r' => "\\r",
-            '\t' => "\\t",
-            '\0' => "\\0",
-            '\u{2028}' => "\\u2028",
-            '\u{2029}' => "\\u2029",
-            c if c.is_ascii_control() => {
-                // Flush pending unmodified region
-                if copy_from < i {
-                    buf.push_str(&s[copy_from..i]);
-                }
-                use std::fmt::Write;
-                let _ = write!(buf, "\\x{:02x}", c as u32);
-                copy_from = i + 1;
-                continue;
-            }
-            _ => {
-                continue;
-            }
-        };
-
-        // Flush pending unmodified region, then push escape sequence
-        if copy_from < i {
-            buf.push_str(&s[copy_from..i]);
-        }
-        buf.push_str(escape);
-        copy_from = i + ch.len_utf8();
-    }
-
-    // Flush remaining
-    if copy_from < bytes.len() {
-        buf.push_str(&s[copy_from..]);
-    }
-}
 
 /// Escape a string for use in a JS string literal.
 #[cfg(test)]
@@ -1102,7 +1060,7 @@ pub fn debug_assert_element_bounds(
 
 // ======================== Directive helpers (shared by VDOM + Vapor) ========================
 
-use crate::template::oxc::types::OxcParsedExpression;
+use crate::template::vue_syntax::escape_js_string_into;
 use crate::types::NodeProp;
 
 /// Extract the directive value from source using NodeProp value span.
@@ -1269,47 +1227,6 @@ pub const DELEGATABLE_EVENTS: &[&str] = &[
     "focusin",
     "focusout",
 ];
-
-/// Check whether an expression is a simple member expression (identifier or
-/// dot-separated property access like `foo`, `foo.bar`, `_ctx.onClick`).
-/// Used to distinguish event handler references from inline handlers.
-pub fn is_member_expression(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
-}
-
-/// Whether a `v-on` handler value is an inline STATEMENT LIST rather than a
-/// single expression (`@click="a = 1; b = 2"`).
-///
-/// This is the compiler's SOLE notion of "multi-statement": the parse fact the
-/// template front-end records on [`OxcParsedExpression::multi_statement`] after
-/// reading the value under the statement-list grammar. Every backend — VDOM,
-/// Vapor and the IDE/TSX projection — asks this one question, so they cannot
-/// disagree about the same input.
-///
-/// A raw-source `value.contains(';')` probe is NOT equivalent and must not be
-/// reintroduced. It misses a newline-separated list (`@click="a = 1\nb = 2"` has
-/// no `;` at all, yet is two statements) and fires on a `;` that is merely
-/// inside a string literal (`@click="a = 'x;y'"` is one statement).
-pub fn is_multi_statement_handler(exp: Option<&OxcParsedExpression<'_>>) -> bool {
-    exp.is_some_and(|e| e.multi_statement)
-}
-
-/// Narrow a resolved handler body to the text an EXPRESSION container (`(…)`)
-/// can hold, by dropping trailing whitespace and statement terminators.
-///
-/// The resolved text is the value's source slice with binding prefixes spliced
-/// in, so a terminator the author wrote (`@click="foo();"`) survives into the
-/// output and would make `$event => (foo();)` unparseable. Trimming is an
-/// EMISSION concern, not a classification one: whether the body needs a
-/// statement container is answered solely by [`is_multi_statement_handler`].
-pub fn trim_handler_body(resolved: &str) -> &str {
-    resolved.trim_end().trim_end_matches(';').trim_end()
-}
 
 // ======================== Template literal escaping ========================
 

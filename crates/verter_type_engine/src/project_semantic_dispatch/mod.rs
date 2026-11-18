@@ -121,6 +121,8 @@ pub mod carrier;
 // rails on the flow read rail stack.
 pub mod compute_rails;
 mod conditional_decision;
+#[cfg(any(test, feature = "test-support"))]
+pub use conditional_decision::{ConditionalProgressForTests, ConditionalReadForTests};
 mod contextual_tuple;
 // The operational budget owner: work units, query-boundary depth, and the
 // request cancellation signal for one connected semantic demand. The
@@ -730,7 +732,8 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// answers its frame has received, the first read they do not answer,
     /// and how many queries the decision is evaluating in place, which read
     /// only those answers.
-    decision_seam: verter_execution::sync_cell::SyncRefCell<Option<query_frames::DecisionSeam>>,
+    operand_answers:
+        verter_execution::sync_cell::SyncRefCell<Option<query_frames::OperandAnswerScope>>,
     /// The flow evaluation whose frame is stepping, while its run lasts:
     /// the answers its frame received, the contextual callbacks typing now
     /// and the contextual calls held across its runs.
@@ -1389,7 +1392,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             literal_union_indexes: Default::default(),
             composite_fixed_points: Default::default(),
             driven_root_traced: verter_execution::sync_cell::SyncRefCell::new(None),
-            decision_seam: verter_execution::sync_cell::SyncRefCell::new(None),
+            operand_answers: verter_execution::sync_cell::SyncRefCell::new(None),
             flow_seam: verter_execution::sync_cell::SyncRefCell::new(None),
             substitution_binder: verter_execution::sync_cell::SyncRefCell::new(None),
             substitution_spare: verter_execution::sync_cell::SyncRefCell::new(None),
@@ -1464,7 +1467,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             literal_union_indexes,
             composite_fixed_points,
             driven_root_traced,
-            decision_seam,
+            operand_answers,
             flow_seam,
             substitution_binder,
             // Buffers only: a lent task keeps the spare walk it finds.
@@ -1512,7 +1515,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         literal_union_indexes.swap(&other.literal_union_indexes);
         composite_fixed_points.swap(&other.composite_fixed_points);
         driven_root_traced.swap(&other.driven_root_traced);
-        decision_seam.swap(&other.decision_seam);
+        operand_answers.swap(&other.operand_answers);
         flow_seam.swap(&other.flow_seam);
         substitution_binder.swap(&other.substitution_binder);
         // An operation the task's drive enters nests in the lender's open one,
@@ -2726,10 +2729,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// context and records nothing.
     #[inline(always)]
     pub(crate) fn record_dispatch_intent_counters(&self, key: &SemanticQueryKey) {
+        #[cfg(any(test, feature = "test-support"))]
+        DISPATCH_INTENTS.with(|intents| {
+            let [conditional, hops] = intents.get();
+            intents.set([
+                conditional + u64::from(matches!(key, SemanticQueryKey::Conditional { .. })),
+                hops + 1,
+            ]);
+        });
         #[cfg(not(feature = "semantic-observe"))]
         let _ = key;
         #[cfg(feature = "semantic-observe")]
         self.record_dispatch_intent_counters_captured(key);
+    }
+
+    /// The dispatch intents recorded on this thread, as the
+    /// type-resolution counters a captured request bumps for them:
+    /// conditional decisions and hops.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn dispatch_intents_for_tests() -> [u64; 2] {
+        DISPATCH_INTENTS.with(std::cell::Cell::get)
     }
 
     #[cfg(feature = "semantic-observe")]
@@ -3539,9 +3558,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// corpus data and 179/179 PASS is vacuous.
     ///
     /// `parent_surface` is the semantic node id of the macro
-    /// payload's expanded surface (or the payload itself for the
-    /// single-field `defineModel` projector). `member_value` is the
-    /// semantic node id of the member's type body. `name` is the
+    /// payload. `member_value` is the node the edge publishes: the
+    /// member's type body when the caller holds it, or the payload
+    /// itself when the caller publishes from graph-free surface rows
+    /// (the component-meta compute does, so cached and fresh rows
+    /// record the same edges). `name` is the
     /// published member name as it appears on the user-visible
     /// surface — for `defineModel` this is the resolved model name
     /// (defaulting to `modelValue`).
@@ -3564,6 +3585,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             },
             fence,
         );
+    }
+
+    /// Admit a public named member and record its publication provenance.
+    pub fn admit_published_member(
+        &self,
+        owner: &DeclIdentity,
+        parent_surface: SemanticNodeId,
+        member_value: SemanticNodeId,
+        visibility: verter_type_expr::MemberVisibility,
+        name: &Arc<str>,
+    ) -> bool {
+        if !visibility.is_public() {
+            return false;
+        }
+        self.record_published_field_edge(owner, parent_surface, member_value, name);
+        true
     }
 
     construction_ordinal_seam! {
@@ -4853,11 +4890,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(read) = self.refuse_relation_without_inference_context(&key) {
             return read;
         }
-        // An instantiation or a `typeof` a running conditional decision
-        // reads is answered by its frame's deliveries, or becomes the
-        // frame's need; any other query the decision reaches evaluates in
-        // place, where only those deliveries answer it. So is one a
-        // contextual callback reads while its call's collector waits.
+        // A relation reads the completed deliveries its operand walk kept.
+        // A contextual callback also reads through its flow frame's seam.
         if publication.is_none() && operand_evidence.is_none() {
             // A read a root flow read's own body makes, counted by the site
             // that made it until every such site makes it as a request.
@@ -4866,7 +4900,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 flow_return::body_reads::count_read(txn.reentry().depth(), key.tag());
             }
             if let Some(read) = self
-                .read_at_decision_seam(&key)
+                .read_operand_answer(&key)
                 .or_else(|| self.read_at_flow_seam(&key))
             {
                 return read;
@@ -7117,4 +7151,10 @@ pub(super) fn namespace_scoped_typeof_root(
                 && qualified.contains('.'))
             .then(|| (identity.symbol_name.clone(), index + 1))
         })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    /// [`ProjectSemanticDispatch::dispatch_intents_for_tests`].
+    static DISPATCH_INTENTS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
 }

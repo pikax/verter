@@ -15,11 +15,15 @@ use std::sync::Arc;
 
 use oxc_sourcemap::SourceMap;
 
+use verter_audit::observe::ObserveExec;
+
 use super::compose::{assemble_sequence, ComposeRefusal};
+use super::emit_plan::{EmitPlan, EmitPlanBuilder, EmitPlanError, EmittedArtifact, MapMode};
 use super::fragment::{
     ArtifactContent, ArtifactProvenance, ArtifactRelation, ArtifactRelationKind, CompileArtifact,
     DeclaredImport, DeclaredImportKind, Fragment, FragmentDialect, FragmentRefusal,
-    FrameworkDomain, PlacementSlot, SfcExportPlacement, SyntacticContract, ValidatedFragment,
+    FrameworkDomain, GrammarProducer, GrammarWitness, PlacementSlot, SfcExportPlacement,
+    SyntacticContract, ValidatedFragment,
 };
 use super::map_compose::to_source_map;
 use super::map_input::{
@@ -43,7 +47,14 @@ use super::svelte_module::{generated_line_starts, next_char_end, utf16_offset_to
 use crate::code_transform::CodeTransform;
 use crate::compile::format_import_specifier;
 use crate::compile_request::{ProductKind, RuntimeHmrStrategy};
+use crate::emission::{
+    EmissionBuilder, EmissionFragment, FragmentSlot, Piece, PieceText, Provenance,
+};
+use crate::framework::vue::target::VueHelperSet;
 use crate::framework_common::{RuntimeCompileOutput, TemplateRenderExport};
+use crate::work_ledger::CompilerWorkLedger;
+
+pub use crate::script::SfcSlots;
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
 
@@ -59,6 +70,82 @@ const SFC_MAIN_BINDING: &str = "_sfc_main";
 /// terminal statement removed once the assembled module re-exports the
 /// composed result under its own name.
 const EXPORT_STATEMENT_TEXT: &str = "export default __sfc__;\n";
+/// The composed module's terminal export.
+const MAIN_EXPORT: &str = "export default _sfc_main";
+
+/// The component object of a module without a script.
+fn script_scaffold(scope_id: &str) -> String {
+    let mut scaffold = String::from("const _sfc_main = {}\n");
+    if !scope_id.is_empty() {
+        scaffold.push_str("_sfc_main.__scopeId = \"");
+        scaffold.push_str(scope_id);
+        scaffold.push_str("\"\n");
+    }
+    scaffold
+}
+
+/// The import lines for the render function's runtime helpers, ahead of it,
+/// and the imports they declare.
+fn template_prelude<R: AsRef<str>, S: AsRef<str>>(
+    imports: &[R],
+    ssr_imports: &[S],
+    runtime: &str,
+) -> (String, Vec<DeclaredImport>) {
+    let imports: Vec<&str> = imports.iter().map(AsRef::as_ref).collect();
+    let ssr_imports: Vec<&str> = ssr_imports.iter().map(AsRef::as_ref).collect();
+    let mut prelude = String::new();
+    let mut declared: Vec<DeclaredImport> = Vec::new();
+    // SSR helpers are imported from "vue/server-renderer".
+    for (names, specifier) in [(&imports, runtime), (&ssr_imports, "vue/server-renderer")] {
+        if names.is_empty() {
+            continue;
+        }
+        prelude.push_str("import { ");
+        for (i, name) in names.iter().enumerate() {
+            if i > 0 {
+                prelude.push_str(", ");
+            }
+            prelude.push_str(&format_import_specifier(name));
+        }
+        prelude.push_str(" } from \"");
+        prelude.push_str(specifier);
+        prelude.push_str("\"\n");
+        declared.push(DeclaredImport {
+            specifier: specifier.to_string(),
+            kind: DeclaredImportKind::Named(names.iter().map(|name| (*name).to_owned()).collect()),
+        });
+    }
+    prelude.push('\n');
+    (prelude, declared)
+}
+
+/// One import line for the script's runtime helpers, sorted and without
+/// repeats, as the script lowering's own line has always read.
+fn runtime_import_line(names: &[&str], runtime: &str) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let mut sorted = names.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let specifiers: Vec<String> = sorted
+        .iter()
+        .map(|name| format_import_specifier(name))
+        .collect();
+    Some(format!(
+        "import {{ {} }} from \"{runtime}\"
+",
+        specifiers.join(", ")
+    ))
+}
+
+/// The line attaching the render function to the component.
+fn render_export_line(render_export: TemplateRenderExport) -> &'static str {
+    match render_export {
+        TemplateRenderExport::SsrRender => "_sfc_main.ssrRender = ssrRender\n",
+        TemplateRenderExport::Render => "_sfc_main.render = render\n",
+    }
+}
 
 /// Why the `__sfc__` → `_sfc_main` rewrite refused a declared
 /// [`SfcExportPlacement`] fact. Every variant is a producer defect — a
@@ -250,15 +337,12 @@ impl Default for VueMainDecoration {
 }
 
 impl VueMainDecoration {
-    fn prelude(&self, compiled: &RuntimeCompileOutput, custom_bound: usize) -> ExtraFragment {
+    /// `style_count` bounds the style imports: one per published style.
+    fn prelude(&self, style_count: usize, custom_bound: usize) -> ExtraFragment {
         use std::fmt::Write;
         let mut prelude = String::new();
         let mut imports: Vec<DeclaredImport> = Vec::new();
-        for id in self
-            .style_specifiers
-            .iter()
-            .take(compiled.qualified_styles.len())
-        {
+        for id in self.style_specifiers.iter().take(style_count) {
             let _ = writeln!(prelude, "import \"{id}\"");
             imports.push(DeclaredImport {
                 specifier: id.clone(),
@@ -600,8 +684,6 @@ pub(crate) struct ComposedFragments {
 pub(crate) fn compose_fragments(
     request: VueMainModuleRequest<'_>,
 ) -> Result<ComposedFragments, VueMainCompositionFailure> {
-    use std::fmt::Write;
-
     let VueMainModuleRequest {
         canonical_id,
         compiled,
@@ -618,7 +700,7 @@ pub(crate) fn compose_fragments(
     // Descriptor-bound custom import/invocation count: the bundle's
     // custom-block authority is its descriptor set.
     let custom_bound = compiled.custom_block_descriptors().len();
-    let prelude_extra = vec![decoration.prelude(compiled, custom_bound)];
+    let prelude_extra = vec![decoration.prelude(compiled.qualified_styles.len(), custom_bound)];
     let trailer_extra = vec![decoration.trailer(custom_bound, canonical_id, runtime, ssr)];
 
     let rewritten_script = compiled
@@ -653,7 +735,6 @@ pub(crate) fn compose_fragments(
     // ── script (including its imports) — precedes the template's runtime
     // helper imports, official `@vitejs/plugin-vue` / `@vue/compiler-sfc`
     // order. ESM hoists imports either way; the order is conformance. ────
-    let mut script_scaffold = String::new();
     let (script_code, script_source_map, script_imports): (
         String,
         Option<String>,
@@ -683,17 +764,7 @@ pub(crate) fn compose_fragments(
                 script_imports,
             )
         }
-        None => {
-            script_scaffold.push_str("const _sfc_main = {}\n");
-            if !compiled.scope_id.is_empty() {
-                let _ = writeln!(
-                    script_scaffold,
-                    "_sfc_main.__scopeId = \"{}\"",
-                    compiled.scope_id
-                );
-            }
-            (script_scaffold.clone(), None, Vec::new())
-        }
+        None => (script_scaffold(&compiled.scope_id), None, Vec::new()),
     };
     let script_ends_with_newline = script_code.ends_with('\n');
     mint_and_validate(
@@ -726,38 +797,8 @@ pub(crate) fn compose_fragments(
 
     // ── template ─────────────────────────────────────────────────────
     if let Some(template) = &compiled.template {
-        let mut template_prelude = String::new();
-        let mut template_prelude_imports: Vec<DeclaredImport> = Vec::new();
-        if !template.imports.is_empty() {
-            let _ = write!(template_prelude, "import {{ ");
-            for (i, name) in template.imports.iter().enumerate() {
-                if i > 0 {
-                    template_prelude.push_str(", ");
-                }
-                template_prelude.push_str(&format_import_specifier(name));
-            }
-            let _ = writeln!(template_prelude, " }} from \"{}\"", runtime);
-            template_prelude_imports.push(DeclaredImport {
-                specifier: runtime.to_string(),
-                kind: DeclaredImportKind::Named(template.imports.clone()),
-            });
-        }
-        // SSR helpers are imported from "vue/server-renderer"
-        if !template.ssr_imports.is_empty() {
-            let _ = write!(template_prelude, "import {{ ");
-            for (i, name) in template.ssr_imports.iter().enumerate() {
-                if i > 0 {
-                    template_prelude.push_str(", ");
-                }
-                template_prelude.push_str(&format_import_specifier(name));
-            }
-            let _ = writeln!(template_prelude, " }} from \"vue/server-renderer\"");
-            template_prelude_imports.push(DeclaredImport {
-                specifier: "vue/server-renderer".to_string(),
-                kind: DeclaredImportKind::Named(template.ssr_imports.clone()),
-            });
-        }
-        template_prelude.push('\n');
+        let (template_prelude, template_prelude_imports) =
+            template_prelude(&template.imports, &template.ssr_imports, runtime);
         mint_and_validate(
             &mut fragments,
             canonical_id,
@@ -787,14 +828,7 @@ pub(crate) fn compose_fragments(
         if !template_ends_with_newline {
             post_template.push('\n');
         }
-        match template.render_export {
-            TemplateRenderExport::SsrRender => {
-                post_template.push_str("_sfc_main.ssrRender = ssrRender\n");
-            }
-            TemplateRenderExport::Render => {
-                post_template.push_str("_sfc_main.render = render\n");
-            }
-        }
+        post_template.push_str(render_export_line(template.render_export));
         mint_and_validate(
             &mut fragments,
             canonical_id,
@@ -816,7 +850,7 @@ pub(crate) fn compose_fragments(
         trailer.push_str(&extra.code);
         trailer_imports.extend(extra.imports.iter().cloned());
     }
-    trailer.push_str("export default _sfc_main");
+    trailer.push_str(MAIN_EXPORT);
     mint_and_validate(
         &mut fragments,
         canonical_id,
@@ -873,6 +907,7 @@ pub fn compose_main_module(
         requires_runtime_source_map: want_maps,
     });
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: planned_kind,
         fragments: fragment_refs,
         code: composed.code,
@@ -882,6 +917,371 @@ pub fn compose_main_module(
         runtime_source_map: want_maps.then_some(composed.source_map),
     };
     Ok(publish(&plan, vec![contribution])?)
+}
+
+/// The script lowering's module, frozen with its declared `__sfc__`
+/// positions as slots ([`SfcSlots::of`]).
+pub struct VueScriptFragment<'s> {
+    pub fragment: EmissionFragment<'s>,
+    pub slots: SfcSlots,
+    /// Runtime helpers the script calls; the composer writes their import
+    /// line.
+    pub helpers: &'s [&'static str],
+    /// Script lowering's witness for `fragment`, when it wrote all of it.
+    pub witness: Option<GrammarWitness>,
+}
+
+/// What a render target returns: the module-level declarations its render
+/// function needs, the render function (or, inline, the render closure's
+/// return statement), and the helpers both import.
+pub struct VueRenderPlans<'s> {
+    pub preamble: Option<EmitPlan<'s>>,
+    pub render: EmitPlan<'s>,
+    pub helpers: &'s VueHelperSet,
+    pub render_export: TemplateRenderExport,
+}
+
+/// Everything [`compose_main_fragments`] needs: the producers' frozen
+/// fragments and plans, the request axes and host-owned identifiers. No
+/// text and no map crosses between producers.
+pub struct VueMainFragmentsRequest<'s> {
+    pub canonical_id: &'s str,
+    pub dialect: FragmentDialect,
+    /// `RuntimeClient` or `RuntimeServer`.
+    pub planned_kind: ProductKind,
+    /// The runtime module specifier every emitted import resolves against.
+    pub runtime: &'s str,
+    /// Must be the mode every fragment and plan was made in.
+    pub mode: MapMode,
+    /// The render goes inside `setup()`, into the script's setup-return
+    /// slot, instead of after the script.
+    pub inline: bool,
+    /// Published styles, in block order; each gets one side-effect import.
+    pub style_count: usize,
+    /// Custom blocks with a descriptor; each gets one import and one call.
+    pub custom_block_count: usize,
+    /// Written onto the component object of a module without a script.
+    pub scope_id: &'s str,
+    pub script: Option<VueScriptFragment<'s>>,
+    pub render: Option<VueRenderPlans<'s>>,
+    pub decoration: VueMainDecoration,
+}
+
+/// The fragment-taking form of [`compose_main_module`]: one plan, written
+/// once into the text and its decoded map. In order: the decoration's
+/// prelude, the script's helper import line, the script fragment, the
+/// render's helper import lines, the render preamble, the render function
+/// and its attachment line, the trailer and the export. Inline, the render
+/// fills the script's setup-return slot instead, its preamble follows the
+/// import lines, and no attachment line is written. Each binding slot is
+/// filled with `_sfc_main`, standing for what the declared binding stood
+/// for, and the export-statement slot with nothing. No rename pass, no map
+/// chain and no JSON map between producers; the bytes are those
+/// [`compose_main_module`] composes from the same producers.
+///
+/// The module stays witnessed where its parts are: the decoration writes
+/// its own text and fills, and the script and render keep the plan
+/// witnessed when their producers witnessed them.
+///
+/// # Errors
+///
+/// [`EmitPlanError`]: a fragment or plan in another map mode, an inline
+/// request whose script declares no setup-return slot or that has no
+/// render, a setup-return slot outside an inline request, an inline render
+/// that is not one fragment, or an output past `u32::MAX` bytes.
+pub fn compose_main_fragments<M: ObserveExec>(
+    request: VueMainFragmentsRequest<'_>,
+    ledger: &mut CompilerWorkLedger<M>,
+) -> Result<EmittedArtifact, EmitPlanError> {
+    let VueMainFragmentsRequest {
+        canonical_id,
+        dialect,
+        planned_kind,
+        runtime,
+        mode,
+        inline,
+        style_count,
+        custom_block_count,
+        scope_id,
+        script,
+        render,
+        decoration,
+    } = request;
+    let ssr = planned_kind == ProductKind::RuntimeServer;
+    let own = decoration.witness(dialect);
+    let mut plan = EmitPlanBuilder::witnessed(mode, own);
+    plan.push_owned(decoration.prelude(style_count, custom_block_count).code);
+
+    let has_hole = script
+        .as_ref()
+        .is_some_and(|script| script.slots.setup_return.is_some());
+    if has_hole != inline || (inline && render.is_none()) {
+        return Err(EmitPlanError::UnknownSlot);
+    }
+
+    // Inline, the render is split: its preamble goes after the import
+    // lines, its closure into the script.
+    let (render_preamble, inline_render, separate_render) = match render {
+        Some(render) if inline => (render.preamble, Some((render.render, render.helpers)), None),
+        Some(render) => (
+            None,
+            None,
+            Some((
+                render.preamble,
+                render.render,
+                render.helpers,
+                render.render_export,
+            )),
+        ),
+        None => (None, None, None),
+    };
+
+    match script {
+        Some(script) => {
+            place_script_imports(
+                &mut plan,
+                script.helpers,
+                inline_render.as_ref().map(|(_, helpers)| *helpers),
+                render_preamble,
+                runtime,
+            )?;
+            place_script(&mut plan, script, inline_render, own, true)?;
+        }
+        None => plan.push_owned(script_scaffold(scope_id)),
+    }
+
+    if let Some((preamble, render, helpers, render_export)) = separate_render {
+        plan.push_owned(template_prelude(&helpers.runtime, &helpers.server, runtime).0);
+        if let Some(preamble) = preamble {
+            let slot = plan.reserve_slot(SyntacticContract::CompleteModule);
+            plan.fill_plan(slot, preamble, SyntacticContract::CompleteModule)?;
+        }
+        let last = render.last_byte();
+        let slot = plan.reserve_slot(SyntacticContract::CompleteModule);
+        plan.fill_plan(slot, render, SyntacticContract::CompleteModule)?;
+        if last != Some(b'\n') {
+            plan.push_unmapped("\n");
+        }
+        plan.push_unmapped(render_export_line(render_export));
+    }
+
+    plan.push_owned(
+        decoration
+            .trailer(custom_block_count, canonical_id, runtime, ssr)
+            .code,
+    );
+    plan.push_unmapped(MAIN_EXPORT);
+    plan.finish()?.write(ledger)
+}
+
+/// The script-block comparison boundary uses the same placement as a main
+/// module while retaining the producer's component binding and export.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn compose_inline_script_fragments<'s, M: ObserveExec>(
+    script: VueScriptFragment<'s>,
+    render: VueRenderPlans<'s>,
+    runtime: &str,
+    ledger: &mut CompilerWorkLedger<M>,
+) -> Result<crate::assembly::emit_plan::EmittedWithMarkers, EmitPlanError> {
+    if script.slots.setup_return.is_none() {
+        return Err(EmitPlanError::UnknownSlot);
+    }
+    let mut plan = EmitPlanBuilder::new(script.fragment.mode());
+    place_script_imports(
+        &mut plan,
+        script.helpers,
+        Some(render.helpers),
+        render.preamble,
+        runtime,
+    )?;
+    let own = VueMainDecoration::default().witness(FragmentDialect::JavaScript);
+    place_script(
+        &mut plan,
+        script,
+        Some((render.render, render.helpers)),
+        own,
+        false,
+    )?;
+    plan.finish()?.write_marked(ledger)
+}
+
+fn place_script_imports<'s>(
+    plan: &mut EmitPlanBuilder<'s>,
+    script_helpers: &[&str],
+    render_helpers: Option<&VueHelperSet>,
+    preamble: Option<EmitPlan<'s>>,
+    runtime: &str,
+) -> Result<(), EmitPlanError> {
+    match render_helpers {
+        Some(helpers) if !script_helpers.is_empty() && !helpers.runtime.is_empty() => {
+            if let Some(line) = runtime_import_line(script_helpers, runtime) {
+                plan.push_owned(line);
+            }
+            let render_only: Vec<&str> = helpers
+                .runtime
+                .iter()
+                .copied()
+                .filter(|helper| !script_helpers.contains(helper))
+                .collect();
+            if let Some(line) = runtime_import_line(&render_only, runtime) {
+                plan.push_owned(line);
+            }
+        }
+        Some(helpers) => {
+            let names: Vec<&str> = script_helpers
+                .iter()
+                .chain(helpers.runtime.iter())
+                .copied()
+                .collect();
+            if let Some(line) = runtime_import_line(&names, runtime) {
+                plan.push_owned(line);
+            }
+        }
+        None => {
+            if let Some(line) = runtime_import_line(script_helpers, runtime) {
+                plan.push_owned(line);
+            }
+        }
+    }
+    if let Some(preamble) = preamble {
+        let slot = plan.reserve_slot(SyntacticContract::CompleteModule);
+        plan.fill_plan(slot, preamble, SyntacticContract::CompleteModule)?;
+    }
+    Ok(())
+}
+
+/// Place the script fragment and fill its declared slots: each binding
+/// with `_sfc_main`, the export statement with nothing, and the
+/// setup-return slot with the inline render behind a line break. A newline
+/// follows when the filled script does not end with one.
+fn place_script<'s>(
+    plan: &mut EmitPlanBuilder<'s>,
+    script: VueScriptFragment<'s>,
+    inline_render: Option<(EmitPlan<'s>, &VueHelperSet)>,
+    own: GrammarWitness,
+    rename: bool,
+) -> Result<(), EmitPlanError> {
+    let VueScriptFragment {
+        fragment,
+        slots,
+        witness,
+        ..
+    } = script;
+    let SfcSlots {
+        bindings,
+        export_statement,
+        setup_return,
+    } = slots;
+
+    let renamed = bindings
+        .iter()
+        .filter(|_| rename)
+        .map(|binding| binding_fill(&fragment, binding))
+        .collect::<Result<Vec<_>, _>>()?;
+    let removed = unmapped_fragment(fragment.mode(), "")?;
+    let inline_fill = match (setup_return, inline_render) {
+        (Some(slot), Some((render, _))) => {
+            let render_witness = render.grammar();
+            let render = render.into_single_fragment()?;
+            let mut fill = EmissionBuilder::new(fragment.mode());
+            fill.push_borrowed("\n");
+            fill.append_fragment(render)?;
+            Some((slot, fill.finish()?, render_witness))
+        }
+        (None, None) => None,
+        _ => return Err(EmitPlanError::UnknownSlot),
+    };
+
+    let mut fills: Vec<(u32, Option<u8>)> = bindings
+        .iter()
+        .filter(|_| rename)
+        .map(|slot| (slot.piece(), SFC_MAIN_BINDING.as_bytes().last().copied()))
+        .collect();
+    fills.extend(
+        export_statement
+            .as_ref()
+            .filter(|_| rename)
+            .map(|slot| (slot.piece(), None)),
+    );
+    fills.extend(
+        inline_fill
+            .as_ref()
+            .map(|(slot, fill, _)| (slot.piece(), last_byte_once_filled(fill, &[]))),
+    );
+    let ends_with_newline = last_byte_once_filled(&fragment, &fills) == Some(b'\n');
+
+    match witness {
+        Some(witness) => {
+            let slot = plan.reserve_slot(witness.contract());
+            plan.fill_fragment(slot, fragment, witness)?;
+        }
+        None => plan.push_fragment(fragment)?,
+    }
+    for (binding, fill) in bindings.into_iter().zip(renamed) {
+        plan.replace_marked_witnessed(binding, fill, own)?;
+    }
+    if let Some(export) = export_statement.filter(|_| rename) {
+        plan.replace_marked_witnessed(export, removed, own)?;
+    }
+    if let Some((slot, fill, render_witness)) = inline_fill {
+        match render_witness {
+            Some(witness) => plan.replace_marked_witnessed(slot, fill, witness)?,
+            None => plan.replace_marked(slot, fill)?,
+        }
+    }
+    if !ends_with_newline {
+        plan.push_unmapped("\n");
+    }
+    Ok(())
+}
+
+/// `_sfc_main` in a binding slot of `script`: it stands for what the
+/// declared binding stood for, synthetic text or the span a replacement
+/// rewrote.
+fn binding_fill<'s>(
+    script: &EmissionFragment<'s>,
+    slot: &FragmentSlot,
+) -> Result<EmissionFragment<'s>, EmitPlanError> {
+    let provenance = script
+        .pieces()
+        .get(slot.piece() as usize)
+        .map_or(Provenance::Unmapped, |piece| piece.provenance());
+    let mut builder = EmissionBuilder::new(script.mode());
+    if let Some(source) = script.source() {
+        builder = builder.with_source(source.clone());
+    }
+    builder.append_pieces([Piece::new(
+        PieceText::Borrowed(SFC_MAIN_BINDING),
+        provenance,
+    )])?;
+    Ok(builder.finish()?)
+}
+
+/// A fill of generated text with no source.
+fn unmapped_fragment(mode: MapMode, text: &str) -> Result<EmissionFragment<'_>, EmitPlanError> {
+    let mut builder = EmissionBuilder::new(mode);
+    builder.push_borrowed(text);
+    Ok(builder.finish()?)
+}
+
+/// The last byte `fragment` writes once its slots are filled; `fills`
+/// names each filled piece and its fill's last byte (`None` for an empty
+/// fill).
+fn last_byte_once_filled(
+    fragment: &EmissionFragment<'_>,
+    fills: &[(u32, Option<u8>)],
+) -> Option<u8> {
+    fragment
+        .pieces()
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(
+            |(index, piece)| match fills.iter().find(|(filled, _)| *filled == index as u32) {
+                Some((_, last)) => *last,
+                None => fragment.piece_text(piece).as_bytes().last().copied(),
+            },
+        )
 }
 
 /// Sole semantic Vue main-module assembler: map validation, dialect,
@@ -944,6 +1344,7 @@ pub fn assemble_vue_runtime_main(
     });
     let source_map = want_maps.then(|| composed.source_map.clone());
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: planned_kind,
         fragments: fragment_refs,
         code: composed.code.clone(),
@@ -1425,6 +1826,14 @@ fn runtime_map_segments(
     }
     kept
 }
+
+#[cfg(test)]
+#[path = "vue_module_grammar_tests.rs"]
+mod grammar_tests;
+
+#[cfg(test)]
+#[path = "vue_module_fragments_tests.rs"]
+mod fragments_tests;
 
 #[cfg(test)]
 mod tests {

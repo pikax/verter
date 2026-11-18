@@ -201,13 +201,41 @@ pub enum MacroExpansionKind {
 
 /// Macro-wide expansion diagnostics that are not specific to any property.
 /// Stored once per macro instead of duplicated on every field.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MacroExpansionDiagnostics {
     pub macro_kind: MacroExpansionKind,
     pub macro_index: usize,
     pub diagnostics: Vec<crate::analysis::type_expand::ExpansionDiagnostic>,
     pub exactness: crate::analysis::type_expand::ExpansionExactness,
     pub execution_status: crate::analysis::type_expand::ExpansionExecutionStatus,
+}
+
+/// A model update's synthesized tuple refers to its own authored value position.
+pub fn model_update_payload_source(
+    locator: Option<verter_type_expr::locators::MacroPayloadLocator>,
+) -> verter_type_expr::facts::SourcePosition {
+    use verter_type_expr::facts::{
+        ClosedTypeFact, FactOrLocator, SemanticTypeSource, SourcePosition, TupleElementFact,
+        TuplePayloadFact,
+    };
+    locator
+        .map(|locator| {
+            SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(
+                TuplePayloadFact {
+                    readonly: false,
+                    elements: From::from(
+                        vec![TupleElementFact {
+                            label: Some("value".to_string()),
+                            optional: false,
+                            rest: false,
+                            ty: FactOrLocator::MacroPayload(locator),
+                        }]
+                        .into_boxed_slice(),
+                    ),
+                },
+            )))
+        })
+        .unwrap_or_else(SourcePosition::unannotated)
 }
 
 /// Analyzed prop from `defineProps` / Options API `props`.

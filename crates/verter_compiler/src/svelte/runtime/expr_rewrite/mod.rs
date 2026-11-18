@@ -107,7 +107,7 @@ pub(super) fn rewrite_script_statement(
         .min()
         .unwrap_or(span.start);
     let alloc = Allocator::default();
-    let mut transform = CodeTransform::<M>::new_in(source, &alloc);
+    let mut transform = CodeTransform::<M>::new_mapped_in(source, &alloc);
     if render_start > 0 {
         transform.remove(0, render_start);
     }
@@ -583,7 +583,7 @@ fn rewrite_expression_program(
     )?;
 
     let ct_alloc = Allocator::default();
-    let mut ct = CodeTransform::<M>::new_in(&wrapped, &ct_alloc);
+    let mut ct = CodeTransform::<M>::new_mapped_in(&wrapped, &ct_alloc);
     // (1) Strip TypeScript syntax through the dedicated machinery (the §F rule —
     // `as`/`satisfies`/`!`/type assertions/instantiation type args), the SAME path
     // the statement lowering uses. The strip and the signal-read rewrites are

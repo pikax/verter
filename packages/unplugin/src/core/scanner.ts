@@ -1,10 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "path";
-import { getWorkspace } from "./compiler";
-
-function normalizePath(p: string): string {
-  return p.replace(/\\/g, "/");
-}
+import { canonicalizeId } from "@verter/native";
+import type { Workspace } from "@verter/native";
 
 const EXCLUDED_DIRS = new Set(["node_modules"]);
 
@@ -12,27 +9,29 @@ const EXCLUDED_DIRS = new Set(["node_modules"]);
  * Recursively scans a directory for files matching the given filter.
  * Excludes `node_modules` and dot-directories (`.git`, `.vite`, etc.).
  * Returns a Map of forward-slash-normalized absolute paths to file contents.
+ * Reads through `workspace` when one is given, otherwise from disk.
  */
 export async function scanCarrierFiles(
   root: string,
   filter: (filename: string) => boolean,
+  workspace: Workspace | null,
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>();
-  await walkDir(root, filter, result);
+  await walkDir(root, filter, workspace, result);
   return result;
 }
 
 async function walkDir(
   dir: string,
   filter: (filename: string) => boolean,
+  ws: Workspace | null,
   result: Map<string, string>,
 ): Promise<void> {
   let entries;
-  const ws = getWorkspace();
   if (ws) {
     try {
       // Workspace.readDir is async (libuv thread pool).
-      entries = await ws.readDir(normalizePath(dir));
+      entries = await ws.readDir(canonicalizeId(dir));
     } catch {
       return;
     }
@@ -40,7 +39,7 @@ async function walkDir(
     try {
       const dirents = await readdir(dir, { withFileTypes: true });
       entries = dirents.map((entry) => ({
-        path: normalizePath(join(dir, entry.name)),
+        path: canonicalizeId(join(dir, entry.name)),
         isDir: entry.isDirectory(),
       }));
     } catch {
@@ -56,11 +55,11 @@ async function walkDir(
     if (entry.isDir) {
       // Skip node_modules and dot-directories
       if (EXCLUDED_DIRS.has(name) || name.startsWith(".")) continue;
-      subdirPromises.push(walkDir(join(dir, name), filter, result));
+      subdirPromises.push(walkDir(join(dir, name), filter, ws, result));
       continue;
     }
 
-    const absPath = normalizePath(join(dir, name));
+    const absPath = canonicalizeId(join(dir, name));
     if (!filter(absPath)) continue;
 
     try {

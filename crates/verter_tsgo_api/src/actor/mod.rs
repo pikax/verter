@@ -40,7 +40,8 @@ mod tests;
 
 pub use transport::{read_one_frame, DuplexTransport, FrameStream};
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
 use tokio::sync::{mpsc, oneshot};
@@ -48,7 +49,35 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::{TsgoApiError, TsgoApiResult};
 use crate::lane::Lane;
 use crate::proto::frame::{decode_frame, encode_frame, MessageType};
-use crate::snapshot::{OverlaySnapshot, ReadFileResult};
+use crate::snapshot::{norm_path, OverlaySnapshot, ReadFileResult};
+
+/// The host paths the engine was told to read itself (`useOS`), recorded as
+/// its callbacks are answered. They are the files, failed-lookup probes and
+/// directories the engine took from disk, which the overlay does not own.
+/// Shared by the actor, which records, and its handles, which read. The
+/// record lives as long as the connection: the engine keeps what it read for
+/// the session, so the set is everything the session holds from disk.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HostReads(Arc<Mutex<BTreeSet<String>>>);
+
+impl HostReads {
+    fn record(&self, path: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(norm_path(path));
+    }
+
+    /// Every path recorded since the connection opened, sorted.
+    pub(crate) fn paths(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
 
 /// Options controlling a single request.
 #[derive(Debug, Default, Clone)]
@@ -151,6 +180,7 @@ pub struct ClientHandle {
     batch_tx: mpsc::Sender<ActorRequest>,
     control_tx: mpsc::Sender<ActorControl>,
     snapshot: Arc<ArcSwap<OverlaySnapshot>>,
+    host_reads: HostReads,
     #[cfg(test)]
     admission_trace: AdmissionTrace,
 }
@@ -160,6 +190,12 @@ impl ClientHandle {
     /// latest published snapshot lock-free on the next callback.
     pub fn publish_snapshot(&self, snapshot: OverlaySnapshot) {
         self.snapshot.store(Arc::new(snapshot));
+    }
+
+    /// The host paths the engine read itself since the connection opened,
+    /// sorted and slash-normalized.
+    pub(crate) fn host_reads(&self) -> Vec<String> {
+        self.host_reads.paths()
     }
 
     /// Submit a request with the given JSON payload bytes and options. Resolves
@@ -298,6 +334,7 @@ where
     let (batch_tx, batch_rx) = mpsc::channel(queue_depth.max(1));
     let (control_tx, control_rx) = mpsc::channel(4);
     let snapshot = Arc::new(ArcSwap::from_pointee(snapshot));
+    let host_reads = HostReads::default();
 
     let actor = Actor {
         transport,
@@ -305,6 +342,7 @@ where
         batch_rx,
         control_rx,
         snapshot: Arc::clone(&snapshot),
+        host_reads: host_reads.clone(),
     };
     tokio::spawn(actor.run());
 
@@ -313,6 +351,7 @@ where
         batch_tx,
         control_tx,
         snapshot,
+        host_reads,
         #[cfg(test)]
         admission_trace: AdmissionTrace::default(),
     }
@@ -396,6 +435,7 @@ struct Actor<T: DuplexTransport> {
     batch_rx: mpsc::Receiver<ActorRequest>,
     control_rx: mpsc::Receiver<ActorControl>,
     snapshot: Arc<ArcSwap<OverlaySnapshot>>,
+    host_reads: HostReads,
 }
 
 impl<T: DuplexTransport> Actor<T> {
@@ -614,7 +654,7 @@ impl<T: DuplexTransport> Actor<T> {
     /// in `fsCallbacks.js:47-98`.
     fn service_callback(&self, name: &str, arg_payload: &[u8]) -> Vec<u8> {
         let snapshot = self.snapshot.load();
-        match service_fs_callback(&snapshot, name, arg_payload) {
+        match service_fs_callback(&snapshot, &self.host_reads, name, arg_payload) {
             Ok(result_json) => encode_frame(
                 MessageType::CallResponse,
                 name.as_bytes(),
@@ -637,9 +677,12 @@ impl<T: DuplexTransport> Actor<T> {
 /// and `{"kind":"useOS"}` for a path the overlay does not know — the engine
 /// then answers from the host filesystem.
 ///
+/// Every path answered `useOS` is recorded in `reads`.
+///
 /// Extracted as a free function so it is unit-testable without an actor.
 pub(crate) fn service_fs_callback(
     snapshot: &OverlaySnapshot,
+    reads: &HostReads,
     name: &str,
     arg_payload: &[u8],
 ) -> Result<String, String> {
@@ -665,6 +708,9 @@ pub(crate) fn service_fs_callback(
         }
         other => return Err(format!("unknown callback `{other}`")),
     };
+    if matches!(result, CallbackResult::UseOs) {
+        reads.record(&path);
+    }
     Ok(result.encode())
 }
 

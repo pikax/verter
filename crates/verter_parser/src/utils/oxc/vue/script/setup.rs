@@ -27,6 +27,7 @@ use super::usage::{
     SyncContextUsage, TemplateUtilUsage, UsageCollector, VueApiCategory, VueApiKind, WatcherUsage,
 };
 use crate::common::Span;
+use crate::utils::oxc::script::export_parts::NamedExportParts;
 use verter_type_expr::facts::TypeDependencyPathFact;
 use verter_type_expr_oxc::collect_type_dependency_paths;
 
@@ -302,6 +303,26 @@ pub fn process_setup_statement<'a>(
                     }));
                 }
                 _ => {}
+            }
+        }
+        // `export type { A, B } from './x'` and `export type { A }` carry no
+        // declaration and no runtime value. Vue hoists these to module scope
+        // (`exportKind === 'type'`) exactly like an exported type alias, so
+        // they are classified as type-only exports to move out of setup.
+        // A value-kind specifier export is not a type and stays untouched.
+        Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => {
+            if let Some(parts) = NamedExportParts::of_statement(stmt) {
+                if parts.export_kind.is_type() {
+                    let name = match parts.specifiers {
+                        [only] => Some(only.exported.name().as_str()),
+                        _ => None,
+                    };
+                    items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
+                        span: Span::new(parts.span.start, parts.span.end),
+                        name,
+                        kind: TypeDeclarationKind::TypeAlias,
+                    }));
+                }
             }
         }
         Statement::ExportAllDeclaration(_) => {}
@@ -1497,18 +1518,24 @@ pub fn check_expression_for_usage<'a>(
     ctx: &ScriptParseContext<'a>,
     usage_ctx: &mut UsageCollector<'a>,
     current_binding_span: Option<Span>,
+    aliases: &super::bindings::VueImportAliases<'_>,
 ) {
     match expr {
         // Track await expressions for before/after context
         Expression::AwaitExpression(await_expr) => {
             usage_ctx.record_await(Span::new(await_expr.span.start, await_expr.span.end));
             // Also check the argument for Vue API calls
-            check_expression_for_usage(&await_expr.argument, ctx, usage_ctx, None);
+            check_expression_for_usage(&await_expr.argument, ctx, usage_ctx, None, aliases);
         }
         Expression::CallExpression(call) => {
             // Check if callee is a Vue API function
             if let Expression::Identifier(id) = &call.callee {
-                if let Some(api_kind) = detect_vue_api_call(id.name.as_bytes()) {
+                if let Some(api_kind) = aliases.api_kind(id.name.as_str()).or_else(|| {
+                    // Existing non-template utility observations also support
+                    // implicit APIs. Template ref keys require import evidence.
+                    detect_vue_api_call(id.name.as_bytes())
+                        .filter(|kind| *kind != VueApiKind::UseTemplateRef)
+                }) {
                     collect_api_usage(call, api_kind, ctx, usage_ctx, current_binding_span);
                 }
             }
@@ -1516,45 +1543,51 @@ pub fn check_expression_for_usage<'a>(
             // Recurse into arguments (may contain nested Vue API calls)
             for arg in &call.arguments {
                 if let Some(expr) = arg.as_expression() {
-                    check_expression_for_usage(expr, ctx, usage_ctx, None);
+                    check_expression_for_usage(expr, ctx, usage_ctx, None, aliases);
                 }
             }
         }
         Expression::BinaryExpression(bin) => {
-            check_expression_for_usage(&bin.left, ctx, usage_ctx, None);
-            check_expression_for_usage(&bin.right, ctx, usage_ctx, None);
+            check_expression_for_usage(&bin.left, ctx, usage_ctx, None, aliases);
+            check_expression_for_usage(&bin.right, ctx, usage_ctx, None, aliases);
         }
         Expression::ConditionalExpression(cond) => {
-            check_expression_for_usage(&cond.test, ctx, usage_ctx, None);
-            check_expression_for_usage(&cond.consequent, ctx, usage_ctx, None);
-            check_expression_for_usage(&cond.alternate, ctx, usage_ctx, None);
+            check_expression_for_usage(&cond.test, ctx, usage_ctx, None, aliases);
+            check_expression_for_usage(&cond.consequent, ctx, usage_ctx, None, aliases);
+            check_expression_for_usage(&cond.alternate, ctx, usage_ctx, None, aliases);
         }
         Expression::AssignmentExpression(assign) => {
-            check_expression_for_usage(&assign.right, ctx, usage_ctx, None);
+            check_expression_for_usage(&assign.right, ctx, usage_ctx, None, aliases);
         }
         Expression::ParenthesizedExpression(paren) => {
-            check_expression_for_usage(&paren.expression, ctx, usage_ctx, current_binding_span);
+            check_expression_for_usage(
+                &paren.expression,
+                ctx,
+                usage_ctx,
+                current_binding_span,
+                aliases,
+            );
         }
         Expression::SequenceExpression(seq) => {
             for expr in &seq.expressions {
-                check_expression_for_usage(expr, ctx, usage_ctx, None);
+                check_expression_for_usage(expr, ctx, usage_ctx, None, aliases);
             }
         }
         Expression::LogicalExpression(logical) => {
-            check_expression_for_usage(&logical.left, ctx, usage_ctx, None);
-            check_expression_for_usage(&logical.right, ctx, usage_ctx, None);
+            check_expression_for_usage(&logical.left, ctx, usage_ctx, None, aliases);
+            check_expression_for_usage(&logical.right, ctx, usage_ctx, None, aliases);
         }
         Expression::ArrayExpression(arr) => {
             for elem in &arr.elements {
                 if let Some(expr) = elem.as_expression() {
-                    check_expression_for_usage(expr, ctx, usage_ctx, None);
+                    check_expression_for_usage(expr, ctx, usage_ctx, None, aliases);
                 }
             }
         }
         Expression::ObjectExpression(obj) => {
             for prop in &obj.properties {
                 if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                    check_expression_for_usage(&p.value, ctx, usage_ctx, None);
+                    check_expression_for_usage(&p.value, ctx, usage_ctx, None, aliases);
                 }
             }
         }
@@ -1588,7 +1621,8 @@ fn collect_api_usage<'a>(
             collect_watcher_usage(call, kind, ctx, usage_ctx, span);
         }
         VueApiCategory::TemplateUtils => {
-            collect_template_util_usage(call, kind, ctx, usage_ctx, binding_span, span);
+            usage_ctx
+                .record_template_util(collect_template_util_usage(call, kind, ctx, binding_span).0);
         }
         VueApiCategory::InstanceAccess => {
             collect_instance_access_usage(ctx, usage_ctx, binding_span, span);
@@ -1790,23 +1824,22 @@ fn collect_watcher_usage<'a>(
     });
 }
 
-/// Collect template utility usage (useSlots, useAttrs, useTemplateRef)
-fn collect_template_util_usage<'a>(
+/// Extract usage spans and the decoded literal key from an already resolved
+/// template utility call. Expression spans use the caller's AST coordinates;
+/// unadjusted TypeScript spans receive `ctx.content_offset`.
+pub fn collect_template_util_usage<'a>(
     call: &CallExpression<'a>,
     kind: VueApiKind,
     ctx: &ScriptParseContext<'a>,
-    usage_ctx: &mut UsageCollector<'a>,
     binding_span: Option<Span>,
-    span: Span,
-) {
-    let ref_name_span = if kind == VueApiKind::UseTemplateRef {
-        // useTemplateRef('refName')
+) -> (TemplateUtilUsage, Option<&'a str>) {
+    let ref_name = if kind == VueApiKind::UseTemplateRef {
         call.arguments
             .first()
             .and_then(|a| a.as_expression())
             .and_then(|e| {
                 if let Expression::StringLiteral(s) = e {
-                    Some(Span::new(s.span.start, s.span.end))
+                    Some((Span::new(s.span.start, s.span.end), s.value.as_str()))
                 } else {
                     None
                 }
@@ -1815,9 +1848,9 @@ fn collect_template_util_usage<'a>(
         None
     };
 
-    // Extract type parameter span for useAttrs<T>()
+    // Extract the authored utility type argument.
     // Type annotation spans are NOT adjusted by adjust_program_spans, so we add content_offset
-    let type_arg_span = if kind == VueApiKind::UseAttrs {
+    let type_arg_span = if matches!(kind, VueApiKind::UseAttrs | VueApiKind::UseTemplateRef) {
         call.type_arguments.as_ref().and_then(|tp| {
             tp.params.first().map(|param: &oxc_ast::ast::TSType<'_>| {
                 let s = param.span();
@@ -1828,13 +1861,16 @@ fn collect_template_util_usage<'a>(
         None
     };
 
-    usage_ctx.record_template_util(TemplateUtilUsage {
-        span,
-        kind,
-        binding_span,
-        ref_name_span,
-        type_arg_span,
-    });
+    (
+        TemplateUtilUsage {
+            span: Span::new(call.span.start, call.span.end),
+            kind,
+            binding_span,
+            ref_name_span: ref_name.map(|(span, _)| span),
+            type_arg_span,
+        },
+        ref_name.map(|(_, key)| key),
+    )
 }
 
 /// Collect instance access API usage (getCurrentInstance)

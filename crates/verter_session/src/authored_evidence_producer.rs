@@ -8,22 +8,7 @@
 use std::sync::Arc;
 
 use verter_session_query::analysis::types::{AnalyzedEmitField, AnalyzedPropField};
-use verter_type_expr::locators::AuthoredBodyLocator;
 use verter_type_expr::{AuthoredSourceMint, AuthoredTypeEvidence};
-
-use crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember;
-
-pub(crate) fn from_admitted_member(
-    _admitted: &AdmittedPublishedMember<'_>,
-    locator: &AuthoredBodyLocator,
-    text: &str,
-) -> AuthoredTypeEvidence {
-    // SAFETY: the caller can reach this crate-private adapter only with a
-    // policy-admitted member token and the locator/text row selected for that
-    // same admitted member.
-    let mint = unsafe { AuthoredSourceMint::new_unchecked() };
-    AuthoredTypeEvidence::from_authored_body(&mint, locator, Arc::from(text))
-}
 
 pub(crate) fn from_analyzed_prop(analysis: &AnalyzedPropField) -> Option<AuthoredTypeEvidence> {
     let (locator, text) = analysis

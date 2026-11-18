@@ -94,8 +94,7 @@ pub fn hoist_repeated_ctx_reads<'alloc>(
                 let shift = prefix_len as i64 - first.start as i64;
                 decl_anchors.push(SegmentAnchor {
                     content_offset: (a.content_offset as i64 + shift) as u32,
-                    length: a.length,
-                    source_pos: a.source_pos,
+                    ..*a
                 });
             }
         }
@@ -355,8 +354,7 @@ fn apply_replacements(
             let shift = seg.new_start as i64 - seg.old_start as i64;
             new_anchors.push(SegmentAnchor {
                 content_offset: (a.content_offset as i64 + shift) as u32,
-                length: a.length,
-                source_pos: a.source_pos,
+                ..*a
             });
         }
     }
@@ -480,6 +478,7 @@ mod tests {
             content_offset: 22,
             length: 5,
             source_pos: 100,
+            kind: crate::code_transform::AnchorKind::Exact,
         };
         let anchors = vec![anchor];
         let mut effects = vec![VaporEffect::SetText {

@@ -11,6 +11,9 @@ import { describe, it, expect } from "vitest";
 import { compileStyle } from "@vue/compiler-sfc";
 import {
   VerterHost,
+  canonicalizeId,
+  parseRequestId,
+  hashBlockContent,
   transformVueStyle,
   prepareStyleForPreprocessor,
   analyzeStyle,
@@ -37,7 +40,7 @@ function cssTokens(css: string): string[] {
 }
 
 function vueOracle(source: string, scopeId: string, scoped: boolean): string {
-  expect(VUE_SFC_VERSION).toBe("3.6.0-rc.5");
+  expect(VUE_SFC_VERSION).toBe("3.6.0-rc.15");
   const result = compileStyle({
     source,
     filename: "Oracle.vue",
@@ -1342,7 +1345,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
 
   // Methods that are intentionally not exposed in the public TS types.
   // They exist in the native binary but are internal / feature-gated.
-  const INTERNAL_METHODS = new Set(["computeCrossFileOptimizations", "getMetrics"]);
+  const INTERNAL_METHODS = new Set(["getMetrics"]);
 
   it("every native prototype method should have a TS type declaration", () => {
     const nativeMethods = Object.getOwnPropertyNames(VerterHost.prototype)
@@ -1361,6 +1364,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "applyBlockOverrides",
       "auditWorkspaceOp",
       "close",
+      "computeCrossFileOptimizations",
       "collectResolvableModuleReferenceSpecifiers",
       "compileMany",
       "compileRequest",
@@ -1379,10 +1383,12 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "getLintRuleMetadata",
       "getPublicApi",
       "getVirtualFile",
+      "isCarrierSourcePath",
       "lint",
       "listVirtualFiles",
       "matchCssSelectors",
       "remove",
+      "renderBundlerId",
       "resolve",
       "resolveExports",
       "resolveImport",
@@ -1426,6 +1432,10 @@ describe("VerterHost type declarations in sync with native binary", () => {
     expect(typeof native.prepareStyleForPreprocessor).toBe("function");
     expect(typeof native.analyzeStyle).toBe("function");
     expect(typeof native.VerterHost).toBe("function");
+    expect(typeof native.canonicalizeId).toBe("function");
+    expect(typeof native.parseRequestId).toBe("function");
+    expect(typeof native.hashBlockContent).toBe("function");
+    expect(typeof native.Workspace.prototype.isPackageBacked).toBe("function");
     // The wrapper forwards the binding's capture probe; an omitted
     // forward would leave every capture-aware consumer unable to branch.
     expect(typeof native.captureAvailability).toBe("function");
@@ -1678,6 +1688,46 @@ function mappingAt(mappings: string, line: number, column: number): [number, num
   }
   return covering;
 }
+
+describe("host identity exports", () => {
+  it("canonicalizeId answers the host canonical id", () => {
+    expect(canonicalizeId("C:\\proj\\App.vue?vue&type=script&lang.ts")).toBe("c:/proj/App.vue");
+  });
+
+  it("parseRequestId reads the request grammar without a host", () => {
+    expect(parseRequestId("./Comp.vue?vue&type=style&index=0&scoped&lang.module.css")).toEqual({
+      nodeKind: { kind: "style", index: 0 },
+      marker: "vue",
+      lang: "module.css",
+      scoped: true,
+      rawPath: "./Comp.vue",
+    });
+    expect(parseRequestId("./Comp.vue?vue&verter&type=script")).toEqual({
+      rejected: "both-markers",
+      rawPath: "./Comp.vue",
+    });
+    expect(parseRequestId("./App.vue?vue")).toEqual({
+      rejected: "marker-without-type",
+      rawPath: "./App.vue",
+      marker: "vue",
+    });
+  });
+
+  it("hashBlockContent hashes a string and its UTF-8 bytes alike", () => {
+    const code = '.wave::after { content: "\u{1F30A}"; }';
+    const token = hashBlockContent(code);
+    expect(token).toMatch(/^sha256:/);
+    expect(hashBlockContent(Buffer.from(code))).toBe(token);
+  });
+
+  it("upsert reports the content hash of the registered source", () => {
+    const host = new VerterHost();
+    const first = host.upsert({ inputId: "/src/a.ts", source: "export const a = 1;\n" });
+    const same = host.upsert({ inputId: "/src/b.ts", source: "export const a = 1;\n" });
+    expect(first.contentHash).toMatch(/^[0-9a-f]{32}$/);
+    expect(same.contentHash).toBe(first.contentHash);
+  });
+});
 
 describe("prepareStyleForPreprocessor", () => {
   it("rewrites v-bind() before an external preprocessor would run (SCSS dialect)", () => {

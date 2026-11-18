@@ -882,3 +882,14 @@ fn resolve_name<'a>(
     }
     found.then_some(members)
 }
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct
+    for (PropsProjection, CallerAndSetupPropsContract)
+{
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.props(input.source, input.artifact, input.canonical_id)
+    }
+}

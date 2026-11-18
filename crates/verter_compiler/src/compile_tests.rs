@@ -1,6 +1,42 @@
 use super::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
 use super::*;
 
+#[test]
+fn inline_compilation_preserves_bytes_without_map_capture() {
+    let source = "<script setup>const n = 1</script><template><div>{{ n }}</div></template>";
+    let options = CodegenOptions {
+        inline: Some(true),
+        filename: Some("App.vue".into()),
+        ..Default::default()
+    };
+    let mut codes = Vec::new();
+    for source_map in [true, false] {
+        let allocator = Allocator::default();
+        let result = compile(
+            source,
+            &options,
+            &VerterCompileOptions {
+                source_map,
+                ..Default::default()
+            },
+            &VueMacroSemanticInput::Unavailable,
+            &allocator,
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let script = result.script.expect("the inline script compiles");
+        assert_eq!(script.source_map.is_empty(), !source_map);
+        let parsed = verter_parser::oxc_parse::Parser::new(
+            &allocator,
+            &script.code,
+            oxc_span::SourceType::mjs(),
+        )
+        .parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        codes.push(script.code);
+    }
+    assert_eq!(codes[0], codes[1]);
+}
+
 /// Check if a string contains a `/*digits,digits*/` offset comment pattern.
 fn has_offset_comment(s: &str) -> bool {
     let bytes = s.as_bytes();
@@ -1263,3 +1299,21 @@ use styles::{
     template_only_scoped_style_grid_layout_scope_id_consistency,
 };
 use templates::test_vbind_template_literal_with_html_entities;
+
+/// A source edit the transform refuses is reported as a diagnostic that
+/// names the refusal and points at it; the compile does not unwind.
+#[test]
+fn a_refused_template_edit_is_a_diagnostic_not_a_panic() {
+    use crate::code_transform::CodeTransformError;
+    let refusal = CodeTransformError::SegmentedTargetNotLive {
+        range: crate::common::Span::new(12, 30),
+    };
+    let diagnostic = super::edit_refused_diagnostic(refusal);
+    assert_eq!(diagnostic.code, CompilerErrorCode::XCodegenEditRefused);
+    assert_eq!(
+        diagnostic.severity,
+        crate::diagnostics::DiagnosticSeverity::Error
+    );
+    assert_eq!(diagnostic.span, crate::common::Span::new(12, 12));
+    assert_eq!(diagnostic.message, refusal.to_string());
+}

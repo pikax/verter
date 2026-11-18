@@ -5,9 +5,10 @@ the `compiler-architecture.md` contract, a DAG asset owned by the TAMA controlle
 Do not treat this skill file as a second constitution.
 
 The combined carrier-compiler registry (`CarrierCompilerRegistry`) is
-deleted. The production seam routes through the immutable per-capability
-catalog (`registered_carrier_projection::project_registered_accepted` and
-the `built_in_*_catalog` rows) and host compile routes.
+deleted. The production seam routes through the immutable `CatalogSnapshot`
+and its two registries (`registered_carrier_projection::project_registered_accepted`,
+`CarrierFrontendRegistry`, `CarrierCompilerBackendRegistry`) and host compile
+routes.
 
 ## Sole owner (summary)
 
@@ -81,8 +82,8 @@ Cheap Default local-fact corrections are `SemanticFact` + `SemanticAdmission`,
 issued only by `FrameworkSemanticAuthority` over already-admitted parse. No
 backend-private type environment; no second resolve around TypeInfo.
 
-Session eval-source is one `built_in_semantic_catalog` lookup keyed adapter ×
-artifact epoch × Semantic, then the selected row's eval-source payload. The
+Session eval-source is one `CatalogSnapshot::semantic_for` lookup keyed adapter ×
+artifact epoch, then the selected row's eval-source payload. The
 generic selector has no Vue/Svelte match. Catalog miss is typed refusal
 before parse/lease/publication. The combined `CarrierCompiler::eval_source`
 method is gone.

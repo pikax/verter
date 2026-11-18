@@ -1,6 +1,7 @@
 import { defineNuxtModule } from "@nuxt/kit";
 import verterVitePlugin from "@verter/unplugin/vite";
 import type { VerterPluginOptions } from "@verter/unplugin/vite";
+import { installVerterPlugin } from "./install";
 import { loadNuxtPathAliases, resolveNuxtAlias } from "./aliases";
 
 export type { VerterPluginOptions };
@@ -42,19 +43,19 @@ export default defineNuxtModule<VerterNuxtOptions>({
     // Use vite:configResolved — Nuxt adds vite:vue AFTER vite:extendConfig
     // but BEFORE vite:configResolved (proven in integration tests)
     nuxt.hook("vite:configResolved", (config) => {
-      // Remove Nuxt's built-in vite:vue (and optionally vite:vue-jsx)
-      config.plugins = (config.plugins || []).filter((p) => {
-        if (p && typeof p === "object" && "name" in p) {
-          if (p.name === "vite:vue") return false;
-          if (options.replaceJsx && p.name === "vite:vue-jsx") return false;
-        }
-        return true;
-      });
-
-      // Add Verter plugin with Nuxt alias resolver
+      // Replace Nuxt's built-in vite:vue (and optionally vite:vue-jsx) in place:
+      // the config may be a shallow copy, so the array itself must be mutated.
       const { replaceJsx: _, ...verterOpts } = options;
       verterOpts.resolveAlias = (id: string) => resolveNuxtAlias(id, nuxtAliases, rootDir);
-      config.plugins.push(verterVitePlugin(verterOpts));
+      const plugins = config.plugins;
+      if (!plugins) {
+        throw new Error(
+          "[verter] vite:configResolved received a config without a plugins array; the stock vue plugin cannot be replaced.",
+        );
+      }
+      installVerterPlugin(plugins as unknown[], () => verterVitePlugin(verterOpts), {
+        replaceJsx: !!options.replaceJsx,
+      });
     });
   },
 });

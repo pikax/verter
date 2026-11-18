@@ -1967,13 +1967,15 @@ async fn sync_file(
     // slot the refresh just filled — the same profile, so the same normalized
     // slot — and a warm hit starts no cold run.
     let profile = deps.documents.tsx_profile.read().clone();
-    let _ = tokio::task::block_in_place(|| {
+    let _ = crate::server::block_in_place_guarded(|| {
         deps.documents
             .host()
             .ensure_ide_compiled(canonical_id, &profile)
     });
     tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
-    let ide = tokio::task::block_in_place(|| deps.documents.host().get_ide(canonical_id, &profile));
+    let ide = crate::server::block_in_place_guarded(|| {
+        deps.documents.host().get_ide(canonical_id, &profile)
+    });
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
 
     // TEST SEAM: a one-shot pause, keyed by canonical id, that fires HERE —

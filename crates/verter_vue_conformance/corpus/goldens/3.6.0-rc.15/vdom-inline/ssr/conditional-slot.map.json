@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/ssr/conditional-slot.vue"
+  ],
+  "names": [],
+  "mappings": ";;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACnD,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;wBAId,aAEY;IADM,IAAI;;gBAAG,SAAO;uBAAC,CAAC;uDAAD,GAAC",
+  "sourcesContent": [
+    "<script setup lang=\"ts\">\nimport ChildComp from \"../components/child-comp.vue\"\nconst show = true\n</script>\n\n<template>\n  <ChildComp>\n    <template v-if=\"show\" #actions>x</template>\n  </ChildComp>\n</template>\n"
+  ]
+}

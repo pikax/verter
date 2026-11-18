@@ -164,7 +164,7 @@ fn publication_from_position(
 
 /// One host-resolved prop row: the prop analysis field plus the member
 /// VALUE's session-resolved SOURCE POSITION — the prop-type authority the
-/// extraction publishes (the flat evaluated lanes contribute metadata only).
+/// extraction publishes, including that member's expansion metadata.
 #[derive(Debug, Clone)]
 pub struct ResolvedPropInput {
     /// The prop analysis field.
@@ -178,7 +178,7 @@ pub struct ResolvedPropInput {
 
 /// One host-resolved emit row: the emit analysis field plus the payload's
 /// session-resolved SOURCE POSITION — the emit-payload authority the
-/// extraction publishes (the flat evaluated lanes contribute metadata only).
+/// extraction publishes, including that occurrence's expansion metadata.
 #[derive(Debug, Clone)]
 pub struct ResolvedEmitInput {
     /// Resolver-minted opaque producer/name-arm identity.
@@ -215,8 +215,8 @@ pub struct ResolvedEmitInput {
 pub struct ResolvedExposeInput {
     /// The expose analysis field.
     pub field: AnalyzedExposeField,
-    /// The member value's published source position.
-    pub type_source: SourcePosition,
+    pub authority: ResolvedTypeAuthority,
+    pub authored_evidence: Option<AuthoredTypeEvidence>,
 }
 
 /// One host-resolved script binding's whole-return reactive-wrapper role.
@@ -244,6 +244,8 @@ pub struct ResolvedBindingReactivityInput {
 /// normalized macro surface produced — the extraction's source authority.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedMacroInput {
+    /// Diagnostics of this macro's own surface resolution.
+    pub diagnostics: Vec<MacroExpansionDiagnostics>,
     /// Index of the macro in `ComponentMetaInput.macros`.
     pub macro_index: usize,
     /// Host-resolved props for the macro, each with its member-value source.
@@ -719,6 +721,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             .contains(AnalysisFlags::HAS_OPTIONS_API);
     let (flags, options_member_free) = extract_flags(&input);
     let evaluated_types = input.evaluated_types;
+
     let slot_binding_index = SlotBindingIndex::new(evaluated_types);
 
     let mut props = Vec::new();
@@ -877,7 +880,9 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
         synthesize_model_prop_and_event(
             mac,
             model_prop_rows(resolved_macro.as_ref()),
-            evaluated_types,
+            resolved_macro
+                .as_ref()
+                .map_or(&[], |row| row.emits.as_slice()),
             &mut props,
             &mut events,
         );
@@ -1039,11 +1044,8 @@ fn extract_props_from_macro(
                 let default_value = default_values
                     .get(field.name.as_str())
                     .map(|v| v.to_string());
-                let type_expansion = define_props_property_expansion_metadata(
-                    evaluated,
-                    macro_index,
-                    field.name.as_str(),
-                );
+                let type_expansion = source_row.map(|row| verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(&row.authority))
+                    .or_else(|| define_props_property_expansion_metadata(evaluated, macro_index, field.name.as_str()));
                 let publication = publication_from_position(
                     &field.ty,
                     type_expansion.as_ref(),
@@ -1082,7 +1084,7 @@ fn extract_props_from_macro(
                     //   arms) with `false`.
                     // - Semantic propagation:
                     //   `expand_macro_types_impl_with_expander` and
-                    //   `surface_member_to_expanded_field` thread the
+                    //   the normalized surface producer thread the
                     //   fact through `AnalyzedPropField` →
                     //   `SurfaceMember` → `ExpandedField`.
                     // - Session prepared-surface walker:
@@ -1213,29 +1215,26 @@ fn define_props_property_expansion_metadata(
     macro_index: usize,
     prop_name: &str,
 ) -> Option<verter_session_query::analysis::type_expand::ExpansionMetadata> {
-    let entry = evaluated?
+    let field = evaluated?
         .define_props
         .iter()
-        .find(|entry| entry.macro_index == macro_index)?;
-
-    // Only include diagnostics that are specific to this property.
-    // Macro-wide diagnostics (property_name == None) are collected separately
-    // into `macro_expansion_diagnostics` to avoid duplication across every prop.
-    let diagnostics = entry
+        .find(|entry| entry.macro_index == macro_index)?
         .result
-        .diagnostics
+        .value
+        .properties
         .iter()
-        .filter(|diagnostic| diagnostic.property_name.as_deref() == Some(prop_name))
-        .cloned()
-        .collect();
-
-    Some(
-        verter_session_query::analysis::type_expand::ExpansionMetadata {
-            exactness: entry.result.exactness,
-            execution_status: entry.result.execution_status,
-            diagnostics,
+        .find(|field| field.name == prop_name)?;
+    let authority = ResolvedTypeAuthority::from_source_position(
+        &field.ty,
+        if matches!(field.ty.present(), Some(SemanticTypeSource::Closed(_))) {
+            ResolutionExactness::ExactConcrete
+        } else {
+            ResolutionExactness::ExactSymbolic
         },
-    )
+        ResolutionProvenance::FrameworkSurface,
+        std::sync::Arc::from([]),
+    );
+    Some(verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(&authority))
 }
 
 fn expanded_define_slots_shape(
@@ -1248,9 +1247,7 @@ fn expanded_define_slots_shape(
         .find(|entry| entry.macro_index == macro_index)
 }
 
-/// Resolve prop type via priority chain:
-/// 1. Evaluated type source (preferred)
-/// 2. Raw annotation text (display-only fallback)
+/// Merge producer inputs for one macro without changing their member authority.
 fn merged_resolved_macro_input(
     resolved_macros: &[ResolvedMacroInput],
     macro_index: usize,
@@ -1266,6 +1263,7 @@ fn merged_resolved_macro_input(
     {
         let entry = merged.get_or_insert_with(|| ResolvedMacroInput {
             macro_index,
+            diagnostics: Vec::new(),
             props: Vec::new(),
             emits: Vec::new(),
             slots: Vec::new(),
@@ -1278,6 +1276,9 @@ fn merged_resolved_macro_input(
             models_guarantee: None,
             exposed_guarantee: None,
         });
+        entry
+            .diagnostics
+            .extend(resolved.diagnostics.iter().cloned());
         verter_session_query::analysis::component_meta::MetadataFactGuarantee::absorb_option(
             &mut entry.props_guarantee,
             resolved.props_guarantee.clone(),
@@ -1340,26 +1341,8 @@ fn merged_resolved_macro_input(
     merged
 }
 
-/// Resolve the prop's `TypeExpr` per the priority chain:
-///
-/// 1. Evaluated `TypeExpr` post-`raise_and_reduce` (when present).
-///    The graph-native projection guarantees no operator-leaf residue
-///    at this layer; the evaluated type IS the authoritative resolved
-///    shape.
-/// 2. Raw annotation (when no evaluated entry exists for this field).
-///    Parsed from the source annotation as the symbolic fallback.
-/// 3. `Unknown { raw: "unknown" }` (when neither is present).
-///
-/// `prefer_symbolic_prop_type_expr` enforces the priority on the
-/// evaluated path; the residual "fall back to raw when evaluated is
-/// incomplete-placeholder" branch in
-/// [`should_prefer_symbolic_prop_type_expr`] is defense-in-depth that
-/// fires only when expansion stops mid-shape (incomplete + budget-
-/// exceeded). When dispatch's `raise_and_reduce` substitution parity
-/// closes the substitution gap documented in
-/// `materialize_component_meta_type_expr_until_stable_full`, the
-/// incomplete-placeholder fallback becomes structurally unreachable
-/// and can be removed.
+/// Publish the normalized prop row and its own expansion metadata.
+/// Authored payloads and runtime-constructor bindings retain their publication policy.
 fn resolve_prop_type(
     row: &ResolvedPropInput,
     evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
@@ -1367,12 +1350,11 @@ fn resolve_prop_type(
     TypePublication,
     Option<verter_session_query::analysis::type_expand::ExpansionMetadata>,
 ) {
-    let metadata = evaluated.and_then(|eval| {
-        eval.props
-            .iter()
-            .find(|f| f.name == row.field.name)
-            .map(field_expansion_metadata)
-    });
+    let metadata = Some(
+        verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(
+            &row.authority,
+        ),
+    );
     // An authored `as PropType<T>` / `as () => T` payload is the declared
     // type. It must win over both the runtime-constructor fold (`Array` /
     // `Object` have no primitive fact and would otherwise keep a display-
@@ -1406,7 +1388,7 @@ fn resolve_prop_type(
     }
 
     // The row's own session-resolved source is the residual authority;
-    // the flat evaluated lane contributes ONLY expansion metadata.
+    // metadata comes from that same row.
     let publication = TypePublication::new(
         row.authority.clone(),
         row.authored_evidence.clone(),
@@ -2029,7 +2011,7 @@ fn extract_model_from_macro(
 fn synthesize_model_prop_and_event(
     mac: &AnalyzedMacro,
     prop_fields: &[ResolvedPropInput],
-    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
+    emit_fields: &[ResolvedEmitInput],
     props: &mut Vec<PropAnalysis>,
     events: &mut Vec<EventAnalysis>,
 ) {
@@ -2078,13 +2060,10 @@ fn synthesize_model_prop_and_event(
 
     if let Some(existing_prop) = props.iter_mut().find(|prop| prop.name == name) {
         existing_prop.publication = prop_publication.clone();
-        existing_prop.type_expansion = existing_prop.type_expansion.clone().or_else(|| {
-            evaluated.and_then(|eval| {
-                eval.props
-                    .iter()
-                    .find(|field| field.name == name)
-                    .map(field_expansion_metadata)
-            })
+        existing_prop.type_expansion = source_prop.map(|row| {
+            verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(
+                &row.authority,
+            )
         });
         existing_prop.required = !has_default && !is_optional;
         existing_prop.has_default |= has_default;
@@ -2099,11 +2078,10 @@ fn synthesize_model_prop_and_event(
             name: name.clone(),
             callable_role: verter_type_expr::PropCallableRole::Other,
             publication: prop_publication.clone(),
-            type_expansion: evaluated.and_then(|eval| {
-                eval.props
-                    .iter()
-                    .find(|field| field.name == name)
-                    .map(field_expansion_metadata)
+            type_expansion: source_prop.map(|row| {
+                verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(
+                    &row.authority,
+                )
             }),
             required: !has_default && !is_optional,
             has_default,
@@ -2145,8 +2123,12 @@ fn synthesize_model_prop_and_event(
     }
 
     let event_name = format!("update:{name}");
-    let evaluated_event =
-        evaluated.and_then(|eval| eval.emits.iter().find(|field| field.name == event_name));
+    let source_event = emit_fields.iter().find(|row| row.name == event_name);
+    let event_metadata = source_event.map(|row| {
+        verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(
+            row.payload_publication.authority(),
+        )
+    });
     // Only an UNDEFAULTED optional model's update event can emit
     // `undefined` — once a default exists the model ref always holds a
     // value, so the display payload stays the bare `[value: T]`.
@@ -2158,13 +2140,13 @@ fn synthesize_model_prop_and_event(
         }
     });
     let raw_signature = event_raw_signature(
-        evaluated_event
-            .and_then(|field| field.authored_evidence.as_ref())
-            .map(AuthoredTypeEvidence::text),
         source_payload_type
             .as_deref()
             .map(|raw| format!("[value: {raw}]"))
             .as_deref(),
+        source_event
+            .and_then(|row| row.payload_publication.evidence())
+            .map(AuthoredTypeEvidence::text),
     );
     // The event payload SOURCE derives from the NORMALIZED `defineModel`
     // surface: `update:X` emits the new model value, so a TYPED model
@@ -2173,29 +2155,24 @@ fn synthesize_model_prop_and_event(
     // demand through the one shared dispatch); an untyped `defineModel()` is
     // a PROVEN unannotated position. Never a same-name flat evaluated emit
     // from a sibling macro (the cross-macro shadow the sole-authority
-    // rule removed). The flat lane contributes ONLY expansion metadata.
-    let payload = source_prop
-        .and_then(|row| row.field.payload.clone())
-        .map(|locator| {
-            use verter_type_expr::facts::{
-                ClosedTypeFact, FactOrLocator, TupleElementFact, TuplePayloadFact,
-            };
-            SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(
-                TuplePayloadFact {
-                    readonly: false,
-                    elements: From::from(
-                        vec![TupleElementFact {
-                            label: Some("value".to_string()),
-                            optional: false,
-                            rest: false,
-                            ty: FactOrLocator::MacroPayload(locator),
-                        }]
-                        .into_boxed_slice(),
-                    ),
-                },
-            )))
-        })
-        .unwrap_or_else(SourcePosition::unannotated);
+    // rule removed). The event row supplies its own expansion metadata.
+    let payload = source_event
+        .map(|row| row.payload_publication.source_position())
+        .unwrap_or_else(|| {
+            verter_session_query::analysis::component_meta::model_update_payload_source(
+                source_prop.and_then(|row| row.field.payload.clone()),
+            )
+        });
+    let event_publication = source_event
+        .map(|row| row.payload_publication.clone())
+        .unwrap_or_else(|| {
+            publication_from_position(
+                &payload,
+                event_metadata.as_ref(),
+                None,
+                ResolutionProvenance::FrameworkSurface,
+            )
+        });
 
     if let Some(existing_event) = events.iter_mut().find(|event| event.name == event_name) {
         // A TYPED model's payload is authoritative for its own update event;
@@ -2203,22 +2180,13 @@ fn synthesize_model_prop_and_event(
         // already published with a present source.
         if payload.is_present() || !existing_event.publication.source_position().is_present() {
             existing_event.payload = payload.clone();
-            existing_event.publication = publication_from_position(
-                &payload,
-                evaluated_event.map(field_expansion_metadata).as_ref(),
-                source_prop.and_then(|row| {
-                    authored_type_evidence(
-                        row.field.payload.as_ref(),
-                        source_payload_type.as_deref(),
-                    )
-                }),
-                ResolutionProvenance::FrameworkSurface,
-            );
+            existing_event.publication = event_publication.clone();
         }
-        existing_event.payload_expansion = existing_event
-            .payload_expansion
-            .clone()
-            .or_else(|| evaluated_event.map(field_expansion_metadata));
+        existing_event.payload_expansion = Some(
+            verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(
+                existing_event.publication.authority(),
+            ),
+        );
         if existing_event.raw_signature.is_none() {
             existing_event.raw_signature = raw_signature;
         }
@@ -2226,20 +2194,10 @@ fn synthesize_model_prop_and_event(
         events.push(EventAnalysis {
             name: event_name.clone(),
             payload: payload.clone(),
-            publication: publication_from_position(
-                &payload,
-                evaluated_event.map(field_expansion_metadata).as_ref(),
-                source_prop.and_then(|row| {
-                    authored_type_evidence(
-                        row.field.payload.as_ref(),
-                        source_payload_type.as_deref(),
-                    )
-                }),
-                ResolutionProvenance::FrameworkSurface,
-            ),
+            publication: event_publication,
             return_publication: None,
             return_publication_scope: None,
-            payload_expansion: evaluated_event.map(field_expansion_metadata),
+            payload_expansion: event_metadata,
             raw_signature,
             description: None,
             tags: Vec::new(),
@@ -2279,7 +2237,7 @@ fn type_text_contains_undefined(text: &str) -> bool {
 }
 
 fn extract_exposed_from_macro(
-    macro_index: usize,
+    _macro_index: usize,
     mac: &AnalyzedMacro,
     resolved: Option<&ResolvedMacroInput>,
     bindings: &[AnalyzedBinding],
@@ -2289,8 +2247,7 @@ fn extract_exposed_from_macro(
     for field in &mac.expose_fields {
         // Mixed-form precedence: an authored object-literal exposure keeps
         // its own (binding-derived) source; the NORMALIZED type-argument
-        // surface row only fills what the literal form does not provide (the
-        // flat evaluated lane contributes metadata only).
+        // surface row only fills what the literal form does not provide.
         let resolved_field = resolved.and_then(|resolved| {
             resolved
                 .exposed
@@ -2311,7 +2268,7 @@ fn extract_exposed_from_macro(
         let type_source = field
             .resolved_binding_key()
             .and_then(|key| resolve_exposed_type(key, bindings, evaluated))
-            .or_else(|| resolved_field.map(|candidate| candidate.type_source.clone()))
+            .or_else(|| resolved_field.map(|candidate| candidate.authority.source_position()))
             .unwrap_or_else(SourcePosition::unannotated);
         // Docs pair by name: the object-literal field's own leading JSDoc
         // wins; a `defineExpose<T>({ ... })` member without one inherits the
@@ -2345,8 +2302,7 @@ fn extract_exposed_from_macro(
                     })
                 })
                 .or_else(|| {
-                    exposed_lane_field(evaluated, macro_index, &field.name)
-                        .map(field_expansion_metadata)
+                    resolved_field.map(|row| verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(&row.authority))
                 }),
             description,
             tags,
@@ -2355,12 +2311,11 @@ fn extract_exposed_from_macro(
     // `defineExpose<T>()` surface members with no object-literal counterpart
     // publish from the resolved type-argument surface, in surface order,
     // carrying their span-sliced docs and their NORMALIZED member-value
-    // source ([`ResolvedExposeInput::type_source`] — the exposed-type
+    // source ([`ResolvedExposeInput::authority`] — the exposed-type
     // authority: the graph-native closed / shallow-ref / projected
     // member-path ladder, or the typed failure for a genuine miss). The
     // object-literal loop above already consumed the name-paired entries, so
-    // this appends only the type-argument-only members. The flat evaluated
-    // `exposed` lane contributes ONLY expansion metadata.
+    // this appends only the type-argument-only members with their own metadata.
     let Some(resolved) = resolved else {
         return;
     };
@@ -2374,30 +2329,16 @@ fn extract_exposed_from_macro(
         }
         out.push(ExposedAnalysis {
             name: candidate.field.name.clone(),
-            type_source: candidate.type_source.clone(),
-            type_expansion: exposed_lane_field(evaluated, macro_index, &candidate.field.name)
-                .map(field_expansion_metadata),
+            type_source: candidate.authority.source_position(),
+            type_expansion: Some(
+                verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(
+                    &candidate.authority,
+                ),
+            ),
             description: candidate.field.description.clone(),
             tags: candidate.field.tags.clone(),
         });
     }
-}
-
-/// The projector's per-macro `defineExpose` lane entry for
-/// `(macro_index, name)` — the join key pairing a type-argument-derived
-/// exposure with its projected surface field.
-fn exposed_lane_field<'a>(
-    evaluated: Option<&'a verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
-    macro_index: usize,
-    name: &str,
-) -> Option<&'a verter_session_query::analysis::type_expand::ExpandedField> {
-    evaluated?
-        .exposed
-        .iter()
-        .find(|entry| entry.macro_index == macro_index)?
-        .fields
-        .iter()
-        .find(|field| field.name == name)
 }
 
 fn resolve_exposed_type(

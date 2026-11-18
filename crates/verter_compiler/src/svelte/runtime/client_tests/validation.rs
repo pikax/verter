@@ -8,15 +8,13 @@ fn client_emitter_signature_requires_the_narrow_plan() {
     // insensitive to formatting and cannot pass because a token appeared in a
     // comment or unrelated declaration.
     type NarrowClientEmitter =
-        for<'source, 'plan_ref, 'plan_data, 'html, 'topology, 'options, 'allocator> fn(
+        for<'source, 'plan_ref, 'plan_data, 'html, 'topology, 'options> fn(
             &'source str,
             &'plan_ref ClientModulePlan<'plan_data>,
             &'html StaticTemplatePlan,
             &'topology ClientTopologyPlan,
             ClientEmitOptions<'options>,
-            &'allocator Allocator,
-        )
-            -> Result<
+        ) -> Result<
             ClientModule,
             ClientCompileError,
         >;

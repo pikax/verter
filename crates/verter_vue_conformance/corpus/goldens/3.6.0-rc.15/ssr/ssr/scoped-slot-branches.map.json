@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/ssr/scoped-slot-branches.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;IAMe,IAAI,WAAf,CAGW;;YAFG,GAAG,CAAC,CAAC;;;2CACG,GAAG,CAAC,CAAC;;;;WADb,GAAG,CAAC,CAAC;6BAAjB,aAA2B,oBAAR,GAAC;6BACpB,aAAuC;kDAAnB,GAAG,CAAC,CAAC",
+  "sourcesContent": [
+    "\n  <ChildComp>\n    <template #cell=\"{ row }\">\n      <span v-if=\"row.a\">a</span>\n      <template v-else>{{ row.b }}</template>\n    </template>\n  </ChildComp>\n"
+  ]
+}

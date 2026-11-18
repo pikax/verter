@@ -71,19 +71,20 @@ use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest, FrameworkOption,
     ProductKind, SvelteOption,
 };
-use crate::framework_common::capability::{FrameworkEpochId, ProductExecutionGrant};
-use crate::framework_common::catalog::{CatalogCapability, CatalogRow, ImmutableCapabilityCatalog};
+use crate::framework_common::capability::{FrameworkEpoch, ProductExecutionGrant};
+use crate::framework_common::carrier_registry::CarrierCompilerBackendRegistry;
 use crate::framework_common::generated_chunk::{
     compose_generated_chunk, GeneratedFragment, GeneratedUnit,
 };
-use crate::framework_common::vue_carrier_frontend::VueSfcV3;
-use crate::framework_common::vue_runtime_backend::{
-    vue_runtime_backend_registration, VueRuntimeBackend,
-};
+use crate::framework_common::profile::{carrier_profile, framework_profile};
+use crate::framework_common::registered_carrier_projection::parse_registered_frontend;
+use crate::framework_common::vue_carrier_frontend::{VueCarrierFrontend, VueSfcV3};
+use crate::framework_common::vue_runtime_backend::VueRuntimeBackend;
 use crate::framework_common::{
-    CompileUnsupported, IdeOutput, QualifiedRuntimeStyle, RuntimeBlockContentInput,
-    RuntimeBlockContentInputs, RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic,
-    RuntimeDiagnosticSeverity, RuntimeOutputDescriptor, RuntimeSurfaceRefusal, SourceMapFidelity,
+    CompileUnsupported, FrameworkParseArtifact, IdeOutput, QualifiedRuntimeStyle,
+    RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
+    RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity, RuntimeOutputDescriptor,
+    RuntimeSurfaceRefusal, SourceMapFidelity,
 };
 use crate::parser::types::{sfc_script_dialect, ParsedSfc, SfcScriptDialect};
 use crate::style_planner::{
@@ -91,7 +92,7 @@ use crate::style_planner::{
     transform_vue_v_bind, AuthoredStyleInput, CascadeInput, PreparedStyleIr, StyleRewriteOutcome,
     VerifiedPlainCss,
 };
-use crate::svelte::carrier::{
+use crate::svelte::carrier_bundle::{
     parse_svelte_fragments, parse_svelte_namespace, render_admitted_svelte_ide,
 };
 use crate::svelte::ide::SvelteIdeUnsupportedDiagnostic;
@@ -104,16 +105,14 @@ use crate::svelte::runtime::{
     compile_client, refuse_unproducible_runtime_surface, ClientCompileError, SvelteFragments,
     SvelteNamespace, SvelteRuntimeOptions,
 };
-use crate::svelte::{
-    svelte_runtime_backend_registration, ParsedSvelte, SvelteRuntimeBackend, SvelteSfc5,
-};
+use crate::svelte::{ParsedSvelte, SvelteCarrierFrontend, SvelteRuntimeBackend, SvelteSfc5};
 use oxc_sourcemap::{SourceMap, SourceMapBuilder};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use verter_css_syntax::CssDialect;
 use verter_debug_assert::verter_debug_assert;
-use verter_language::FrameworkAdapterId;
+use verter_language::{ParseOptions, SyntaxReject};
 
 /// Ephemeral, non-identity execution inputs for a Svelte compile — resolved
 /// framework facts threaded alongside a canonical
@@ -758,6 +757,10 @@ pub enum DirectCompileError {
     /// The compile transaction was cancelled before admission; sealed
     /// unpublished output cannot be admitted as a complete result.
     Cancelled,
+    /// The carrier frontend refused the request's parse-affecting options
+    /// before producing a parse (a Vue delimiter pair that cannot be
+    /// tokenized): nothing was parsed, so nothing compiles.
+    SyntaxRejected(SyntaxReject),
     /// A parse or walk-stack lease the compile needed (its own, or the
     /// preparation's it reused) was refused its stack: typed operational
     /// incompleteness, not a verdict on the source. Nothing publishes, since
@@ -804,7 +807,9 @@ struct SingleOwner;
 /// never a silent `clone()`. Enforced structurally by [`SingleOwner`].
 #[derive(Debug)]
 pub struct VuePreparedCarrier {
-    parsed: ParsedSfc,
+    /// The Vue frontend's admitted parse, or its refusal of the request's
+    /// parse-affecting options, reported by every compile from this carrier.
+    parse: Result<Arc<ParsedSfc>, SyntaxReject>,
     source_digest: [u8; 32],
     parse_identity_digest: [u8; 32],
     /// Present only when this carrier was built by
@@ -824,7 +829,8 @@ pub struct VuePreparedCarrier {
 /// Not `Clone`: see [`VuePreparedCarrier`].
 #[derive(Debug)]
 pub struct SveltePreparedCarrier {
-    parsed: ParsedSvelte,
+    /// The Svelte frontend's admitted parse, or its refusal.
+    parse: Result<Arc<ParsedSvelte>, SyntaxReject>,
     source_digest: [u8; 32],
     owned_source: Option<String>,
     /// The stack refusal of a parse the preparation made, which leaves the
@@ -868,6 +874,26 @@ pub enum PreparedCarrier {
 // three carrier types, and run in LIBRARY code (not `#[cfg(test)]`) so a
 // manual impl fails `cargo check -p verter_compiler`, not only `cargo
 // test`.
+#[cfg(test)]
+impl VuePreparedCarrier {
+    /// The retained parse of a carrier whose preparation was admitted.
+    pub(crate) fn parsed(&self) -> &ParsedSfc {
+        self.parse
+            .as_ref()
+            .expect("the prepared parse was admitted")
+    }
+}
+
+#[cfg(test)]
+impl SveltePreparedCarrier {
+    /// The retained parse of a carrier whose preparation was admitted.
+    pub(crate) fn parsed(&self) -> &ParsedSvelte {
+        self.parse
+            .as_ref()
+            .expect("the prepared parse was admitted")
+    }
+}
+
 static_assertions::assert_not_impl_any!(VuePreparedCarrier: Clone, Copy);
 static_assertions::assert_not_impl_any!(SveltePreparedCarrier: Clone, Copy);
 static_assertions::assert_not_impl_any!(PreparedCarrier: Clone, Copy);
@@ -880,7 +906,10 @@ impl PreparedCarrier {
     /// route-overhead lock, not this observability surface.
     pub fn retained_weight(&self) -> usize {
         match self {
-            Self::Vue(carrier) => vue_parsed_retained_bytes(&carrier.parsed)
+            Self::Vue(carrier) => carrier
+                .parse
+                .as_ref()
+                .map_or(0, |parsed| vue_parsed_retained_bytes(parsed))
                 .saturating_add(64)
                 .saturating_add(
                     carrier
@@ -889,7 +918,10 @@ impl PreparedCarrier {
                         .map(String::capacity)
                         .unwrap_or(0),
                 ),
-            Self::Svelte(carrier) => svelte_parsed_retained_bytes(&carrier.parsed)
+            Self::Svelte(carrier) => carrier
+                .parse
+                .as_ref()
+                .map_or(0, |parsed| svelte_parsed_retained_bytes(parsed))
                 .saturating_add(32)
                 .saturating_add(
                     carrier
@@ -1305,7 +1337,7 @@ fn compile_projected_setup(
     .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
     let mut diagnostics = script_result.errors.clone();
     let binding_metadata = script_result.template_binding_metadata.clone();
-    let mut script_bundle = crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
+    let mut script_bundle = crate::framework_common::vue_bundle::vue_result_to_runtime_bundle(
         &input.code,
         &script_parsed,
         script_result,
@@ -1349,7 +1381,7 @@ fn compile_projected_setup(
     )
     .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
     diagnostics.extend(carrier_result.errors.iter().cloned());
-    let (mut bundle, styles) = crate::framework_common::vue_bridge::vue_result_to_runtime_parts(
+    let (mut bundle, styles) = crate::framework_common::vue_bundle::vue_result_to_runtime_parts(
         source,
         &carrier_view,
         carrier_result,
@@ -1468,7 +1500,7 @@ fn compile_carrier_selected_template(
     .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
     let mut diagnostics = result.errors.clone();
     let binding_metadata = result.template_binding_metadata.clone();
-    let (mut bundle, styles) = crate::framework_common::vue_bridge::vue_result_to_runtime_parts(
+    let (mut bundle, styles) = crate::framework_common::vue_bundle::vue_result_to_runtime_parts(
         source,
         &carrier_view,
         result,
@@ -1583,7 +1615,7 @@ fn apply_selected_runtime_template(
     )
     .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
     diagnostics.extend(compiled.errors.iter().cloned());
-    let mut selected = crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
+    let mut selected = crate::framework_common::vue_bundle::vue_result_to_runtime_bundle(
         &input.code,
         &parsed_template,
         compiled,
@@ -2295,6 +2327,7 @@ pub(crate) fn compile_vue_parsed_runtime(
     for (composed, kind, dialect, want_maps) in &composed.legs {
         let fragment_refs: Vec<_> = composed.fragments.iter().collect();
         contributions.push(ArtifactContribution {
+            grammar: None,
             kind: *kind,
             fragments: fragment_refs,
             code: composed.code.clone(),
@@ -2354,56 +2387,96 @@ fn map_direct_runtime_err(err: DirectCompileError) -> VueParsedRuntimeError {
     }
 }
 
-/// Installed Vue/Svelte runtime row stored in the immutable runtime catalog.
-///
-/// The payloads are the SAME registered backend values the typed
-/// [`crate::framework_common::capability::RuntimeCompilerBackend`] rows carry
-/// — the closed set of runtime emitters. Direct, prepared, and batch routes
-/// select their runtime emitter from this catalog; they never construct a
-/// framework runtime product through a route-private emitter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InstalledRuntimeBackend {
-    /// Vue runtime compiler backend.
-    Vue(VueRuntimeBackend),
-    /// Svelte runtime compiler backend.
-    Svelte(SvelteRuntimeBackend),
+/// The Vue runtime backend the compiler-backend registry registers for an
+/// admitted artifact's carrier: one row lookup at the artifact's adapter ×
+/// epoch, then typed access. `None` when the carrier has no compiler
+/// backend, or its backend is not the Vue runtime backend.
+fn registered_audit_runtime(
+    artifact: &FrameworkParseArtifact,
+) -> Option<&'static VueRuntimeBackend> {
+    CarrierCompilerBackendRegistry::built_in()
+        .runtime::<VueRuntimeBackend>(artifact.carrier_profile(), artifact.framework_profile())
 }
 
-/// Frozen Vue + Svelte runtime catalog. Built once from the Vue/Svelte
-/// runtime registration constructors; no insert after.
-#[must_use]
-pub(crate) fn built_in_runtime_catalog(
-) -> &'static ImmutableCapabilityCatalog<(), (), (), InstalledRuntimeBackend, ()> {
-    static CATALOG: OnceLock<ImmutableCapabilityCatalog<(), (), (), InstalledRuntimeBackend, ()>> =
-        OnceLock::new();
-    CATALOG.get_or_init(|| {
-        ImmutableCapabilityCatalog::try_from_rows([
-            CatalogRow::from(
-                vue_runtime_backend_registration().map_runtime(InstalledRuntimeBackend::Vue),
-            ),
-            CatalogRow::from(
-                svelte_runtime_backend_registration().map_runtime(InstalledRuntimeBackend::Svelte),
-            ),
-        ])
-        .expect("built-in Vue and Svelte runtime identities are unique")
-    })
+/// The Vue runtime backend the registry registers for the Vue carrier under
+/// the built-in Vue profile, for the direct routes that compile a parse
+/// they hold rather than a registered artifact.
+fn registered_vue_runtime() -> Option<&'static VueRuntimeBackend> {
+    let profile = framework_profile(&VueSfcV3::MANIFEST).ok()?;
+    CarrierCompilerBackendRegistry::built_in().runtime::<VueRuntimeBackend>(
+        &carrier_profile(&VueRuntimeBackend.carrier_language_id()),
+        &profile,
+    )
 }
 
-/// Catalog lookup for a registered runtime backend by adapter × epoch.
-/// Unknown or mismatched identity returns `None` — no framework fallback.
-#[must_use]
-pub(crate) fn registered_runtime_for(
-    adapter_id: &FrameworkAdapterId,
-    epoch: &FrameworkEpochId,
-) -> Option<&'static InstalledRuntimeBackend> {
-    built_in_runtime_catalog().iter().find_map(|row| {
-        let identity = row.identity();
-        (identity.capability() == CatalogCapability::Runtime
-            && identity.adapter_id() == adapter_id
-            && identity.epoch() == epoch)
-            .then(|| row.runtime())
-            .flatten()
-    })
+/// The audited compile of an artifact a registered publication store
+/// elected, reached only through the runtime backend the registry registers
+/// for the artifact's carrier. `None` when that carrier's backend produces no
+/// audited compile result: the result is the Vue compile result, so only the
+/// Vue runtime backend serves it. The caller's
+/// [`crate::compile_transaction::CompileAttempt`] carries the staged Vue
+/// runtime macro projection.
+pub fn registered_audit_compile(
+    source: &str,
+    artifact: &FrameworkParseArtifact,
+    request: &CompileRequest,
+    execution_inputs: &VueExecutionInputs,
+    attempt: &crate::compile_transaction::CompileAttempt<'_>,
+    allocator: &Allocator,
+) -> Option<Result<crate::compile::VerterCompileResult, CompileUnsupported>> {
+    let backend = registered_audit_runtime(artifact)?;
+    Some(backend.audit_compile(
+        source,
+        artifact,
+        request,
+        execution_inputs,
+        attempt,
+        allocator,
+    ))
+}
+
+/// The Vue backend (Vdom/Vapor) [`registered_audit_compile`] resolves for
+/// this exact `(artifact, request)` pair, through the same registry
+/// selection, so audit records attribute the real resolved backend. `None`
+/// when the selection serves no audited compile.
+pub fn registered_audit_backend(
+    artifact: &FrameworkParseArtifact,
+    request: &CompileRequest,
+) -> Option<Result<crate::compile_request::ResolvedVueBackend, CompileRequestError>> {
+    registered_audit_runtime(artifact)?.audit_backend(artifact, request)
+}
+
+impl VueRuntimeBackend {
+    /// The audited compile of a registered Vue artifact: the compile result
+    /// itself, not a runtime bundle, for the session's compile audit.
+    fn audit_compile(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        request: &CompileRequest,
+        execution_inputs: &VueExecutionInputs,
+        attempt: &crate::compile_transaction::CompileAttempt<'_>,
+        allocator: &Allocator,
+    ) -> Result<crate::compile::VerterCompileResult, CompileUnsupported> {
+        crate::framework_common::vue_bundle::compile_registered_vue_artifact(
+            source,
+            artifact,
+            request,
+            execution_inputs,
+            attempt,
+            allocator,
+        )
+    }
+
+    /// The Vue backend (Vdom/Vapor) [`Self::audit_compile`] resolves for
+    /// this exact `(artifact, request)` pair.
+    fn audit_backend(
+        &self,
+        artifact: &FrameworkParseArtifact,
+        request: &CompileRequest,
+    ) -> Option<Result<crate::compile_request::ResolvedVueBackend, CompileRequestError>> {
+        crate::framework_common::vue_bundle::resolve_vue_backend_for_audit(artifact, request)
+    }
 }
 
 /// Whether every planned artifact is a runtime target — the request shape
@@ -2968,13 +3041,7 @@ impl StandaloneCompiler {
     ) -> Result<DirectCompileOutput, DirectCompileError> {
         refuse_unproducible_plan(request)?;
         let vue = request.vue().expect("dispatch already matched Vue");
-        let parsed = crate::compile::parse_sfc(
-            source,
-            vue.delimiters
-                .as_ref()
-                .map(|(o, c)| (o.as_str(), c.as_str())),
-            Some(vue.is_custom_element.as_slice()),
-        );
+        let parsed = admitted_vue_parse(source, vue).map_err(DirectCompileError::SyntaxRejected)?;
         self.compile_vue_from_parsed(source, &parsed, request, execution_inputs, attempt)
     }
 
@@ -3073,10 +3140,7 @@ impl StandaloneCompiler {
         // co-plans a non-runtime product stays on this route's own composing
         // publication below.
         if plan_is_runtime_only(&plan) {
-            let epoch = FrameworkEpochId::from_type::<VueSfcV3>();
-            let Some(InstalledRuntimeBackend::Vue(backend)) =
-                registered_runtime_for(&VueRuntimeBackend.adapter_id(), &epoch)
-            else {
+            let Some(backend) = registered_vue_runtime() else {
                 return Err(DirectCompileError::UnsupportedProduct(
                     primary_planned_runtime_kind(&plan),
                 ));
@@ -3119,6 +3183,7 @@ impl StandaloneCompiler {
                 ProductKind::IdeCompanion,
             ))?;
             contributions.push(ArtifactContribution {
+                grammar: None,
                 kind: ProductKind::IdeCompanion,
                 fragments: Vec::new(),
                 code: tsx.code,
@@ -3141,6 +3206,7 @@ impl StandaloneCompiler {
                 ProductKind::Declarations,
             ))?;
             contributions.push(ArtifactContribution {
+                grammar: None,
                 kind: ProductKind::Declarations,
                 fragments: Vec::new(),
                 code: tsc.code,
@@ -3172,16 +3238,13 @@ impl StandaloneCompiler {
             // non-publishing leg entry, the SAME shared runtime-leg
             // construction its parsed core drives. This route owns only the
             // co-planned atomic publication around it.
-            let epoch = FrameworkEpochId::from_type::<VueSfcV3>();
-            let Some(InstalledRuntimeBackend::Vue(backend)) =
-                registered_runtime_for(&VueRuntimeBackend.adapter_id(), &epoch)
-            else {
+            let Some(backend) = registered_vue_runtime() else {
                 return Err(DirectCompileError::UnsupportedProduct(
                     primary_planned_runtime_kind(&plan),
                 ));
             };
             let (mut bundle, styles) =
-                crate::framework_common::vue_bridge::vue_result_to_runtime_parts(
+                crate::framework_common::vue_bundle::vue_result_to_runtime_parts(
                     source, parsed, result,
                 );
             // This route selects no block content, so every slot publishes as
@@ -3215,6 +3278,7 @@ impl StandaloneCompiler {
         for (composed, kind, dialect, want_maps) in runtime_legs.iter().flatten() {
             let fragment_refs: Vec<_> = composed.fragments.iter().collect();
             contributions.push(ArtifactContribution {
+                grammar: None,
                 kind: *kind,
                 fragments: fragment_refs,
                 code: composed.code.clone(),
@@ -3253,7 +3317,7 @@ impl StandaloneCompiler {
         execution_inputs: &SvelteExecutionInputs,
     ) -> Result<DirectCompileOutput, DirectCompileError> {
         refuse_unproducible_plan(request)?;
-        let parsed = crate::svelte::parse_svelte(source);
+        let parsed = admitted_svelte_parse(source).map_err(DirectCompileError::SyntaxRejected)?;
         self.delegate_svelte_runtime(source, &parsed, request, execution_inputs)
     }
 
@@ -3267,9 +3331,14 @@ impl StandaloneCompiler {
         request: &CompileRequest,
         execution_inputs: &SvelteExecutionInputs,
     ) -> Result<DirectCompileOutput, DirectCompileError> {
-        let epoch = FrameworkEpochId::from_type::<SvelteSfc5>();
-        let Some(InstalledRuntimeBackend::Svelte(backend)) =
-            registered_runtime_for(&SvelteRuntimeBackend.adapter_id(), &epoch)
+        let Some(backend) = framework_profile(&SvelteSfc5::MANIFEST)
+            .ok()
+            .and_then(|profile| {
+                CarrierCompilerBackendRegistry::built_in().runtime::<SvelteRuntimeBackend>(
+                    &carrier_profile(&SvelteRuntimeBackend.carrier_language_id()),
+                    &profile,
+                )
+            })
         else {
             return Err(DirectCompileError::UnsupportedProduct(
                 primary_planned_runtime_kind(&ProductPlan::from_request(request)),
@@ -3379,6 +3448,7 @@ impl StandaloneCompiler {
         let mut contributions = Vec::new();
         for (validated, p) in validated_fragments.iter().zip(pending) {
             contributions.push(ArtifactContribution {
+                grammar: None,
                 kind: p.kind,
                 fragments: vec![validated],
                 code: p.code,
@@ -3415,11 +3485,12 @@ impl StandaloneCompiler {
     /// [`Self::compile_batch`] uses this internally to share one parse
     /// across items with an identical group key.
     ///
-    /// Infallible: both [`crate::compile::parse_sfc`] and
-    /// [`crate::svelte::parse_svelte`] are infallible parsers — a malformed
-    /// source still parses, with its own diagnostics carried on the
-    /// returned [`ParsedSfc`]/[`ParsedSvelte`]; refusal only happens later,
-    /// at [`Self::compile_prepared`] time, exactly like the direct route.
+    /// Infallible: the carrier frontend parses through the same catalog row
+    /// the direct route uses, and a malformed source still parses, with its
+    /// own diagnostics carried on the retained [`ParsedSfc`]/[`ParsedSvelte`].
+    /// A frontend refusal of the request's parse-affecting options is
+    /// retained too; every refusal is reported at [`Self::compile_prepared`]
+    /// time, exactly like the direct route.
     pub fn prepare(&self, source: &str, request: &CompileRequest) -> PreparedCarrier {
         let (mut prepared, refused) =
             verter_parser::oxc_parse::refusals_within(|| self.prepare_unrecorded(source, request));
@@ -3434,15 +3505,8 @@ impl StandaloneCompiler {
         match request.framework() {
             FrameworkCompileRequest::Vue(_) => {
                 let vue = request.vue().expect("dispatch already matched Vue");
-                let parsed = crate::compile::parse_sfc(
-                    source,
-                    vue.delimiters
-                        .as_ref()
-                        .map(|(o, c)| (o.as_str(), c.as_str())),
-                    Some(vue.is_custom_element.as_slice()),
-                );
                 PreparedCarrier::Vue(VuePreparedCarrier {
-                    parsed,
+                    parse: admitted_vue_parse(source, vue),
                     source_digest: source_digest(source),
                     parse_identity_digest: vue_parse_identity_digest(vue),
                     owned_source: None,
@@ -3450,16 +3514,13 @@ impl StandaloneCompiler {
                     _single_owner: SingleOwner,
                 })
             }
-            FrameworkCompileRequest::Svelte(_) => {
-                let parsed = crate::svelte::parse_svelte(source);
-                PreparedCarrier::Svelte(SveltePreparedCarrier {
-                    parsed,
-                    source_digest: source_digest(source),
-                    owned_source: None,
-                    refused: None,
-                    _single_owner: SingleOwner,
-                })
-            }
+            FrameworkCompileRequest::Svelte(_) => PreparedCarrier::Svelte(SveltePreparedCarrier {
+                parse: admitted_svelte_parse(source),
+                source_digest: source_digest(source),
+                owned_source: None,
+                refused: None,
+                _single_owner: SingleOwner,
+            }),
         }
     }
 
@@ -3547,8 +3608,12 @@ impl StandaloneCompiler {
                 let mut attempt = crate::compile_transaction::CompileAttempt::enter_direct(
                     source, request, "vue",
                 );
+                let parsed = carrier
+                    .parse
+                    .as_ref()
+                    .map_err(|reject| DirectCompileError::SyntaxRejected(reject.clone()))?;
                 attempt.stage_vue_macro_semantics(macros.clone());
-                self.compile_vue_from_parsed(source, &carrier.parsed, request, execution, &attempt)
+                self.compile_vue_from_parsed(source, parsed, request, execution, &attempt)
             }
             (FrameworkCompileRequest::Svelte(_), DirectExecutionInputs::Svelte { execution }) => {
                 let PreparedCarrier::Svelte(carrier) = prepared else {
@@ -3562,7 +3627,11 @@ impl StandaloneCompiler {
                         reason: StalePreparedReason::SourceChanged,
                     });
                 }
-                self.delegate_svelte_runtime(source, &carrier.parsed, request, execution)
+                let parsed = carrier
+                    .parse
+                    .as_ref()
+                    .map_err(|reject| DirectCompileError::SyntaxRejected(reject.clone()))?;
+                self.delegate_svelte_runtime(source, parsed, request, execution)
             }
             (FrameworkCompileRequest::Vue(_), DirectExecutionInputs::Svelte { .. }) => {
                 Err(DirectCompileError::FrameworkMismatch {
@@ -3788,7 +3857,7 @@ fn compose_vue_runtime(
 /// reads the same classification pre-computed onto its host-owned
 /// `FileMeta.script_lang`); this route reads it directly off the parse this
 /// same compile just produced instead.
-fn direct_vue_dialect(parsed: &ParsedSfc, force_js: bool) -> FragmentDialect {
+pub(crate) fn direct_vue_dialect(parsed: &ParsedSfc, force_js: bool) -> FragmentDialect {
     let dialect = sfc_script_dialect(parsed.script_setup(), parsed.script());
     if force_js {
         if dialect.is_jsx() {
@@ -3951,7 +4020,7 @@ fn hash_len_prefixed_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-fn hash_len_prefixed_str(hasher: &mut blake3::Hasher, s: &str) {
+pub(crate) fn hash_len_prefixed_str(hasher: &mut blake3::Hasher, s: &str) {
     hash_len_prefixed_bytes(hasher, s.as_bytes());
 }
 
@@ -3981,7 +4050,7 @@ fn source_digest(source: &str) -> [u8; 32] {
     *blake3::hash(source.as_bytes()).as_bytes()
 }
 
-/// Digest over exactly the two fields [`crate::compile::parse_sfc`] reads
+/// Digest over exactly the two fields [`crate::framework_common::vue_bridge::parse_sfc`] reads
 /// from a [`crate::compile_request::VueCompileRequest`] — `delimiters` and
 /// `is_custom_element` — the identity [`StandaloneCompiler::compile_prepared`]
 /// revalidates a Vue carrier's recorded parse options against. Every field
@@ -4006,6 +4075,53 @@ fn vue_parse_identity_digest(vue: &crate::compile_request::VueCompileRequest) ->
         hash_len_prefixed_str(&mut hasher, prefix);
     }
     *hasher.finalize().as_bytes()
+}
+
+/// The parse-affecting options a Vue request asks the Vue frontend for: its
+/// delimiters (the standard pair when unset) and custom-element prefixes.
+fn vue_request_parse_options(vue: &crate::compile_request::VueCompileRequest) -> ParseOptions {
+    let standard = ParseOptions::vue_standard();
+    ParseOptions {
+        delimiters: vue.delimiters.clone().unwrap_or(standard.delimiters),
+        custom_elements: vue.is_custom_element.clone(),
+        svelte_loose: false,
+    }
+}
+
+/// The Vue frontend's admitted parse for a direct compile. The catalog
+/// frontend row parses `source` once under the request's parse-affecting
+/// options, as it does for a registered host, and the direct route compiles
+/// that parse instead of parsing again.
+fn admitted_vue_parse(
+    source: &str,
+    vue: &crate::compile_request::VueCompileRequest,
+) -> Result<Arc<ParsedSfc>, SyntaxReject> {
+    let artifact = parse_registered_frontend(
+        &VueCarrierFrontend.adapter_id(),
+        &VueCarrierFrontend.carrier_language_id(),
+        source,
+        &vue_request_parse_options(vue),
+    )?;
+    let carrier = VueCarrierFrontend
+        .unregistered_carrier_arc(&artifact)
+        .expect("the Vue frontend publishes a Vue carrier");
+    Ok(Arc::clone(carrier.parsed_arc()))
+}
+
+/// The Svelte frontend's admitted parse for a direct compile; see
+/// [`admitted_vue_parse`]. A Svelte request carries no parse-affecting
+/// options.
+fn admitted_svelte_parse(source: &str) -> Result<Arc<ParsedSvelte>, SyntaxReject> {
+    let artifact = parse_registered_frontend(
+        &SvelteCarrierFrontend.adapter_id(),
+        &SvelteCarrierFrontend.carrier_language_id(),
+        source,
+        &ParseOptions::default(),
+    )?;
+    let carrier = SvelteCarrierFrontend
+        .unregistered_carrier_arc(&artifact)
+        .expect("the Svelte frontend publishes a Svelte carrier");
+    Ok(Arc::clone(carrier.parsed_arc()))
 }
 
 /// [`StandaloneCompiler::compile_batch`]'s grouping key — items sharing a
@@ -4040,22 +4156,6 @@ fn batch_group_key(source: &str, request: &CompileRequest) -> BatchGroupKey {
         FrameworkCompileRequest::Svelte(_) => BatchGroupKey::Svelte {
             source_digest: source_digest(source),
         },
-    }
-}
-
-/// Fixed, `Debug`-independent rank for [`ProductKind`] — a stable numeric
-/// identity to hash in [`direct_compile_output_digest`], so the digest does
-/// not depend on `Debug` output. It does NOT order the artifact walk: that
-/// walk follows publication order, which is observable. Never used to
-/// compare kinds for equality (that stays `==`).
-fn product_kind_rank(kind: ProductKind) -> u8 {
-    match kind {
-        ProductKind::RuntimeClient => 0,
-        ProductKind::RuntimeServer => 1,
-        ProductKind::IdeCompanion => 2,
-        ProductKind::PublicApi => 3,
-        ProductKind::Declarations => 4,
-        ProductKind::Analysis => 5,
     }
 }
 
@@ -4238,7 +4338,7 @@ pub fn direct_compile_output_digest(output: &DirectCompileOutput) -> [u8; 32] {
     let artifacts = output.artifacts();
     hash_usize(&mut hasher, artifacts.len());
     for artifact in &artifacts {
-        hash_usize(&mut hasher, product_kind_rank(artifact.kind()) as usize);
+        hash_usize(&mut hasher, artifact.kind().ordinal() as usize);
         hash_len_prefixed_str(&mut hasher, artifact.code());
         hash_usize(
             &mut hasher,

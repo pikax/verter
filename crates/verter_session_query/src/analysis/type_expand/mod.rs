@@ -8,10 +8,9 @@ mod request;
 
 pub use crate::analysis::type_expand::request::{
     ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedIndexSignature,
-    ExpandedMacroExposed, ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedNormalizedExpr,
-    ExpandedObjectShape, ExpandedParameter, ExpandedProperty, ExpansionDiagnostic,
-    ExpansionExactness, ExpansionExecutionStatus, ExpansionMetadata, ExpansionResult,
-    ExpansionStopReason,
+    ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedNormalizedExpr, ExpandedObjectShape,
+    ExpandedParameter, ExpandedProperty, ExpansionDiagnostic, ExpansionExactness,
+    ExpansionExecutionStatus, ExpansionMetadata, ExpansionResult, ExpansionStopReason,
 };
 
 use crate::type_solver::result::{IncompleteReason, SolverDiagnostic, SolverResult};

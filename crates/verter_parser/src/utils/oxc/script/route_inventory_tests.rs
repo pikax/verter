@@ -1,5 +1,6 @@
 use super::route_inventory::{
     build_script_route_inventory, build_script_route_inventory_with_owners,
+    triple_slash_path_references,
 };
 use crate::oxc_parse::Parser;
 use oxc_allocator::Allocator;
@@ -458,4 +459,17 @@ fn require_calls_name_program_files_only_in_javascript() {
         program_references_of(source, SourceType::ts()).module_names,
         ["./b"]
     );
+}
+
+#[test]
+fn path_references_carry_the_range_of_their_quoted_value() {
+    let source =
+        "/// <reference types=\"node\" />\n///   <reference path='./early.d.ts' />\nexport {};\n";
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let references = triple_slash_path_references(&parsed.program);
+    assert_eq!(references.len(), 1);
+    let (range, value) = &references[0];
+    assert_eq!(value, "./early.d.ts");
+    assert_eq!(&source[range.clone()], "'./early.d.ts'");
 }

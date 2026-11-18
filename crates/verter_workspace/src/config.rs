@@ -3,6 +3,7 @@
 //! All filesystem access goes through `&dyn WorkspaceRead` — these
 //! helpers are read-only consumers.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::traits::WorkspaceRead;
@@ -356,9 +357,50 @@ pub fn has_configured_ts_project_anywhere(root: &Path) -> bool {
 
 /// Parse a tsconfig.json. All file reads go through `ws`.
 pub fn parse_tsconfig_json(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> Option<ParsedTsConfig> {
-    let compiler_options = load_compiler_options(ws, tsconfig_path);
-    let membership = load_project_membership(ws, tsconfig_path);
-    let references = load_project_references(ws, tsconfig_path);
+    parse_tsconfig_with_reads(ws, tsconfig_path, &mut None)
+}
+
+/// Config resolution inputs retained for watching, without conflating missing
+/// lexical targets with the realpath identities of existing configs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TsConfigDependencies {
+    /// Realpath identities of configs and package manifests read, and resolved
+    /// reference targets.
+    pub realpaths: BTreeSet<String>,
+    /// Normalized reference paths probed but not found. They have no realpath;
+    /// creation at one of these paths requires retrying the referencing config.
+    pub missing_probes: BTreeSet<String>,
+}
+
+/// Parse with the existing extends-aware loaders, also returning the config
+/// resolution inputs observed during this load.
+/// Dependencies survive a parse failure so a later config edit can retry it.
+/// No additional config traversal or reload is performed to collect them.
+pub fn parse_tsconfig_json_with_dependencies(
+    ws: &dyn WorkspaceRead,
+    tsconfig_path: &str,
+) -> (Option<ParsedTsConfig>, TsConfigDependencies) {
+    let mut dependencies = Some(TsConfigDependencies::default());
+    let parsed = parse_tsconfig_with_reads(ws, tsconfig_path, &mut dependencies);
+    (parsed, dependencies.unwrap_or_default())
+}
+
+fn parse_tsconfig_with_reads(
+    ws: &dyn WorkspaceRead,
+    tsconfig_path: &str,
+    dependencies: &mut Option<TsConfigDependencies>,
+) -> Option<ParsedTsConfig> {
+    let compiler_options =
+        load_compiler_options_inner(ws, tsconfig_path, 0, dependencies)?.effective();
+    let membership = load_project_membership_with_reads(ws, tsconfig_path, dependencies);
+    let references: Vec<String> =
+        load_project_reference_targets_with_reads(ws, tsconfig_path, dependencies)
+            .into_iter()
+            .filter_map(|target| target.resolved)
+            .collect();
+    if let Some(dependencies) = dependencies {
+        dependencies.realpaths.extend(references.iter().cloned());
+    }
     Some(ParsedTsConfig {
         compiler_options,
         membership,
@@ -380,13 +422,9 @@ pub fn load_compiler_options(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
 ) -> IdeProjectCompilerOptions {
-    let LoadedCompilerOptions {
-        mut options,
-        semantic,
-        ..
-    } = load_compiler_options_inner(ws, tsconfig_path, 0).unwrap_or_default();
-    options.semantic = semantic.effective();
-    options
+    load_compiler_options_inner(ws, tsconfig_path, 0, &mut None)
+        .unwrap_or_default()
+        .effective()
 }
 
 /// The `extends`-recursion carrier: the resolution-facing options merged so
@@ -405,6 +443,15 @@ struct LoadedCompilerOptions {
     check_js_declared: bool,
     allow_importing_ts_extensions_declared: bool,
     disable_solution_searching_declared: bool,
+    no_emit_declared: bool,
+    composite_declared: bool,
+}
+
+impl LoadedCompilerOptions {
+    fn effective(mut self) -> IdeProjectCompilerOptions {
+        self.options.semantic = self.semantic.effective();
+        self.options
+    }
 }
 
 fn overlay_loaded_compiler_options(
@@ -412,6 +459,17 @@ fn overlay_loaded_compiler_options(
     later: LoadedCompilerOptions,
 ) -> LoadedCompilerOptions {
     earlier.semantic.layer(later.semantic);
+    if later.no_emit_declared {
+        earlier.options.emit.no_emit = later.options.emit.no_emit;
+        earlier.no_emit_declared = true;
+    }
+    if later.composite_declared {
+        earlier.options.emit.composite = later.options.emit.composite;
+        earlier.composite_declared = true;
+    }
+    if later.options.emit.out_dir.is_some() {
+        earlier.options.emit.out_dir = later.options.emit.out_dir;
+    }
     if later.options.base_url.is_some() {
         earlier.options.base_url = later.options.base_url;
     }
@@ -442,6 +500,7 @@ fn load_compiler_options_inner(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
     depth: u8,
+    dependencies: &mut Option<TsConfigDependencies>,
 ) -> Option<LoadedCompilerOptions> {
     if depth > MAX_TSCONFIG_EXTENDS_DEPTH {
         return None;
@@ -449,10 +508,14 @@ fn load_compiler_options_inner(
 
     let tsconfig_dir = parent_dir(tsconfig_path);
     let content = ws.read_file(tsconfig_path)?;
+    record_config_read(ws, tsconfig_path, dependencies);
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
+    if !json.is_object() {
+        return None;
+    }
 
-    let inherited = load_inherited_compiler_options(ws, &tsconfig_dir, &json, depth);
+    let inherited = load_inherited_compiler_options(ws, &tsconfig_dir, &json, depth, dependencies);
 
     let LoadedCompilerOptions {
         options: mut compiler_options,
@@ -462,6 +525,8 @@ fn load_compiler_options_inner(
         mut check_js_declared,
         mut allow_importing_ts_extensions_declared,
         mut disable_solution_searching_declared,
+        mut no_emit_declared,
+        mut composite_declared,
     } = inherited;
     let Some(raw_compiler_options) = json.get("compilerOptions") else {
         return Some(LoadedCompilerOptions {
@@ -472,12 +537,35 @@ fn load_compiler_options_inner(
             check_js_declared,
             allow_importing_ts_extensions_declared,
             disable_solution_searching_declared,
+            no_emit_declared,
+            composite_declared,
         });
     };
 
     // Type-semantic options: this config's DECLARED keys layer over the
     // inherited raw layer; canonicalisation waits for the chain end.
     raw_semantic.layer(read_raw_semantic_options(raw_compiler_options));
+
+    if let Some(no_emit) = raw_compiler_options
+        .get("noEmit")
+        .and_then(serde_json::Value::as_bool)
+    {
+        compiler_options.emit.no_emit = no_emit;
+        no_emit_declared = true;
+    }
+    if let Some(composite) = raw_compiler_options
+        .get("composite")
+        .and_then(serde_json::Value::as_bool)
+    {
+        compiler_options.emit.composite = composite;
+        composite_declared = true;
+    }
+    if let Some(out_dir) = raw_compiler_options
+        .get("outDir")
+        .and_then(serde_json::Value::as_str)
+    {
+        compiler_options.emit.out_dir = Some(resolve_path_value(&tsconfig_dir, out_dir));
+    }
 
     if let Some(base_url) = raw_compiler_options
         .get("baseUrl")
@@ -555,6 +643,8 @@ fn load_compiler_options_inner(
         check_js_declared,
         allow_importing_ts_extensions_declared,
         disable_solution_searching_declared,
+        no_emit_declared,
+        composite_declared,
     })
 }
 
@@ -619,7 +709,16 @@ fn read_raw_semantic_options(
 /// (downstream, `membership_to_spec` scopes `MatchAll` to the project root
 /// with the TS default excludes, so both paths stay leaf-dir-scoped).
 pub fn load_project_membership(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> ProjectMembership {
-    let Some(mut resolved) = load_project_membership_inner(ws, tsconfig_path, 0) else {
+    load_project_membership_with_reads(ws, tsconfig_path, &mut None)
+}
+
+fn load_project_membership_with_reads(
+    ws: &dyn WorkspaceRead,
+    tsconfig_path: &str,
+    dependencies: &mut Option<TsConfigDependencies>,
+) -> ProjectMembership {
+    let Some(mut resolved) = load_project_membership_inner(ws, tsconfig_path, 0, dependencies)
+    else {
         return ProjectMembership::MatchAll;
     };
     if resolved.exclude_declared && !resolved.files_declared && !resolved.include_declared {
@@ -694,6 +793,7 @@ fn load_project_membership_inner(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
     depth: u8,
+    dependencies: &mut Option<TsConfigDependencies>,
 ) -> Option<ResolvedMembership> {
     if depth > MAX_TSCONFIG_EXTENDS_DEPTH {
         return None;
@@ -701,10 +801,11 @@ fn load_project_membership_inner(
 
     let tsconfig_dir = parent_dir(tsconfig_path);
     let content = ws.read_file(tsconfig_path)?;
+    record_config_read(ws, tsconfig_path, dependencies);
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
-    let inherited = load_inherited_membership(ws, &tsconfig_dir, &json, depth);
+    let inherited = load_inherited_membership(ws, &tsconfig_dir, &json, depth, dependencies);
 
     let has_files = json.get("files").is_some();
     let has_include = json.get("include").is_some();
@@ -772,6 +873,34 @@ fn load_project_membership_inner(
 
 /// Load project references from a tsconfig.json.
 pub fn load_project_references(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> Vec<String> {
+    load_project_reference_targets(ws, tsconfig_path)
+        .into_iter()
+        .filter_map(|target| target.resolved)
+        .collect()
+}
+
+/// One authored reference, retained even when its target cannot be resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectReferenceTarget {
+    /// The path spelling used for diagnostics.
+    pub authored: String,
+    /// The target's canonical identity through the source workspace's realpath.
+    pub resolved: Option<String>,
+}
+
+/// Load references in authored order, including missing targets.
+pub fn load_project_reference_targets(
+    ws: &dyn WorkspaceRead,
+    tsconfig_path: &str,
+) -> Vec<ProjectReferenceTarget> {
+    load_project_reference_targets_with_reads(ws, tsconfig_path, &mut None)
+}
+
+fn load_project_reference_targets_with_reads(
+    ws: &dyn WorkspaceRead,
+    tsconfig_path: &str,
+    dependencies: &mut Option<TsConfigDependencies>,
+) -> Vec<ProjectReferenceTarget> {
     let tsconfig_dir = parent_dir(tsconfig_path);
     let Some(content) = ws.read_file(tsconfig_path) else {
         return Vec::new();
@@ -786,7 +915,17 @@ pub fn load_project_references(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> V
         .into_iter()
         .flatten()
         .filter_map(|entry| entry.get("path").and_then(|value| value.as_str()))
-        .filter_map(|reference| resolve_tsconfig_reference(ws, &tsconfig_dir, reference))
+        .map(|reference| ProjectReferenceTarget {
+            authored: reference.to_string(),
+            resolved: resolve_tsconfig_reference_with_reads(
+                ws,
+                &tsconfig_dir,
+                reference,
+                dependencies,
+            )
+            .and_then(|path| ws.realpath(&path))
+            .map(|path| verter_span::path::canonicalize_path(&path)),
+        })
         .collect()
 }
 
@@ -981,11 +1120,14 @@ fn load_inherited_compiler_options(
     tsconfig_dir: &str,
     json: &serde_json::Value,
     depth: u8,
+    dependencies: &mut Option<TsConfigDependencies>,
 ) -> LoadedCompilerOptions {
     let mut acc = LoadedCompilerOptions::default();
     for spec in extends_specs(json) {
-        if let Some(path) = resolve_tsconfig_extends(ws, tsconfig_dir, spec) {
-            if let Some(base) = load_compiler_options_inner(ws, &path, depth + 1) {
+        if let Some(path) =
+            resolve_tsconfig_extends_with_reads(ws, tsconfig_dir, spec, dependencies)
+        {
+            if let Some(base) = load_compiler_options_inner(ws, &path, depth + 1, dependencies) {
                 acc = overlay_loaded_compiler_options(acc, base);
             }
         }
@@ -1017,16 +1159,33 @@ fn load_inherited_membership(
     tsconfig_dir: &str,
     json: &serde_json::Value,
     depth: u8,
+    dependencies: &mut Option<TsConfigDependencies>,
 ) -> ResolvedMembership {
     let mut acc = ResolvedMembership::match_all();
     for spec in extends_specs(json) {
-        if let Some(path) = resolve_tsconfig_extends(ws, tsconfig_dir, spec) {
-            if let Some(base) = load_project_membership_inner(ws, &path, depth + 1) {
+        if let Some(path) =
+            resolve_tsconfig_extends_with_reads(ws, tsconfig_dir, spec, dependencies)
+        {
+            if let Some(base) = load_project_membership_inner(ws, &path, depth + 1, dependencies) {
                 acc = overlay_membership(acc, base);
             }
         }
     }
     acc
+}
+
+fn record_config_read(
+    ws: &dyn WorkspaceRead,
+    path: &str,
+    dependencies: &mut Option<TsConfigDependencies>,
+) {
+    if let Some(dependencies) = dependencies {
+        if let Some(realpath) = ws.realpath(path) {
+            dependencies
+                .realpaths
+                .insert(verter_span::path::canonicalize_path(&realpath));
+        }
+    }
 }
 
 fn load_inherited_raw_paths(
@@ -1059,6 +1218,15 @@ pub fn resolve_tsconfig_extends(
     tsconfig_dir: &str,
     extends: &str,
 ) -> Option<String> {
+    resolve_tsconfig_extends_with_reads(ws, tsconfig_dir, extends, &mut None)
+}
+
+fn resolve_tsconfig_extends_with_reads(
+    ws: &dyn WorkspaceRead,
+    tsconfig_dir: &str,
+    extends: &str,
+    dependencies: &mut Option<TsConfigDependencies>,
+) -> Option<String> {
     if extends.starts_with('.') {
         let resolved = join_paths(tsconfig_dir, extends);
         if ws.file_exists(&resolved) {
@@ -1080,7 +1248,7 @@ pub fn resolve_tsconfig_extends(
             if ws.file_exists(&with_json) {
                 return Some(with_json);
             }
-            if let Some(from_pkg) = resolve_package_tsconfig_field(ws, &candidate) {
+            if let Some(from_pkg) = resolve_package_tsconfig_field(ws, &candidate, dependencies) {
                 return Some(from_pkg);
             }
             let as_dir = join_paths(&candidate, "tsconfig.json");
@@ -1099,9 +1267,14 @@ pub fn resolve_tsconfig_extends(
 
 /// TypeScript package-specifier lookup: `package.json`'s `tsconfig` field
 /// names a config that is not necessarily `<package>/tsconfig.json`.
-fn resolve_package_tsconfig_field(ws: &dyn WorkspaceRead, package_dir: &str) -> Option<String> {
+fn resolve_package_tsconfig_field(
+    ws: &dyn WorkspaceRead,
+    package_dir: &str,
+    dependencies: &mut Option<TsConfigDependencies>,
+) -> Option<String> {
     let manifest = join_paths(package_dir, "package.json");
     let content = ws.read_file(&manifest)?;
+    record_config_read(ws, &manifest, dependencies);
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
     let tsconfig = json.get("tsconfig")?.as_str()?;
@@ -1116,10 +1289,23 @@ fn resolve_package_tsconfig_field(ws: &dyn WorkspaceRead, package_dir: &str) -> 
     None
 }
 
-fn resolve_tsconfig_reference(
+/// Normalize a selected project or reference target relative to `tsconfig_dir`.
+/// Accepts a config file, a directory containing `tsconfig.json`, or the
+/// existing extensionless JSON form. The returned path is lexical; callers
+/// that need a project identity resolve it through [`WorkspaceRead::realpath`].
+pub fn resolve_tsconfig_reference(
     ws: &dyn WorkspaceRead,
     tsconfig_dir: &str,
     ref_path: &str,
+) -> Option<String> {
+    resolve_tsconfig_reference_with_reads(ws, tsconfig_dir, ref_path, &mut None)
+}
+
+fn resolve_tsconfig_reference_with_reads(
+    ws: &dyn WorkspaceRead,
+    tsconfig_dir: &str,
+    ref_path: &str,
+    dependencies: &mut Option<TsConfigDependencies>,
 ) -> Option<String> {
     let resolved = join_paths(tsconfig_dir, ref_path);
 
@@ -1132,6 +1318,9 @@ fn resolve_tsconfig_reference(
         if ws.file_exists(&tsconfig) {
             return Some(tsconfig);
         }
+        if let Some(dependencies) = dependencies {
+            dependencies.missing_probes.insert(tsconfig);
+        }
     }
 
     if !resolved.contains('.') || resolved.ends_with('/') {
@@ -1139,6 +1328,13 @@ fn resolve_tsconfig_reference(
         if ws.file_exists(&with_json) {
             return Some(with_json);
         }
+        if let Some(dependencies) = dependencies {
+            dependencies.missing_probes.insert(with_json);
+        }
+    }
+
+    if let Some(dependencies) = dependencies {
+        dependencies.missing_probes.insert(resolved);
     }
 
     None

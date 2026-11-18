@@ -91,6 +91,34 @@ fn passthrough_stub_keeps_file_and_converts_offset() {
     assert!(mapped.message.contains("not assignable"));
 }
 
+/// A diagnostic inside another lane's surface belongs to that lane; one in
+/// this lane's own pass-through file at the same position still prints.
+#[test]
+fn a_diagnostic_inside_another_lanes_surface_is_not_reported() {
+    let content = "const wrong: number = 'x';\nexport default {};\n".to_string();
+    let files = vec![
+        OverlayFile {
+            path: "/proj/src/Child.vue.ts".to_string(),
+            content: content.clone(),
+            remap: RemapKind::ForeignSurface,
+        },
+        OverlayFile {
+            path: "/proj/Own_00ab.vue.ts".to_string(),
+            content,
+            remap: RemapKind::Passthrough,
+        },
+    ];
+    let lookup = lookup_of(&files);
+    let cache = cache_of(&files);
+    let pos = files[0].content.find("wrong").unwrap() as u32;
+    let message = "Type 'string' is not assignable to type 'number'.";
+    let foreign = api_diag(2322, 1, message, pos, "/proj/src/Child.vue.ts");
+    assert!(map_semantic(&foreign, &lookup, &cache).is_none());
+    let own = api_diag(2322, 1, message, pos, "/proj/Own_00ab.vue.ts");
+    let mapped = map_semantic(&own, &lookup, &cache).expect("own file prints");
+    assert_eq!(mapped.file, "/proj/Own_00ab.vue.ts");
+}
+
 #[test]
 fn suggestion_and_message_categories_are_dropped() {
     let stub = OverlayFile {
@@ -785,4 +813,43 @@ fn sourcemapped_non_verbatim_line_keeps_token_position_not_fabricated_column() {
         "a non-verbatim generated line keeps the covering token's column — no fabricated \
          precise column"
     );
+}
+
+#[test]
+fn raw_diagnostics_keep_jsx_errors_and_convert_both_utf16_endpoints() {
+    let files = vec![OverlayFile {
+        path: "/proj/View.vue.ts".into(),
+        content: "\u{1d11e}\u{e9} broken".into(),
+        remap: RemapKind::Passthrough,
+    }];
+    let cache = cache_of(&files);
+    let mut wire = api_diag(
+        2322,
+        1,
+        "Property 'textContent' does not exist on type 'HTMLAttributes'.",
+        4,
+        &files[0].path,
+    );
+    wire.end = 10;
+    let raw = raw_diagnostic(&wire, DiagOrigin::Semantic, "/proj/tsconfig.json", &cache)
+        .unwrap()
+        .unwrap();
+    assert_eq!((raw.start, raw.length), (7, 6));
+    assert_eq!(raw.file.as_ref(), files[0].path);
+    assert_eq!(raw.code, 2322);
+    wire.file_name = None;
+    let raw = raw_diagnostic(&wire, DiagOrigin::Config, "/proj/tsconfig.json", &cache)
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw.file.as_ref(), "/proj/tsconfig.json");
+    assert_eq!((raw.start, raw.length), (0, 0));
+    wire.category = 2;
+    assert!(
+        raw_diagnostic(&wire, DiagOrigin::Semantic, "unused", &cache)
+            .unwrap()
+            .is_none()
+    );
+    wire.category = 1;
+    wire.file_name = Some("/absent/source.ts".into());
+    assert!(raw_diagnostic(&wire, DiagOrigin::Semantic, "unused", &cache).is_err());
 }

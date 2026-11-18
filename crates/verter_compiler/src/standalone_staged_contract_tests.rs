@@ -343,6 +343,7 @@ fn input_basis_is_entry_bound_while_the_revision_tracks_the_products() {
         publish(
             &plan,
             vec![ArtifactContribution {
+                grammar: None,
                 kind: ProductKind::RuntimeClient,
                 fragments: Vec::new(),
                 code,
@@ -431,6 +432,7 @@ fn published_set(
             _ => (runtime_map_json.clone().or(Some(String::new())), None),
         };
         contributions.push(ArtifactContribution {
+            grammar: None,
             kind,
             fragments: Vec::new(),
             code: format!("export const leg = 1;\nexport const {kind} = 2;\n"),
@@ -611,7 +613,7 @@ fn a_contentless_host_supplied_selected_template_map_is_omitted_not_chained() {
     // Positions the host holds without the bytes they address: one
     // token-addressed row declaring no `sourcesContent` entry.
     let host_map = r#"{"version":3,"sources":["Comp.vue"],"names":[],"mappings":"AAAA"}"#;
-    let parsed = crate::compile::parse_sfc(source, None, None);
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(source, None, None);
     let block_content = RuntimeBlockContentInputs {
         template: Some(RuntimeBlockContentInput {
             code: std::sync::Arc::from(selected),

@@ -35,12 +35,12 @@
     "@verter/lsp-test-client": "workspace:^",
     "@verter/native": "workspace:*",
     "@verter/wasm": "workspace:*",
-    "@vue/compiler-sfc": "3.6.0-rc.5",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
     "@vue/language-server": "^3.3.13",
     "magic-string": "^1.4.3",
     "svelte": "5.56.10",
     "tinybench": "^6.2.2",
-    "vue": "3.6.0-rc.5",
+    "vue": "3.6.0-rc.15",
     "vue-component-meta": "^3.3.13"
   },
   "devDependencies": {

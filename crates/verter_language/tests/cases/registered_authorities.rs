@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use verter_language::carrier_grammar::{
-    CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-    FrameworkAdapterSemanticVersion,
+    CarrierGrammarAuthority, CarrierGrammarConfig, CarrierGrammarEncoder,
+    CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
 };
 use verter_language::registered_source_authority::{
     CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -22,8 +22,17 @@ fn public_authority_api_round_trips_only_sealed_values() {
         )
         .expect("registered source");
     let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
-    let config =
-        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).expect("Vue config");
+    let config = CarrierGrammarConfig::from_owner(
+        FileLanguage::vue(),
+        {
+            let mut canonical = CarrierGrammarEncoder::new(1);
+            canonical.string("{{");
+            canonical.string("}}");
+            canonical.count(0);
+            canonical
+        },
+        verter_language::ParseOptions::vue_standard(),
+    );
     grammar_authority
         .register_carrier_grammar(
             FileLanguage::vue(),

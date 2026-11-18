@@ -11828,7 +11828,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// `value` was the raw `mapper.value_expr` — still containing the
     /// free mapper binder `K`. Downstream consumers
     /// (`compute_bindings_via_graph`,
-    /// `surface_member_to_expanded_field`, model/reducer paths,
+    /// framework-surface normalizers, model/reducer paths,
     /// component-meta materialisation) saw `InstantiationRef` shells
     /// where `Function` shapes were expected, and the slot-binding
     /// extractor fell through the `_ => continue` arm. Per-key

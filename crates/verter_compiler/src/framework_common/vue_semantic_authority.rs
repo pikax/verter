@@ -6,19 +6,31 @@
 
 use std::sync::Arc;
 
+use verter_audit::observe::ObserveExec;
 use verter_language::{FrameworkAdapterId, LanguageId};
 
-use crate::compile::types::{
-    CodegenOptions, CompileTarget, ResolvedVueCompileOptions, VueMacroSemanticInput,
+use verter_audit::observe::Uncaptured;
+
+use crate::compile::template_data::extract_raw_template_data;
+use crate::compile::types::VueMacroSemanticInput;
+use crate::compile::{
+    collect_expression_errors, convert_diagnostics, template_is_non_html, RawTemplateData,
 };
-use crate::compile::{compile_from_parsed_legacy, RawTemplateData};
+use crate::compile_request::demand::{close_demand, DemandSeed, DemandSet, TargetKind};
+use crate::compile_request::{ProductKind, RuntimeStyleProcessing};
+use crate::framework::vue::semantic::{
+    build_semantic_snapshot, VueSemanticInputs, VueSemanticRefusal, VueSemanticSnapshot,
+};
+use crate::script::bindings::script_lane_bindings;
+use crate::script::prepared::PreparedScript;
+use crate::template::topology::{build_template_topology, TopologyRecoveryFacts};
+use crate::work_ledger::CompilerWorkLedger;
 
 use super::capability::{FrameworkSemanticAuthority, Present};
 use super::carrier_compiler::RuntimeDiagnostic;
 use super::catalog::{SemanticCap, TypedCapabilityRegistration};
 use super::registered_carrier_projection::TemplateFactsProduct;
-use super::vue_bridge::VueCarrierCompiler;
-use super::vue_carrier_frontend::VueSfcV3;
+use super::vue_carrier_frontend::{VueCarrierFrontend, VueSfcV3};
 use super::FrameworkParseArtifact;
 
 /// Position-preserving eval source over admitted script regions.
@@ -74,22 +86,37 @@ impl VueSemanticAuthority {
             return None;
         }
         super::registered_carrier_projection::registered_semantic_for(
-            artifact.adapter_id(),
-            artifact.epoch(),
+            artifact.carrier_profile(),
+            artifact.framework_profile(),
         )
         .map(|_| VueSemanticAdmission { _private: () })
+    }
+
+    /// Serve one component's semantic snapshot: the fact families `demand`
+    /// names, each produced once, with the semantic admission over them.
+    /// `admission` witnesses that the component's parse was admitted; the
+    /// facts are read only from `inputs`, which hold that parse's products.
+    pub fn snapshot<'c, M: ObserveExec>(
+        &self,
+        admission: &VueSemanticAdmission,
+        inputs: VueSemanticInputs<'c>,
+        demand: &DemandSet,
+        ledger: &mut CompilerWorkLedger<M>,
+    ) -> Result<VueSemanticSnapshot<'c>, VueSemanticRefusal> {
+        let VueSemanticAdmission { _private: () } = admission;
+        build_semantic_snapshot(inputs, demand, ledger)
     }
 
     /// Adapter this authority answers to.
     #[must_use]
     pub fn adapter_id(&self) -> FrameworkAdapterId {
-        VueCarrierCompiler.adapter_id()
+        VueCarrierFrontend.adapter_id()
     }
 
     /// Carrier language this authority interprets.
     #[must_use]
     pub fn carrier_language_id(&self) -> LanguageId {
-        VueCarrierCompiler.carrier_language_id()
+        VueCarrierFrontend.carrier_language_id()
     }
 }
 
@@ -109,36 +136,68 @@ impl FrameworkSemanticAuthority<VueSfcV3> for VueSemanticAuthority {
         source: &str,
         artifact: &FrameworkParseArtifact,
     ) -> Option<TemplateFactsProduct> {
-        let parsed = VueCarrierCompiler.parsed_sfc(artifact)?;
-        let core_opts = CodegenOptions {
-            target: CompileTarget::TEMPLATE_DATA,
-            ..Default::default()
+        let parsed = VueCarrierFrontend.parsed_sfc(artifact)?;
+        let Some(template_ast) = parsed.template_ast() else {
+            return Some(TemplateFactsProduct {
+                data: RawTemplateData::default(),
+                diagnostics: Vec::new(),
+            });
         };
-        let verter_opts = ResolvedVueCompileOptions {
-            source_map: false,
-            ..Default::default()
-        };
-        let alloc = oxc_allocator::Allocator::new();
-        let result = compile_from_parsed_legacy(
+        // A template the parser recovered, or one in a non-HTML language,
+        // has no facts to stand on.
+        if parsed.has_errors() || template_is_non_html(template_ast, source) {
+            return None;
+        }
+
+        let allocator = oxc_allocator::Allocator::new();
+        let mut ledger = CompilerWorkLedger::<Uncaptured>::new();
+        // The script lane's bindings: these facts are read with no macro
+        // semantics, so a type-based macro binds no prop names here.
+        let prepared =
+            PreparedScript::build(source, parsed.script(), parsed.script_setup(), &allocator);
+        let lane = script_lane_bindings(parsed.script_setup(), &prepared, None, &allocator);
+        let topology = build_template_topology(
             source,
-            parsed,
-            &core_opts,
-            &verter_opts,
-            &VueMacroSemanticInput::Unavailable,
-            &alloc,
+            template_ast,
+            TopologyRecoveryFacts::default(),
+            &mut ledger,
         )
         .ok()?;
-        // The fact extraction is the only pass that parses template
-        // directive/interpolation expressions on this route, so its
-        // diagnostics (e.g. `XInvalidExpression` for a malformed `v-if`
-        // expression) travel WITH the facts — a consumer that drops them
-        // erases the file's template expression errors. Only the
-        // extraction's OWN slice rides along: this probe compile runs with
-        // `VueMacroSemanticInput::Unavailable`, so its other channels
-        // (macro-semantic validation in particular) describe the probe's
-        // inputs, not the file, and belong to the real compile.
-        let diagnostics: Vec<RuntimeDiagnostic> = result
-            .template_data_diagnostics
+        let macros = VueMacroSemanticInput::Unavailable;
+        let snapshot = build_semantic_snapshot(
+            VueSemanticInputs {
+                source,
+                topology: Some(&topology),
+                reported_bindings: lane.bindings.clone(),
+                setup_analysis: None,
+                companion_analysis: None,
+                macros: &macros,
+                runtime_module: "vue",
+                self_name: "",
+                template_is_ts: false,
+                allocator: &allocator,
+            },
+            &template_fact_demand(parsed.script().is_some() || parsed.script_setup().is_some()),
+            &mut ledger,
+        )
+        .ok()?;
+        let expressions = snapshot.expressions();
+
+        // The template expressions are parsed only here on this route, so
+        // their diagnostics (e.g. `XInvalidExpression` for a malformed `v-if`
+        // expression) travel WITH the facts: a consumer that drops them
+        // erases the file's template expression errors.
+        let mut expression_diagnostics = Vec::new();
+        let mut compile_failures = Vec::new();
+        collect_expression_errors(
+            expressions,
+            source,
+            &mut expression_diagnostics,
+            &mut compile_failures,
+        );
+        let mut extraction_diagnostics = convert_diagnostics(&expression_diagnostics);
+        extraction_diagnostics.extend(compile_failures);
+        let diagnostics: Vec<RuntimeDiagnostic> = extraction_diagnostics
             .into_iter()
             .map(|d| RuntimeDiagnostic {
                 severity: d.severity.into(),
@@ -151,15 +210,27 @@ impl FrameworkSemanticAuthority<VueSfcV3> for VueSemanticAuthority {
                     .unwrap_or_else(|| verter_span::Span::new(0, source.len() as u32)),
             })
             .collect();
-        match result.template_data {
-            Some(data) => Some(TemplateFactsProduct { data, diagnostics }),
-            None if parsed.template_ast().is_none() => Some(TemplateFactsProduct {
-                data: RawTemplateData::default(),
-                diagnostics,
-            }),
-            None => None,
-        }
+        Some(TemplateFactsProduct {
+            data: extract_raw_template_data(template_ast, expressions, source, &lane.bindings),
+            diagnostics,
+        })
     }
+}
+
+/// The demand of a component's template facts: its bindings and its
+/// template family. A server-shaped seed closes to exactly those facts (with
+/// macros, which cost nothing to serve), and to no reactivity, imports or
+/// dependency family.
+fn template_fact_demand(has_script: bool) -> DemandSet {
+    close_demand(&[DemandSeed {
+        product: ProductKind::Analysis,
+        target: TargetKind::Server,
+        runtime_source_map: false,
+        style_processing: RuntimeStyleProcessing::AuthoredOnly,
+        has_template: true,
+        has_script,
+        style_count: 0,
+    }])
 }
 
 /// Typed Vue semantic catalog row.
@@ -171,4 +242,9 @@ pub fn vue_semantic_authority_registration(
         VueSemanticAuthority.carrier_language_id(),
         Present(VueSemanticAuthority),
     )
+    .expect("the built-in Vue profile manifest is admitted")
 }
+
+#[cfg(test)]
+#[path = "vue_semantic_authority_tests.rs"]
+mod tests;

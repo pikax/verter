@@ -1475,7 +1475,7 @@ defineExpose()
 // separate LSP route to prove this through without inventing one.
 // ---------------------------------------------------------------------------
 
-fn vue_surface_members_via_audited_entry(
+pub(crate) fn vue_surface_members_via_audited_entry(
     host: &VerterHost,
     canonical_id: &str,
     kind: verter_protocol::typeinfo::graph::FrameworkSurfaceKind,

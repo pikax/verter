@@ -103,6 +103,8 @@ use verter_type_engine::semantic_query::{
     SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 
+mod diagnostics;
+pub(crate) use diagnostics::{macro_expansion_for_cycle, macro_expansion_for_query_error};
 mod normalize;
 mod normalize_slots;
 
@@ -970,7 +972,13 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
             // member labels in later operations, so it holds an explicit
             // builder owner for them; the DTO bundle it yields is graph-free.
             let _builder = dispatch.enter_construction_scope();
-            let fact = resolve_vue_macro_surface_fact_with_ctx(ctx, dispatch, &validated_request);
+            let mut diagnostics = Vec::new();
+            let fact = resolve_vue_macro_surface_fact_with_diagnostics(
+                ctx,
+                dispatch,
+                &validated_request,
+                &mut diagnostics,
+            );
             let (surface, domain_guarantee) = adopt_macro_surface_fact(fact);
             let domain_guarantee = if !mac.is_type_based {
                 match mac.kind {
@@ -1021,6 +1029,43 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                             // row is a model binding; modifiers do not emit updates.
                             let prop_fields = props_from_typeinfo_surface(ctx, dispatch, &resolved);
                             let model_name = mac.model_name.as_deref().unwrap_or("modelValue");
+                            let updates = prop_fields
+                                .iter()
+                                .filter(|row| row.analysis.name == model_name)
+                                .map(|row| {
+                                    let name = format!("update:{}", row.analysis.name);
+                                    let payload_source = verter_session_query::analysis::component_meta::model_update_payload_source(
+                                        row.analysis.payload.clone(),
+                                    );
+                                    crate::typeinfo::framework_surface::results::ResolvedEmitOccurrence {
+                                        id: verter_type_expr::facts::ResolvedEmitOccurrenceId::runtime(
+                                            validated_request.owner_canonical.clone(),
+                                            mac.span.start,
+                                            mac.span.end,
+                                            name.as_str(),
+                                        ),
+                                        name,
+                                        span: mac.span,
+                                        payload_type: None,
+                                        payload: None,
+                                        payload_expr_scope: None,
+                                        description: None,
+                                        tags: Vec::new(),
+                                        payload_value: crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::emit_payload(
+                                            dispatch,
+                                            validated_request.owner_canonical.as_ref(),
+                                            &payload_source,
+                                        ),
+                                        payload_publication: crate::typeinfo::framework_surface::results::resolved_emit_payload_publication(
+                                            &payload_source,
+                                            None,
+                                        ),
+                                        payload_source,
+                                        return_publication: None,
+                                        return_publication_scope: None,
+                                    }
+                                })
+                                .collect();
                             let bindings = prop_fields
                                 .iter()
                                 .filter(|row| row.analysis.name == model_name)
@@ -1046,6 +1091,10 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                                 })
                                 .collect();
                             MacroSurfaceDtos {
+                                emits: Some(EmitsSurface {
+                                    fields: updates,
+                                    index_signatures: Vec::new(),
+                                }),
                                 props: Some(PropsSurface {
                                     fields: prop_fields,
                                     index_signatures: index_signatures_from_surface(
@@ -1135,10 +1184,12 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                         AnalyzedMacroKind::WithDefaults => MacroSurfaceDtos::default(),
                     };
                     dtos.domain_guarantee = domain_guarantee;
+                    dtos.diagnostics = diagnostics;
                     dtos
                 }
                 None => MacroSurfaceDtos {
                     domain_guarantee,
+                    diagnostics,
                     ..MacroSurfaceDtos::default()
                 },
             }
@@ -1215,6 +1266,76 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
 /// Whether `language` may own a `.vue` macro surface: a Vue carrier (or Vue
 /// template / adapter module) or a plain script. Another framework's carrier,
 /// template or adapter module is not.
+/// Admit the published rows of one macro bundle through the shared admission
+/// function, with the macro's type-argument node as their parent. The names
+/// are the bundle's own rows for the macro's surface: a model admits its value
+/// and modifiers props, never its synthesized update events. The rows are
+/// graph-free, so a bundle served from the cache admits exactly what its cold
+/// compute would. A macro with no type argument has no parent node and admits
+/// nothing.
+pub(crate) fn admit_published_macro_rows<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    owner_canonical: &str,
+    whole_hash: verter_type_engine::semantic_query::HashValue,
+    macro_index: usize,
+    mac: &verter_session_query::analysis::types::AnalyzedMacro,
+    dtos: &MacroSurfaceDtos,
+) {
+    let names: Vec<&str> = match mac.kind {
+        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => dtos
+            .prop_fields()
+            .iter()
+            .map(|row| row.analysis.name.as_str())
+            .collect(),
+        AnalyzedMacroKind::DefineEmits => dtos
+            .emit_fields()
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect(),
+        AnalyzedMacroKind::DefineSlots => dtos
+            .slot_fields()
+            .iter()
+            .map(|slot| slot.name.as_str())
+            .collect(),
+        AnalyzedMacroKind::DefineExpose => dtos
+            .expose_fields()
+            .iter()
+            .map(|row| row.analysis.name.as_str())
+            .collect(),
+        AnalyzedMacroKind::DefineOptions => dtos
+            .options
+            .iter()
+            .flat_map(|options| options.members.iter())
+            .map(|member| member.name.as_str())
+            .collect(),
+        AnalyzedMacroKind::WithDefaults => Vec::new(),
+    };
+    if names.is_empty() {
+        return;
+    }
+    let Some(parent) = dispatch.macro_type_arg_hot_ref(owner_canonical, macro_index) else {
+        return;
+    };
+    let parent = parent.hot.node();
+    let owner = verter_type_engine::semantic_query::DeclIdentity {
+        canonical_id: owner_canonical.into(),
+        owner: mac.owner,
+        whole_hash,
+        decl_name: crate::meta_resolve::projectors::SFC_SCRIPT_SETUP_DECL_NAME.into(),
+    };
+    for name in names {
+        dispatch.admit_published_member(
+            &owner,
+            parent,
+            parent,
+            verter_type_expr::MemberVisibility::Public,
+            &Arc::from(name),
+        );
+    }
+}
+
 fn is_vue_compatible_owner(language: &verter_language::FileLanguage) -> bool {
     let vue = verter_language::FrameworkAdapterId::vue();
     match language {
@@ -1303,6 +1424,19 @@ fn resolve_vue_macro_surface_fact_with_ctx<
     dispatch: &ProjectSemanticDispatch<'_, C>,
     request: &VueMacroSurfaceRequest,
 ) -> FactResult<MemberDomain<VueMacroSurface>> {
+    resolve_vue_macro_surface_fact_with_diagnostics(ctx, dispatch, request, &mut Vec::new())
+}
+
+fn resolve_vue_macro_surface_fact_with_diagnostics<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    request: &VueMacroSurfaceRequest,
+    diagnostic_sink: &mut Vec<
+        verter_session_query::analysis::component_meta::MacroExpansionDiagnostics,
+    >,
+) -> FactResult<MemberDomain<VueMacroSurface>> {
     verter_debug_assert_eq!(
         request.level,
         TypeInfoQueryLevel::FullMetadata,
@@ -1314,13 +1448,66 @@ fn resolve_vue_macro_surface_fact_with_ctx<
     // normalization, unresolved-root partiality, one-level projection and
     // incomplete-arm folding all run there. This adapter pairs the graph
     // surface with its declaration-file spans and hydrates JSDoc.
-    let claim = verter_type_engine::project_semantic_dispatch::one_level_surface::project_macro_argument_surface_claim(
-            ctx,
-            dispatch,
-            &request.owner_canonical,
-            request.macro_index,
-            request.macro_kind,
-        );
+    use verter_session_query::analysis::component_meta::MacroExpansionKind;
+    use verter_type_engine::project_semantic_dispatch::one_level_surface::MacroSurfaceDiagnostic;
+    let kind = match request.macro_kind {
+        AnalyzedMacroKind::DefineEmits => MacroExpansionKind::DefineEmits,
+        AnalyzedMacroKind::DefineSlots => MacroExpansionKind::DefineSlots,
+        _ => MacroExpansionKind::DefineProps,
+    };
+    let mut observe = |diagnostic: MacroSurfaceDiagnostic<'_>| {
+        diagnostic_sink.push(match diagnostic {
+            MacroSurfaceDiagnostic::Walker {
+                diagnostics,
+                cache_suppress,
+            } => crate::meta_resolve::diagnostic_convert::shallow_diagnostics_to_macro_expansion(
+                diagnostics,
+                request.macro_index,
+                kind.clone(),
+                cache_suppress,
+                &|diagnostic| dispatch.checker_message(diagnostic),
+            ),
+            MacroSurfaceDiagnostic::CyclicPayload => macro_expansion_for_cycle(
+                request.macro_index,
+                kind.clone(),
+                format!("cyclic-macro-payload@{:?}", request.macro_kind),
+            ),
+            MacroSurfaceDiagnostic::SurfaceIncomplete(reasons)
+                if reasons.contains(
+                    verter_type_engine::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+                ) =>
+            {
+                macro_expansion_for_cycle(
+                    request.macro_index,
+                    kind.clone(),
+                    format!("cyclic-macro-surface@{:?}", request.macro_kind),
+                )
+            }
+            other => macro_expansion_for_query_error(
+                request.macro_index,
+                kind.clone(),
+                match other {
+                    MacroSurfaceDiagnostic::LoweringFailed => {
+                        format!("macro-payload-lowering-failed@{:?}", request.macro_kind)
+                    }
+                    MacroSurfaceDiagnostic::OpaquePayload(error) => {
+                        format!("macro-payload-opaque::{error:?}")
+                    }
+                    MacroSurfaceDiagnostic::UnresolvedPayload => {
+                        "macro-payload-decl-unresolved::unresolved reference carrier".to_string()
+                    }
+                    MacroSurfaceDiagnostic::SurfaceIncomplete(reasons) => {
+                        format!("macro-surface-incomplete::{reasons:?}")
+                    }
+                    MacroSurfaceDiagnostic::Walker { .. }
+                    | MacroSurfaceDiagnostic::CyclicPayload => unreachable!(),
+                },
+            ),
+        });
+    };
+    let claim = verter_type_engine::project_semantic_dispatch::one_level_surface::project_macro_argument_surface_claim_with_diagnostics(
+        ctx, dispatch, &request.owner_canonical, request.macro_index, request.macro_kind, &mut observe,
+    );
     claim
         .map(|projected| {
             let surface = crate::typeinfo::shallow_surface::with_member_jsdoc_spans_from_ctx(

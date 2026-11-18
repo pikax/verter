@@ -4,13 +4,13 @@
 //! The parent's `leave_element` adds the `_toDisplayString` prefix.
 //!
 //! Binding patches (accessor prefixes/suffixes) are collected from the
-//! resolver and pushed into `CodeGenOutput.prepends`.
+//! resolver and pushed into `CodeGenOutput.edits.prepends`.
 
 use crate::ast::types::InterpolationNode;
 use crate::template::oxc::types::OxcParsedExpression;
 
-use super::super::binding::BindingResolver;
 use super::super::types::{ChildKind, ChildRecord, CodeGenOutput};
+use crate::template::binding::BindingResolver;
 
 /// Process an interpolation node for VDOM codegen.
 ///
@@ -34,7 +34,7 @@ pub fn process_interpolation<'alloc>(
 
     // Collect binding patches (accessor prefixes/suffixes)
     if let Some(bindings) = &oxc.bindings {
-        resolver.collect_binding_patches(bindings, out);
+        resolver.collect_binding_patches(bindings, &mut out.edits);
     }
 
     ChildRecord {
@@ -53,7 +53,7 @@ mod tests {
     use oxc_allocator::Allocator;
     use rustc_hash::FxHashMap;
 
-    use super::super::super::binding::BindingType;
+    use crate::template::binding::BindingType;
 
     fn make_interp(start: u32, inner_start: u32, inner_end: u32, end: u32) -> InterpolationNode {
         InterpolationNode {
@@ -103,11 +103,11 @@ mod tests {
         assert_eq!(record.end, 9);
 
         // Two overwrites: {{ → ( and }} → )
-        assert_eq!(out.overwrites.len(), 2);
+        assert_eq!(out.overwrites().len(), 2);
         // {{ prefix overwrite
-        assert_eq!(out.overwrites[0], (0, 3, "("));
+        assert_eq!(out.overwrites()[0], (0, 3, "("));
         // }} suffix overwrite
-        assert_eq!(out.overwrites[1], (6, 9, ")"));
+        assert_eq!(out.overwrites()[1], (6, 9, ")"));
     }
 
     #[test]
@@ -131,8 +131,8 @@ mod tests {
 
         process_interpolation(&interp, &oxc, &resolver, &mut out);
 
-        assert_eq!(out.overwrites[0], (0, 2, "("));
-        assert_eq!(out.overwrites[1], (5, 7, ")"));
+        assert_eq!(out.overwrites()[0], (0, 2, "("));
+        assert_eq!(out.overwrites()[1], (5, 7, ")"));
     }
 
     // ==================== Binding patches ====================
@@ -156,7 +156,9 @@ mod tests {
                     span: crate::common::RelativeSpan::new(3, 6),
                     pos: 3,
                     ignore: false,
+                    is_expression_local: false,
                     is_shorthand: false,
+                    usage: crate::utils::oxc::ReferenceUse::Read,
                 }],
                 functions: vec![],
                 literals: vec![],
@@ -170,8 +172,8 @@ mod tests {
         process_interpolation(&interp, &oxc, &resolver, &mut out);
 
         // Should have _ctx. prefix at pos 3
-        assert_eq!(out.prepends.len(), 1);
-        assert_eq!(out.prepends[0], (3, "_ctx."));
+        assert_eq!(out.edits.prepends.len(), 1);
+        assert_eq!(out.edits.prepends[0], (3, "_ctx."));
     }
 
     #[test]
@@ -193,7 +195,9 @@ mod tests {
                     span: crate::common::RelativeSpan::new(3, 8),
                     pos: 3,
                     ignore: false,
+                    is_expression_local: false,
                     is_shorthand: false,
+                    usage: crate::utils::oxc::ReferenceUse::Read,
                 }],
                 functions: vec![],
                 literals: vec![],
@@ -207,8 +211,8 @@ mod tests {
         process_interpolation(&interp, &oxc, &resolver, &mut out);
 
         // SetupRef inline: no prefix (empty), suffix ".value" at pos 3+5=8
-        assert_eq!(out.prepends.len(), 1);
-        assert_eq!(out.prepends[0], (8, ".value"));
+        assert_eq!(out.edits.prepends.len(), 1);
+        assert_eq!(out.edits.prepends[0], (8, ".value"));
     }
 
     #[test]
@@ -232,8 +236,8 @@ mod tests {
         process_interpolation(&interp, &oxc, &resolver, &mut out);
 
         // Only overwrites for delimiters, no prepends
-        assert_eq!(out.overwrites.len(), 2);
-        assert!(out.prepends.is_empty());
+        assert_eq!(out.overwrites().len(), 2);
+        assert!(out.edits.prepends.is_empty());
     }
 
     // ==================== Offset handling ====================
@@ -261,7 +265,7 @@ mod tests {
 
         assert_eq!(record.start, 10);
         assert_eq!(record.end, 19);
-        assert_eq!(out.overwrites[0], (10, 13, "("));
-        assert_eq!(out.overwrites[1], (16, 19, ")"));
+        assert_eq!(out.overwrites()[0], (10, 13, "("));
+        assert_eq!(out.overwrites()[1], (16, 19, ")"));
     }
 }

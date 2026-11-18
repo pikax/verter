@@ -4,6 +4,7 @@
 //! [`CodeGenOutput`] for all transformations. Returns binding
 //! metadata for the template codegen's [`BindingResolver`].
 
+pub mod bindings;
 pub mod css_vars;
 pub mod macros;
 pub mod prepared;
@@ -16,10 +17,11 @@ use oxc_allocator::Allocator;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::code_transform::{CodeTransform, GeneratedContentMarker};
+use crate::emission::{EmissionFragment, FragmentSlot, MarkerId};
 use crate::parser::types::RootNodeScript;
 use crate::script::prepared::PreparedScript;
 use crate::style_planner::VBindVar;
-use crate::template::code_gen::binding::BindingType;
+use crate::template::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
 
 /// Options for script code generation.
@@ -87,6 +89,89 @@ pub(crate) fn push_default_export_statement(
     (binding_range, stmt_start..out.len() as u32)
 }
 
+/// Generated component scaffold used when a carrier has no script. The
+/// returned ranges name each binding at its emission site.
+pub(crate) fn component_scaffold(
+    binding: &str,
+    vapor: bool,
+    scope_id: Option<&str>,
+) -> (String, Vec<std::ops::Range<u32>>) {
+    let mut code = String::with_capacity(128);
+    code.push_str("const ");
+    let mut bindings = Vec::with_capacity(3);
+    let mut push_binding = |code: &mut String| {
+        let start = code.len() as u32;
+        code.push_str(binding);
+        bindings.push(start..code.len() as u32);
+    };
+    push_binding(&mut code);
+    code.push_str(if vapor {
+        " = { __vapor: true };\n"
+    } else {
+        " = {};\n"
+    });
+    if let Some(scope_id) = scope_id {
+        push_binding(&mut code);
+        code.push_str(".__scopeId = \"");
+        code.push_str(scope_id);
+        code.push_str("\";\n");
+    }
+    (code, bindings)
+}
+
+/// The generated shell of a carrier with no authored blocks. Its helper
+/// line is part of this scaffold's byte contract.
+pub(crate) fn empty_component_scaffold(
+    component_name: &str,
+    runtime_module: &str,
+) -> (String, Vec<std::ops::Range<u32>>) {
+    use crate::template::vue_syntax::escape_js_string_into;
+    let mut code = String::with_capacity(160 + runtime_module.len());
+    code.push_str("import { defineComponent as _defineComponent } from \"");
+    escape_js_string_into(&mut code, runtime_module);
+    code.push_str("\";\nconst ");
+    let binding = push_sfc_binding(&mut code);
+    code.push_str(" = /*@__PURE__*/_defineComponent({\n  __name: \"");
+    escape_js_string_into(&mut code, component_name);
+    code.push_str("\",\n});\n");
+    let mut bindings = Vec::with_capacity(2);
+    bindings.push(binding);
+    (code, bindings)
+}
+
+/// The declared positions of a frozen script module, as fragment slots
+/// assembly fills: every `__sfc__` binding reference, the terminal
+/// default-export statement, and, inline, where `setup()` returns the
+/// render closure.
+#[derive(Debug, Default)]
+pub struct SfcSlots {
+    pub bindings: Vec<FragmentSlot>,
+    pub export_statement: Option<FragmentSlot>,
+    pub setup_return: Option<FragmentSlot>,
+}
+
+impl SfcSlots {
+    /// The slots `fragment` exposes for the identities it was frozen with
+    /// (`CodeTransform::freeze_marked`, one identity per
+    /// [`ScriptCodeGenResult`] marker). A binding inside the export
+    /// statement has no slot of its own: filling the statement removes it.
+    pub fn of(
+        fragment: &EmissionFragment<'_>,
+        bindings: &[MarkerId],
+        export_statement: Option<MarkerId>,
+        setup_return: Option<MarkerId>,
+    ) -> Self {
+        Self {
+            bindings: bindings
+                .iter()
+                .filter_map(|&id| fragment.slot(id))
+                .collect(),
+            export_statement: export_statement.and_then(|id| fragment.slot(id)),
+            setup_return: setup_return.and_then(|id| fragment.slot(id)),
+        }
+    }
+}
+
 /// Visit every public binding name supplied by one authoritative runtime macro
 /// shape. Runtime and IDE codegen share this projection so binding ownership
 /// cannot diverge between their independent output lanes.
@@ -121,7 +206,6 @@ pub struct ScriptContext<'alloc> {
     pub binding_order: Vec<&'alloc str>,
     pub imports: Vec<&'static str>,
     pub inline_inject_pos: Option<u32>,
-    pub alloc: &'alloc Allocator,
     /// Named/default user imports that official marks `setup-maybe-ref` —
     /// ref-bindable as inline template refs (`ref_key`/`ref: name`). The
     /// official rule: anything except namespace imports, default imports
@@ -164,8 +248,15 @@ pub struct ScriptCodeGenResult<'alloc> {
 /// All transformations are applied via [`CodeGenOutput`] (batch overwrite/prepend).
 /// The accumulated operations are applied to the [`CodeTransform`] in a single pass.
 ///
+/// `lane` is the component's [`bindings::script_lane_bindings`]: the
+/// context starts from them, and codegen only reads them.
+///
 /// Returns binding metadata for template codegen and runtime imports.
 #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Script generation borrows the two blocks, retained preparation, emission owner and binding views with their original lifetimes."
+)]
 pub fn generate_script<'alloc>(
     script: Option<&RootNodeScript>,
     script_setup: Option<&RootNodeScript>,
@@ -174,16 +265,16 @@ pub fn generate_script<'alloc>(
     ct: &mut CodeTransform<'alloc, impl verter_audit::observe::ObserveExec>,
     alloc: &'alloc Allocator,
     options: &ScriptCodeGenOptions<'_>,
-) -> ScriptCodeGenResult<'alloc> {
+    lane: bindings::ScriptLaneBindings<'alloc>,
+) -> Result<ScriptCodeGenResult<'alloc>, crate::code_transform::CodeTransformError> {
     let mut ctx = ScriptContext {
         source,
-        out: CodeGenOutput::new(alloc),
-        bindings: FxHashMap::default(),
-        binding_order: Vec::new(),
+        out: CodeGenOutput::with_mode(alloc, ct.map_mode()),
+        bindings: lane.bindings,
+        binding_order: lane.binding_order,
         imports: Vec::new(),
         inline_inject_pos: None,
-        alloc,
-        ref_bindable_imports: FxHashSet::default(),
+        ref_bindable_imports: lane.ref_bindable_imports,
     };
 
     // Official `@vue/compiler-sfc` wrapper gate: `isTS` when either script
@@ -214,21 +305,21 @@ pub fn generate_script<'alloc>(
     }
 
     // Apply all accumulated operations to CodeTransform
-    let codegen_imports = ctx.out.apply_to(ct);
+    let codegen_imports = ctx.out.apply_to(ct)?;
     ctx.imports.extend(codegen_imports.vue);
 
     // Deduplicate imports (multiple defineModel/useSlots calls can push the same import)
     ctx.imports.sort_unstable();
     ctx.imports.dedup();
 
-    ScriptCodeGenResult {
+    Ok(ScriptCodeGenResult {
         bindings: ctx.bindings,
         inline_inject_pos: ctx.inline_inject_pos,
         imports: ctx.imports,
         ref_bindable_imports: ctx.ref_bindable_imports,
         sfc_binding_markers: codegen_imports.sfc_binding_markers,
         sfc_export_statement_marker: codegen_imports.sfc_export_statement_marker,
-    }
+    })
 }
 
 #[cfg(test)]

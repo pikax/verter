@@ -612,7 +612,7 @@ fn no_error_x_v_slot_misplaced_on_template() {
 /// compiles `<div #[\`item:${baz.key}\`]="{ value }">` without error.
 #[test]
 fn parse_does_not_reject_v_slot_dynamic_arg_on_native_element() {
-    let parsed = crate::compile::parse_sfc(
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(
         r#"<template><div #[`item:${baz.key}`]="{ value }"></div></template>"#,
         None,
         None,
@@ -1046,4 +1046,29 @@ fn error_x_v_model_malformed_expression_on_entity_encoded_binary() {
     let src = r#"<template><input v-model="a &amp;&amp; b"></template>"#;
     let result = compile_sfc(src);
     assert_has_error(&result, "XVModelMalformedExpression");
+}
+
+// Self-closing `<template v-if />` followed by `v-else`
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+fn self_closing_template_v_if_followed_by_v_else_compiles_like_an_empty_template() {
+    let compile_with = |branch: &str| {
+        let src = format!(
+            "<script setup lang=\"ts\">\nconst c = false;\n</script>\n<template><div>{branch}<p v-else>a</p></div></template>"
+        );
+        let result = compile_sfc(&src);
+        assert_no_errors(&result);
+        result.template.expect("template block").code
+    };
+    let self_closing = compile_with(r#"<template v-if="c" />"#);
+    let empty_pair = compile_with(r#"<template v-if="c"></template>"#);
+    assert!(
+        self_closing.contains("STABLE_FRAGMENT"),
+        "the empty branch must close its fragment, got: {self_closing}"
+    );
+    assert_eq!(
+        self_closing.replace(['\n', ' '], ""),
+        empty_pair.replace(['\n', ' '], ""),
+    );
 }

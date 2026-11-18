@@ -1,3 +1,6 @@
+import { parseRequestId } from "@verter/native";
+import type { HostParsedRequestId } from "@verter/native";
+
 export interface VueQuery {
   vue: boolean;
   verter: boolean;
@@ -12,34 +15,31 @@ export interface ParsedVueRequest {
   query: VueQuery;
 }
 
-export function parseVueRequest(id: string): ParsedVueRequest {
-  const [filename, queryString] = id.split("?", 2);
-
-  if (!queryString) {
-    return { filename, query: { vue: false, verter: false } };
-  }
-
-  const params = new URLSearchParams(queryString);
-
-  // Parse lang from both `lang=less` and `lang.less` (Vite dot-notation) formats
-  let lang = params.get("lang") || undefined;
-  if (!lang) {
-    for (const key of params.keys()) {
-      if (key.startsWith("lang.")) {
-        lang = key.slice(5);
-        break;
-      }
-    }
-  }
-
-  const query: VueQuery = {
-    vue: params.has("vue"),
-    verter: params.has("verter"),
-    type: params.get("type") as VueQuery["type"],
-    index: params.has("index") ? parseInt(params.get("index")!, 10) : undefined,
-    scoped: params.has("scoped"),
-    lang,
+/** The query fields of a host-parsed request, in the vocabulary of `VueQuery`. */
+export function vueQueryOf(request: HostParsedRequestId): VueQuery {
+  const { kind, index } = request.nodeKind;
+  return {
+    vue: request.marker === "vue",
+    verter: request.marker === "verter",
+    type: kind === "main" ? undefined : kind === "custom" ? request.blockType : kind,
+    index,
+    scoped: request.scoped,
+    lang: request.lang,
   };
+}
 
-  return { filename, query };
+/**
+ * Splits a request id into the file path and the query flags this package
+ * reads. A projection of the host's id grammar: a refused request still states
+ * its path and the marker it carried.
+ */
+export function parseVueRequest(id: string): ParsedVueRequest {
+  const parsed = parseRequestId(id);
+  if ("rejected" in parsed) {
+    return {
+      filename: parsed.rawPath,
+      query: { vue: parsed.marker === "vue", verter: parsed.marker === "verter" },
+    };
+  }
+  return { filename: parsed.rawPath, query: vueQueryOf(parsed) };
 }

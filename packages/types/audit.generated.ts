@@ -1024,6 +1024,26 @@ lower_ms?: number | null, };
 export type FileRole = "Entry" | "DirectImport" | "TransitiveImport" | "TypeDep" | "IndexedReadyBuild" | "NotLoaded" | "ResolverWalk";
 
 /**
+ * One diagnostic the checker reports for the evaluated body: its code and
+ * where it starts and ends. A recovery the checker defines is a complete
+ * answer, so it is told apart from a partial by this list, never by
+ * [`FlowReturnInferencePayload::partiality`].
+ */
+export type FlowCheckerDiagnostic = {
+/**
+ * The checker's numeric diagnostic code.
+ */
+code: number,
+/**
+ * The byte offset into the function's file it starts at.
+ */
+start: number,
+/**
+ * The byte offset it ends at.
+ */
+end: number, };
+
+/**
  * Closed mirror of the session's `FlowReturnDegradation` — the reason a
  * usable flow-return value is incomplete.
  *
@@ -1061,26 +1081,6 @@ export type FlowFailureTag = "Missing" | "UnsupportedLoop" | "UnsupportedJump" |
  * was partial", never as "the complete inventory of what is missing".
  */
 export type FlowPartialityTag = { "Degraded": FlowDegradationTag } | { "NoValue": FlowFailureTag };
-
-/**
- * One diagnostic the checker reports for the evaluated body: its code and
- * where it starts and ends. A recovery the checker defines is a complete
- * answer, so it is told apart from a partial by this list, never by
- * [`FlowReturnInferencePayload::partiality`].
- */
-export type FlowCheckerDiagnostic = {
-/**
- * The checker's numeric diagnostic code.
- */
-code: number,
-/**
- * The byte offset into the function's file it starts at.
- */
-start: number,
-/**
- * The byte offset it ends at.
- */
-end: number, };
 
 /**
  * Per-request counters and the typed partiality reason for one

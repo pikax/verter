@@ -12,13 +12,13 @@ use thiserror::Error;
 pub use verter_language::FileLanguage;
 use verter_semantic_source::decl_lowering::DECL_LOWERING_DEFAULT_POOL_SIZE;
 
-/// Compact hex rendering of a [`Hash16`] for audit trace detail strings.
-/// The `{:?}` byte-array form costs ~4 chars per byte (`"255, "`) — on
+/// Compact lower-case hex rendering of a [`Hash16`], used by audit trace
+/// detail strings and by the bindings' `contentHash`. The `{:?}` byte-array form costs ~4 chars per byte (`"255, "`) — on
 /// per-request hot paths (e.g. the `ensure_indexed_ready_fast_hit` trace,
 /// emitted once per warm cache serve) that inflated encoding dominates the
 /// serialized audit footprint. Hex carries the same 16-byte identity
 /// losslessly in exactly 32 chars.
-pub(crate) fn format_hash16_hex(hash: &Hash16) -> String {
+pub fn format_hash16_hex(hash: &Hash16) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(32);
     for byte in hash {
@@ -1819,6 +1819,97 @@ pub struct ResolvedId {
     pub bundler_id: String,
     /// LSP-format virtual ID (e.g. `Comp.vue._VERTER_.style.0.css`).
     pub lsp_id: String,
+    /// The marker the request carries; `None` for a main request and for
+    /// an LSP-format id.
+    pub marker: Option<RequestMarker>,
+    /// The language the request names (`lang.<ext>` or `lang=<ext>`; the
+    /// extension may be dotted, as in `module.css`), or the style language
+    /// of an LSP-format style id.
+    pub lang: Option<String>,
+    /// Whether the request carries `scoped`.
+    pub scoped: bool,
+    /// The raw id up to its query or virtual-file suffix, as received.
+    pub raw_path: String,
+    /// The block type a custom block request names (its `type` value, or
+    /// the type of an LSP-format custom id); `None` for every other node.
+    pub block_type: Option<String>,
+}
+
+/// The marker of a bundler sub-request id: the grammar the carrier's
+/// sub-modules are requested in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, verter_retention::heap_size::HeapSize)]
+pub enum RequestMarker {
+    /// `vue`: Vue carriers, in the grammar the Vue ecosystem shares.
+    #[default]
+    Vue,
+    /// `verter`: carriers that have no ecosystem grammar.
+    Verter,
+}
+
+impl RequestMarker {
+    /// The marker of a carrier language: `vue` for a Vue carrier, `verter`
+    /// for every other.
+    pub fn of_language(language: &verter_language::FileLanguage) -> Self {
+        if language.is_vue() {
+            Self::Vue
+        } else {
+            Self::Verter
+        }
+    }
+
+    /// The query key that spells this marker.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Vue => "vue",
+            Self::Verter => "verter",
+        }
+    }
+}
+
+/// A raw id the host's id grammar rejects, with the facts the parse read
+/// before it refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedRawId {
+    /// Why the grammar refused the id.
+    pub reason: RawIdRejection,
+    /// The raw id up to its query or virtual-file suffix, as received.
+    pub raw_path: String,
+    /// The single marker the request carries, when it carries exactly one
+    /// kind of marker.
+    pub marker: Option<RequestMarker>,
+}
+
+/// Why a raw id is not a request of the host's id grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum RawIdRejection {
+    /// The request carries both the `vue` and the `verter` marker.
+    #[error("the request carries both markers")]
+    BothMarkers,
+    /// The request carries a marker but no `type` naming its block.
+    #[error("the request carries a marker but no type")]
+    MarkerWithoutType,
+    /// A marker, `type` or `index` appears more than once.
+    #[error("an owned query key is repeated")]
+    RepeatedOwnedKey,
+    /// The `index` is not a non-negative integer.
+    #[error("the index is not a non-negative integer")]
+    InvalidIndex,
+    /// An LSP-format id names a virtual-file suffix the host does not render.
+    #[error("unknown virtual-file suffix")]
+    UnknownVirtualSuffix,
+}
+
+impl RawIdRejection {
+    /// The stable wire code of the rejection.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::BothMarkers => "both-markers",
+            Self::MarkerWithoutType => "marker-without-type",
+            Self::RepeatedOwnedKey => "repeated-owned-key",
+            Self::InvalidIndex => "invalid-index",
+            Self::UnknownVirtualSuffix => "unknown-virtual-suffix",
+        }
+    }
 }
 
 /// Query parameters for [`VerterHost::get_virtual_file`](crate::VerterHost::get_virtual_file).
@@ -2710,11 +2801,26 @@ pub enum HostError {
     BlockContentRefused(BlockContentRefusal),
 }
 
+/// A raw request id as the id grammar reads it, before any host lookup.
 #[derive(Debug, Clone)]
-pub(crate) struct ParsedRawId {
-    pub(crate) canonical_id: String,
-    pub(crate) node_kind: VirtualNodeKind,
-    pub(crate) was_lsp_like: bool,
+pub struct ParsedRawId {
+    /// The canonical form of the id's path.
+    pub canonical_id: String,
+    /// The virtual node the id names.
+    pub node_kind: VirtualNodeKind,
+    /// Whether the id is in the LSP `._VERTER_.` format.
+    pub was_lsp_like: bool,
+    /// The marker the request carries; `None` for a main request and for
+    /// an LSP-format id.
+    pub marker: Option<RequestMarker>,
+    /// The language the request names, possibly dotted (`module.css`).
+    pub lang: Option<String>,
+    /// Whether the request carries `scoped`.
+    pub scoped: bool,
+    /// The raw id up to its query or virtual-file suffix, as received.
+    pub raw_path: String,
+    /// The block type a custom block request names.
+    pub block_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
@@ -2756,6 +2862,9 @@ pub struct FileMeta {
     pub template_lang: Option<String>,
     pub style_langs: Vec<Option<String>>,
     pub custom_types: Vec<String>,
+    /// The marker of this carrier's sub-module requests, from the language
+    /// the host classified it as.
+    pub request_marker: RequestMarker,
 }
 
 impl FileMeta {
@@ -2997,6 +3106,10 @@ pub struct CompileRequestResponse {
     pub diagnostics: DiagnosticsSnapshot,
     /// One row per requested product kind, in request order.
     pub products: Vec<CompiledProduct>,
+    /// The compile's complete artifact set in its terminal JSON form
+    /// (`CompileArtifactSet::to_json`), present exactly when the compile
+    /// published one.
+    pub artifact_set: Option<String>,
 }
 
 /// Why executing a caller-supplied canonical compile request failed.
@@ -4570,7 +4683,8 @@ mod tests {
                 | XInvalidMacroType
                 | XInvalidMacroScopeReference
                 | XUnresolvedImportedMacroType
-                | XCssParseError => false,
+                | XCssParseError
+                | XCodegenEditRefused => false,
             }
         }
 

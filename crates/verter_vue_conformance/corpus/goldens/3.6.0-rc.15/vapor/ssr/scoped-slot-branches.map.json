@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/ssr/scoped-slot-branches.vue"
+  ],
+  "names": [
+    "ChildComp"
+  ],
+  "mappings": ";;;;;8BAIAA;;kCAGkB,eAAG;;;;;0DACK,eAAG",
+  "sourcesContent": [
+    "\n  <ChildComp>\n    <template #cell=\"{ row }\">\n      <span v-if=\"row.a\">a</span>\n      <template v-else>{{ row.b }}</template>\n    </template>\n  </ChildComp>\n"
+  ]
+}

@@ -589,9 +589,7 @@ impl VerterHost {
                 store_view,
                 std::sync::Arc::clone(overlay),
             );
-            let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-                crate::resolver_core::HostCapabilities<M>,
-            > = &session_ctx;
+            let ctx: &dyn crate::resolver_core::HostRequestContext<M> = &session_ctx;
             let dispatch =
                 &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             self.compute_component_meta_state_inner(
@@ -631,9 +629,7 @@ impl VerterHost {
                 store_view,
                 std::sync::Arc::clone(overlay),
             );
-            let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-                crate::resolver_core::HostCapabilities<M>,
-            > = &session_ctx;
+            let ctx: &dyn crate::resolver_core::HostRequestContext<M> = &session_ctx;
             let dispatch =
                 &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             self.compute_component_meta_state_inner(
@@ -697,9 +693,7 @@ impl VerterHost {
                 cold_seed,
                 std::sync::Arc::clone(overlay),
             );
-            let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-                crate::resolver_core::HostCapabilities<M>,
-            > = &host_ctx;
+            let ctx: &dyn crate::resolver_core::HostRequestContext<M> = &host_ctx;
             let dispatch =
                 &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             self.compute_component_meta_state_inner(
@@ -759,9 +753,7 @@ impl VerterHost {
                 cold_seed,
                 std::sync::Arc::clone(overlay),
             );
-            let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-                crate::resolver_core::HostCapabilities<M>,
-            > = &host_ctx;
+            let ctx: &dyn crate::resolver_core::HostRequestContext<M> = &host_ctx;
             let dispatch =
                 &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             self.compute_component_meta_state_inner(
@@ -943,9 +935,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         whole_hash: Hash16,
-        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities<M>,
-        >,
+        ctx: &dyn crate::resolver_core::HostRequestContext<M>,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities<M>,
@@ -973,9 +963,7 @@ impl VerterHost {
         captured: Option<&CapturedComponentMetaInputs>,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
         registry_materialization: RegistryMaterialization,
-        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities<M>,
-        >,
+        ctx: &dyn crate::resolver_core::HostRequestContext<M>,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities<M>,
@@ -1082,7 +1070,22 @@ impl VerterHost {
         // feed this fold.
         let mut synthesis_diagnostics: Vec<
             verter_session_query::analysis::component_meta::MacroExpansionDiagnostics,
-        > = Vec::new();
+        > = if mode == ProjectionMode::Expanded {
+            // The publishing compute admits its macro rows here, from the
+            // bundles it consumes, whether or not they were already cached.
+            crate::resolver_core::component_meta_published_macros(
+                self,
+                ctx,
+                dispatch,
+                canonical,
+                &snapshot.macros,
+            )
+            .into_iter()
+            .flat_map(|input| input.diagnostics)
+            .collect()
+        } else {
+            Vec::new()
+        };
         let mut synthesis_suppression: Option<
             verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons,
         > = None;
@@ -1147,37 +1150,6 @@ impl VerterHost {
                 let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
                 {
                     component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
-                        "project_evaluated_types",
-                        format!(
-                            "owner={} props={} slot_bindings={} define_props={} define_slots={}",
-                            canonical,
-                            evaluated_types.props.len(),
-                            evaluated_types.slot_bindings.len(),
-                            evaluated_types.define_props.len(),
-                            evaluated_types.define_slots.len(),
-                        ),
-                    );
-                    // The flat evaluated projection is a METADATA + display
-                    // surface (exactness / execution status / diagnostics /
-                    // raw display types for the `evaluate_types` payload) —
-                    // never a published-source authority: every published
-                    // `SourcePosition` is owned by the NORMALIZED macro rows
-                    // the `define_*` shapes read. Each projector dispatches
-                    // `ResolveMacroPayload` + empty-path Shallow
-                    // `ProjectPath`, raises surface members, and writes
-                    // `Vec<ExpandedField>` into `evaluated_types.props` /
-                    // `.emits`. Recursive / Error branches emit diagnostics
-                    // into `synthesis_diagnostics` (silent-miss prevention).
-                    crate::meta_resolve::projectors::project_evaluated_types(
-                        &mut query_engine,
-                        canonical,
-                        &snapshot,
-                        &mut evaluated_types,
-                        &mut synthesis_diagnostics,
-                    );
-                }
-                {
-                    component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
                         "project_define_macro_shapes",
                         format!(
                             "owner={} props={} emits={}",
@@ -1190,15 +1162,15 @@ impl VerterHost {
                     // `define_slots`) is owned by the dispatch projector — the
                     // eager macro-object materialiser is retired. Each shape is
                     // built from the context-aware `vue_macro_dtos` normalized
-                    // rows (the sole published-source authority); the flat
-                    // fields contribute metadata only. NO solver / reparse /
+                    // rows (the sole published-source authority); each row
+                    // contributes its own metadata. NO solver / reparse /
                     // eval_source fallback.
                     crate::meta_resolve::projectors::project_define_macro_shapes(
-                        &mut query_engine,
+                        ctx,
+                        dispatch,
                         canonical,
                         &snapshot,
                         &mut evaluated_types,
-                        &mut synthesis_diagnostics,
                         purpose,
                     );
                 }

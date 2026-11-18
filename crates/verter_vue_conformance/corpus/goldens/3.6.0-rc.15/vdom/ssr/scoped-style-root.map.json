@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/ssr/scoped-style-root.vue"
+  ],
+  "names": [],
+  "mappings": ";;qBAMK,KAAK,EAAC,GAAG;;;wBAAZ,oBAAwB,KAAxB,UAAwB,mBAAR,QAAC",
+  "sourcesContent": [
+    "\n  <p class=\"a\">{{ n }}</p>\n"
+  ]
+}

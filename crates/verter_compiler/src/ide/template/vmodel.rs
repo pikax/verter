@@ -14,12 +14,12 @@ use verter_span::{GeneratedByteLen, SourceByteOffset, SourceByteRange};
 
 use super::props::{get_prop_end, kebab_to_camel_case};
 use crate::ast::types::ElementNode;
+use crate::code_transform::EditRecorder;
 use crate::ide::get_directive_name;
 use crate::ide::template::emit::{
     emit_expr_plan, emit_op, plan_user_expr, EmitOp, EmitText, ExprOptions, ExprPlan, Placement,
 };
-use crate::template::code_gen::binding::BindingResolver;
-use crate::template::code_gen::types::CodeGenOutput;
+use crate::template::binding::BindingResolver;
 use crate::template::oxc::types::OxcParsedProp;
 use crate::types::NodeProp;
 
@@ -33,7 +33,7 @@ pub(super) fn process_v_model<'alloc>(
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
     el: &ElementNode,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
     is_jsx: bool,
 ) {

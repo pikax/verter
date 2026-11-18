@@ -68,7 +68,7 @@ fn a_projected_offset_past_the_surface_is_refused_rather_than_clamped_to_its_end
     let allocator = Allocator::default();
     let ct = mixed(&allocator);
     let built = ct.build_string();
-    let product = MappingProduct::of(&ct);
+    let product = MappingProduct::of(&ct).expect("mapped transform");
     assert_eq!(product.projected_len(), built.len() as u32);
     let mapper = mapper_of("mixed.vue", MIXED_SOURCE, product);
     let end = mapper.product().projected_len();
@@ -112,7 +112,11 @@ fn a_projected_offset_past_the_surface_is_refused_rather_than_clamped_to_its_end
 fn a_range_reaching_synthesized_bytes_is_refused_whole_rather_than_narrowed() {
     let allocator = Allocator::default();
     let ct = mixed(&allocator);
-    let mapper = mapper_of("mixed.vue", MIXED_SOURCE, MappingProduct::of(&ct));
+    let mapper = mapper_of(
+        "mixed.vue",
+        MIXED_SOURCE,
+        MappingProduct::of(&ct).expect("mapped transform"),
+    );
 
     // 17..19 is authored, 19..27 is the wholly synthetic replacement text. A
     // mapper that answered with the mapped part alone would apply the caller's
@@ -137,7 +141,11 @@ fn a_range_reaching_synthesized_bytes_is_refused_whole_rather_than_narrowed() {
 fn an_elided_carrier_position_answers_with_no_projection_rather_than_a_neighbour() {
     let allocator = Allocator::default();
     let ct = mixed(&allocator);
-    let mapper = mapper_of("mixed.vue", MIXED_SOURCE, MappingProduct::of(&ct));
+    let mapper = mapper_of(
+        "mixed.vue",
+        MIXED_SOURCE,
+        MappingProduct::of(&ct).expect("mapped transform"),
+    );
 
     // Carrier 13..25 reaches no output at all. Its neighbours do, so a mapper
     // that fell through to the nearest correspondence would return a
@@ -165,7 +173,11 @@ fn an_elided_carrier_position_answers_with_no_projection_rather_than_a_neighbour
 fn rewritten_text_answers_at_region_granularity_and_refuses_inside_itself() {
     let allocator = Allocator::default();
     let ct = mixed(&allocator);
-    let mapper = mapper_of("mixed.vue", MIXED_SOURCE, MappingProduct::of(&ct));
+    let mapper = mapper_of(
+        "mixed.vue",
+        MIXED_SOURCE,
+        MappingProduct::of(&ct).expect("mapped transform"),
+    );
 
     assert_eq!(
         mapper.to_carrier(span(15, 17)),
@@ -214,7 +226,11 @@ fn a_carrier_position_answers_with_every_projection_in_ascending_projected_order
     // already projects.
     ct.batch_prepend_left_with_source_map(&[(6, Some((2, 0)), inserted)]);
     assert_eq!(ct.build_string(), "alpha Xbeta");
-    let mapper = mapper_of("two-emissions.vue", source, MappingProduct::of(&ct));
+    let mapper = mapper_of(
+        "two-emissions.vue",
+        source,
+        MappingProduct::of(&ct).expect("mapped transform"),
+    );
 
     assert_eq!(
         mapper.to_projected(2),
@@ -245,7 +261,11 @@ fn relocated_preimages_with_a_gap_between_them_refuse_instead_of_spanning_it() {
     let mut ct = CodeTransform::new(source, &allocator);
     ct.move_slice(4, 6, 0);
     assert_eq!(ct.build_string(), "EFABCD");
-    let mapper = mapper_of("relocated.vue", source, MappingProduct::of(&ct));
+    let mapper = mapper_of(
+        "relocated.vue",
+        source,
+        MappingProduct::of(&ct).expect("mapped transform"),
+    );
 
     assert_eq!(
         mapper.to_carrier(span(0, 2)),
@@ -274,7 +294,11 @@ fn a_declared_zero_width_insertion_resolves_to_its_authored_anchor() {
     let preamble = ct.alloc_str("import { ref } from \"vue\";\n");
     ct.batch_prepend_left_static(&[(8, preamble)]);
     ct.set_helper_preamble_content_at(preamble, 8);
-    let mapper = mapper_of("preamble.vue", source, MappingProduct::of(&ct));
+    let mapper = mapper_of(
+        "preamble.vue",
+        source,
+        MappingProduct::of(&ct).expect("mapped transform"),
+    );
 
     // An engine anchors an auto-import at the start of the generated preamble.
     // Those bytes are synthesized, so the insertion is answerable only through
@@ -303,8 +327,16 @@ fn an_edit_changes_the_map_revision_while_the_carrier_unit_survives_it() {
     let mut second = CodeTransform::new(after, &allocator);
     second.overwrite(10, 11, "42");
 
-    let before_map = mapper_of("edited.vue", before, MappingProduct::of(&first));
-    let after_map = mapper_of("edited.vue", after, MappingProduct::of(&second));
+    let before_map = mapper_of(
+        "edited.vue",
+        before,
+        MappingProduct::of(&first).expect("mapped transform"),
+    );
+    let after_map = mapper_of(
+        "edited.vue",
+        after,
+        MappingProduct::of(&second).expect("mapped transform"),
+    );
 
     assert_eq!(
         before_map.unit(),
@@ -328,8 +360,16 @@ fn an_edit_changes_the_map_revision_while_the_carrier_unit_survives_it() {
 fn identical_projections_compose_identical_identities_and_a_different_one_differs() {
     let allocator = Allocator::default();
     let ct = mixed(&allocator);
-    let one = mapper_of("stable.vue", MIXED_SOURCE, MappingProduct::of(&ct));
-    let two = mapper_of("stable.vue", MIXED_SOURCE, MappingProduct::of(&ct));
+    let one = mapper_of(
+        "stable.vue",
+        MIXED_SOURCE,
+        MappingProduct::of(&ct).expect("mapped transform"),
+    );
+    let two = mapper_of(
+        "stable.vue",
+        MIXED_SOURCE,
+        MappingProduct::of(&ct).expect("mapped transform"),
+    );
     assert_eq!(one.revision(), two.revision());
     assert_eq!(one.projection_map_id(), two.projection_map_id());
     assert_eq!(one.product(), two.product());
@@ -342,7 +382,7 @@ fn identical_projections_compose_identical_identities_and_a_different_one_differ
     let other = mapper_of(
         "stable.vue",
         MIXED_SOURCE,
-        MappingProduct::of(&without_rewrite),
+        MappingProduct::of(&without_rewrite).expect("mapped transform"),
     );
     assert_eq!(one.unit(), other.unit());
     assert_ne!(

@@ -323,21 +323,22 @@ fn assert_source_map_token_resolves(
 }
 
 /// Build a [`FrameworkParseArtifact`] the same way the crate's own
-/// `#[cfg(test)]`-internal `vue_bridge::tests::artifact_for` does, but as a
+/// `#[cfg(test)]`-internal `vue_bundle::tests::artifact_for` does, but as a
 /// standalone re-implementation reachable from this integration test (the
 /// internal one is not `pub`/visible outside the crate's own unit-test
 /// build).
 fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
     use verter_language::carrier_grammar::{
-        CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-        FrameworkAdapterSemanticVersion,
+        CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
     };
     use verter_language::registered_source_authority::{
         CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
     };
     let source_authority = RegisteredSourceAuthority::new().unwrap();
     let grammar_authority = CarrierGrammarAuthority::new().unwrap();
-    let config = CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap();
+    let config =
+        crate::framework_common::vue_grammar_config("{{", "}}", std::iter::empty::<&str>())
+            .unwrap();
     grammar_authority
         .register_carrier_grammar(
             verter_language::FileLanguage::vue(),

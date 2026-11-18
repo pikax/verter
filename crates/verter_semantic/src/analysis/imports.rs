@@ -144,8 +144,9 @@ pub(crate) fn analyze_import_declaration(
     }
 }
 
-/// Check if a source specifier refers to Vue.
-fn is_vue_source(source: &str) -> bool {
+/// Whether an import source specifier is Vue's runtime: `vue`, a `vue/…`
+/// entry, or one of the `@vue` runtime packages.
+pub fn is_vue_source(source: &str) -> bool {
     source == "vue"
         || source == "vue/dist/vue.esm-bundler.js"
         || source.starts_with("vue/")

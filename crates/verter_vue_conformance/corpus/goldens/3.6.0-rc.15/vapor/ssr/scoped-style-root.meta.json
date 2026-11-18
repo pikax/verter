@@ -1,0 +1,86 @@
+{
+  "schema": 2,
+  "caseId": "ssr/scoped-style-root",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/scoped-style-root.vue",
+    "sha256": "bb484d33c5da5ca6dd582d5baf8dcbd099e8d5fd9f16ccbe8278c8a75f8f1e0c"
+  },
+  "options": {
+    "sha256": "8f00510be4558551b1db126f6f4c2c3b7270a98dbd3f39241b4202bef7336de9",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/ssr/scoped-style-root.vue",
+      "id": "ssr/scoped-style-root",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/scoped-style-root.js",
+      "sha256": "c2d0dc8fd06d687a8d8d228eeaaad1d2892b74e2ef5bdeef064143345a8f1a35",
+      "bytes": 836
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/scoped-style-root.map.json",
+      "sha256": "53a5bde5875a09a7ea4ffad0c67a760e80fe7cc8dce97e0b22fb1ab8f934ddd1"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "defineVaporComponent",
+      "alias": "_defineVaporComponent"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "txt",
+      "alias": "_txt"
+    }
+  ]
+}

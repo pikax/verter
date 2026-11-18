@@ -1,0 +1,33 @@
+error[E0599]: no method named `text_mut` found for struct `EmittedArtifact` in the current scope
+  --> tests/cases/compile-fail/published_artifact_text_is_read_only.rs:16:14
+   |
+16 |     artifact.text_mut().push_str("// appended");
+   |              ^^^^^^^^
+   |
+help: there is a method `text` with a similar name
+   |
+16 -     artifact.text_mut().push_str("// appended");
+16 +     artifact.text().push_str("// appended");
+   |
+
+error[E0616]: field `text` of struct `EmittedArtifact` is private
+  --> tests/cases/compile-fail/published_artifact_text_is_read_only.rs:17:14
+   |
+17 |     artifact.text.push_str("// appended");
+   |              ^^^^ private field
+   |
+help: a method `text` also exists, call it with parentheses
+   |
+17 |     artifact.text().push_str("// appended");
+   |                  ++
+
+error[E0624]: method `into_parts` is private
+  --> tests/cases/compile-fail/published_artifact_text_is_read_only.rs:18:34
+   |
+18 |     let (_text, _map) = artifact.into_parts();
+   |                                  ^^^^^^^^^^ private method
+   |
+  ::: src/assembly/emit_plan/artifact.rs
+   |
+   |     pub(crate) fn into_parts(self) -> (String, Option<DecodedMap>) {
+   |     -------------------------------------------------------------- private method defined here

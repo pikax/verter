@@ -1,0 +1,78 @@
+{
+  "schema": 2,
+  "caseId": "ssr/scoped-style-root",
+  "backend": "vdom",
+  "topology": "inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/scoped-style-root.vue",
+    "sha256": "bb484d33c5da5ca6dd582d5baf8dcbd099e8d5fd9f16ccbe8278c8a75f8f1e0c"
+  },
+  "options": {
+    "sha256": "b28fef07932cb453a8c29e7946d467e39ebf187bdd42ffcd8428020be36af271",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/ssr/scoped-style-root.vue",
+      "id": "ssr/scoped-style-root",
+      "pipeline": "compileScript:inlineTemplate",
+      "topology": "inline",
+      "inlineTemplate": true,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vdom-inline/ssr/scoped-style-root.js",
+      "sha256": "9d13e126be2b677dac50d52f851f3169c313ae33ffe6d8c9a23c9981994fc5a1",
+      "bytes": 599
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vdom-inline/ssr/scoped-style-root.map.json",
+      "sha256": "cb56dd0c4230eaee399da4a38a4594e8365ba9609c3149e04fe9b55eb1ef0602"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

@@ -16,26 +16,6 @@ use verter_language::FrameworkAdapterId;
 
 use crate::compile::types::{CompileDiagnosticSeverity, DestructuredBlockMeta};
 
-/// IDE-codegen options threaded into the carrier IDE-compile entry.
-///
-/// The neutral subset the framework-neutral IDE seam needs: the file
-/// name (for component-name + source-map identity) and the IDE-only
-/// compile target bits. A framework whose IDE output needs richer
-/// options extends this struct (a compile-visible decision), never a
-/// side channel.
-#[derive(Debug, Clone, Default)]
-pub struct IdeCompileOptions {
-    /// The carrier file name for component-name extraction and source-map
-    /// identity. `None` falls back to the framework default.
-    pub filename: Option<String>,
-    /// When true, skip source-map generation (empty `source_map`).
-    pub skip_source_map: bool,
-    /// Embed the ambient `@verter/types` module block in the IDE output.
-    pub embed_ambient_types: bool,
-    /// Host-validated semantic block bytes for IDE multi-unit lowering.
-    pub block_content: RuntimeBlockContentInputs,
-}
-
 /// The rendered IDE (TSX/JSX) artifact a carrier IDE compile
 /// produces.
 ///
@@ -337,9 +317,8 @@ pub enum CompileUnsupported {
     RequestExecutionRefused(crate::compile_request::CompileRequestError),
     /// A product leg was demanded without (or with the wrong) consume-once
     /// execution grant for it. Product-backend legs execute only under a
-    /// grant carved off the demand's admission (or minted crate-privately
-    /// by the registry bundle route); a demanded-but-ungranted leg fails
-    /// closed instead of executing without admission evidence.
+    /// grant carved off the demand's admission; a demanded-but-ungranted
+    /// leg fails closed instead of executing without admission evidence.
     ProductExecutionUngranted {
         /// The demanded product whose execution grant was absent or wrong.
         product: crate::compile_request::ProductKind,
@@ -349,16 +328,14 @@ pub enum CompileUnsupported {
     VueMainAssemblyFailed(String),
 }
 
-/// The registry-dispatched routes' grant mint: the
-/// `compile_bundle` / `compile_ide` entries mint their leg grants
-/// directly from the neutral option demand
-/// at the route boundary, because those routes carry no host-issued
-/// admission. Crate-private: an external caller reaches a product backend
-/// only through an admission carve, so grant minting authority never
-/// leaves the crate. Production host-integration carves grants off
-/// admission; this helper exists only for the test-support registry shim.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn registry_route_execution_grants(
+/// Test-only grant mint for driving a carrier's shared bundle orchestration
+/// directly: the leg grants come straight from the neutral option demand,
+/// because a direct call carries no host-issued admission. Crate-private:
+/// an external caller reaches a product backend only through an admission
+/// carve, so grant minting authority never leaves the crate. Production
+/// host integration carves grants off admission.
+#[cfg(test)]
+pub(crate) fn direct_bundle_execution_grants(
     opts: &RuntimeCompileOptions,
 ) -> super::capability::ProductExecutionGrants {
     use super::capability::{ProductExecutionGrant, ProductExecutionGrants};
@@ -548,8 +525,8 @@ impl Default for RuntimeCompileOptions {
     /// and template-data products are not.
     ///
     /// Written out rather than derived because [`want_runtime`](Self::want_runtime)
-    /// must default to `true`. This struct is the option set for
-    /// `compile_bundle`, whose subject is the runtime module; a derived `false`
+    /// must default to `true`. This struct is the option set for the carrier
+    /// bundle orchestration, whose subject is the runtime module; a derived `false`
     /// would make the default request ask for NO product at all and answer with
     /// a silently empty bundle instead of a compile.
     fn default() -> Self {
@@ -856,7 +833,7 @@ pub struct RuntimeCompileOutput {
     /// bridge, which takes them to mint [`Self::custom_block_artifacts`].
     /// Opaque outside the bridge; `pub` only so cross-crate struct-update
     /// construction (`..Default::default()`) still compiles.
-    pub custom_block_facts: super::vue_bridge::StagedCustomBlockFacts,
+    pub custom_block_facts: super::vue_bundle::StagedCustomBlockFacts,
     /// The scope id (`data-v-xxxxxxxx`), empty when none.
     pub scope_id: String,
     /// The IDE (TSX/JSX) artifact, present when `want_ide` was requested AND

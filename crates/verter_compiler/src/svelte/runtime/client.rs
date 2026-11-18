@@ -38,7 +38,6 @@ use super::html::StaticTemplatePlan;
 use super::ir::{IrNode, NodeId, SvelteRuntimeIr, TemplateScopeId};
 use super::topology::ClientTopologyPlan;
 use super::whitespace::{clean_nodes, CleanContext, CleanItem};
-use oxc_allocator::Allocator;
 
 pub use super::client_output::{ClientModule, ScopedCssArtifact};
 pub use super::unsupported::{
@@ -101,7 +100,6 @@ pub(super) fn emit_client_module(
     html_plan: &StaticTemplatePlan,
     topology: &ClientTopologyPlan,
     options: ClientEmitOptions<'_>,
-    allocator: &Allocator,
 ) -> Result<ClientModule, super::ClientCompileError> {
     let mut emitter = ClientEmitter::new(plan);
     emitter.injected_css = options.injected_css;
@@ -111,7 +109,6 @@ pub(super) fn emit_client_module(
         topology,
         options.filename,
         options.want_source_map,
-        allocator,
     )
 }
 
@@ -358,7 +355,6 @@ impl<'a> ClientEmitter<'a> {
         topology: &ClientTopologyPlan,
         filename: Option<&str>,
         want_source_map: bool,
-        allocator: &Allocator,
     ) -> Result<ClientModule, super::ClientCompileError> {
         let mut out = super::output::SvelteRuntimeOutput::default();
 
@@ -467,7 +463,7 @@ impl<'a> ClientEmitter<'a> {
             declared_imports.extend(import.declared_imports());
         }
 
-        let (code, source_map) = out.finish(source, filename, want_source_map, allocator)?;
+        let (code, source_map) = out.finish(source, filename, want_source_map)?;
         Ok(ClientModule {
             code,
             source_map,

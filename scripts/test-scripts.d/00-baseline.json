@@ -293,11 +293,6 @@
     },
     {
       "runner": "node-test",
-      "file": "tests/architecture-health/ARH5/arh5.test.mjs",
-      "ci": false
-    },
-    {
-      "runner": "node-test",
       "file": "tests/architecture-health/ARH7/arh7.test.mjs",
       "ci": false
     },

@@ -403,6 +403,7 @@ pub(crate) fn compile_request_response_to_napi(
         canonical_id,
         diagnostics,
         products,
+        artifact_set,
     } = input;
     let products = products
         .into_iter()
@@ -451,6 +452,7 @@ pub(crate) fn compile_request_response_to_napi(
         canonicalId: canonical_id,
         diagnostics: host_diagnostics_to_napi(&diagnostics, Some(source)),
         products,
+        artifactSet: artifact_set,
     })
 }
 

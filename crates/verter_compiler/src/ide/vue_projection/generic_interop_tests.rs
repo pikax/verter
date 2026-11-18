@@ -157,13 +157,14 @@ fn sfc(generic: Option<&str>, template: &str) -> String {
 
 fn project_with(generic: Option<&str>, template: &str) -> AdvancedGenericUseProjection {
     let source = sfc(generic, template);
-    let parsed = crate::compile::parse_sfc(&source, None, None);
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(&source, None, None);
     let plan = build_projection_plan(PlanInput {
         canonical_id: "file:///Parent.vue",
         source: &source,
         parsed: &parsed,
         parse_key: None,
         syntax_profile: None,
+        custom_elements: None,
     });
     let attributes = project_attribute_operations(&plan, &parsed, &source);
     let uses = project_component_uses(&plan, &attributes);
@@ -262,10 +263,14 @@ fn foreign_contract_declarations_keep_published_shapes() {
     assert_eq!(USE_PRELUDE.matches(declarations).count(), 1);
     let contract = declarations
         .lines()
-        .find(|line| line.starts_with(&format!("type {USE_CONTRACT}<C> = ")))
+        .find(|line| {
+            line.starts_with(&format!(
+                "type {USE_CONTRACT}<C, Public extends boolean = false> = "
+            ))
+        })
         .expect("contract declaration");
     assert!(contract.contains(&format!(
-        "__VerterUseTupleRest<C> extends true ? C : C extends abstract new (...args: infer A) => unknown ? ({USE_OPEN_ARGS}<A> extends true ? {USE_CONSTRUCTS}<C, unknown, never, []> : C) : {USE_CALLS}<C, unknown, never, []>;"
+        "__VerterUseTupleRest<C> extends true ? C : C extends abstract new (...args: infer A) => unknown ? (Public extends true ? C : {USE_OPEN_ARGS}<A> extends true ? {USE_CONSTRUCTS}<C, unknown, never, []> : C) : {USE_CALLS}<C, unknown, never, [], Public>;"
     )));
     assert!(declarations.contains(
         "type __VerterUseTupleRest<C> = C extends new <T extends any[]>(...args: T) => { readonly args: T } ? true : C extends new <T extends readonly any[]>(...args: T) => { readonly args: T } ? true : false;"
@@ -292,7 +297,7 @@ fn foreign_contract_declarations_keep_published_shapes() {
         "declare function {USE_CONSTRUCTOR}<P, I>(component: abstract new (props: P) => I): new (props: {USE_TOLERANT}<P, I>) => I;"
     )));
     assert!(declarations.contains(&format!(
-        "declare function {USE_COMPONENT}<C, A>(component: C, tolerant: A): {USE_CONTRACT}<C> & A;"
+        "declare function {USE_COMPONENT}<C, A>(component: C, tolerant: A): {USE_CONSTRUCTS}<{USE_CONTRACT}<C>, unknown, never, [], A, {USE_CONTRACT}<C> & A>;"
     )));
     let results = declared_results();
     assert_eq!(results.len(), declarations.lines().count());
@@ -380,13 +385,14 @@ fn generic_use_availability_keeps_unavailable_uses_unwitnessed() {
 #[test]
 fn generic_use_witness_values_keep_their_authored_origin() {
     let source = sfc(Some(PARENT_GENERIC), POSITIVE_TEMPLATE);
-    let parsed = crate::compile::parse_sfc(&source, None, None);
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(&source, None, None);
     let plan = build_projection_plan(PlanInput {
         canonical_id: "file:///Parent.vue",
         source: &source,
         parsed: &parsed,
         parse_key: None,
         syntax_profile: None,
+        custom_elements: None,
     });
     let attributes = project_attribute_operations(&plan, &parsed, &source);
     let uses = project_component_uses(&plan, &attributes);

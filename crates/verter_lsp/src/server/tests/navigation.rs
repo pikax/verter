@@ -1,5 +1,56 @@
 use super::*;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn initial_rename_waits_for_ownership_before_initialized_spawns_the_build() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    std::fs::write(temporary.path().join("tsconfig.json"), "{}").expect("config");
+    let source = "<script setup>const count = 1</script><template>{{ count }}</template>";
+    std::fs::write(temporary.path().join("App.vue"), source).expect("carrier");
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let (service, _socket, _provider) = make_claimancy_rename_test_server(ws);
+    let server = service.inner();
+    let root_uri = crate::uri::path_to_file_uri(&temporary.path().to_string_lossy()).unwrap();
+    super::super::lifecycle::handle_initialize(
+        server,
+        serde_json::from_value(serde_json::json!({
+            "capabilities": {},
+            "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }]
+        }))
+        .unwrap(),
+    )
+    .await
+    .expect("initialize");
+    let canonical = temporary
+        .path()
+        .join("App.vue")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let uri = open_test_vue(server, &canonical, source);
+    let admission = super::super::rename_plan::rename_request_admission(server, &uri);
+    tokio::pin!(admission);
+    assert!(
+        futures_util::poll!(&mut admission).is_pending(),
+        "rename waits even before initialized reaches its background spawn"
+    );
+    server
+        .spawn_background_init(None, "initial ownership fixture")
+        .await;
+    let admitted = tokio::time::timeout(std::time::Duration::from_secs(10), admission)
+        .await
+        .expect("ownership publication wakes rename");
+    assert!(
+        matches!(
+            admitted,
+            super::super::rename_plan::RenameAdmission::Serve {
+                ownership_witness: Some(_)
+            }
+        ),
+        "rename resumes only with authoritative ownership"
+    );
+}
+
 #[test]
 fn module_reference_request_kind_uses_require_semantics() {
     let require_reference = test_module_reference_with_semantics(

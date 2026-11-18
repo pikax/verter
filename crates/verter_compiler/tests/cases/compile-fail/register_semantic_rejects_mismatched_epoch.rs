@@ -9,5 +9,6 @@ fn main() {
         FrameworkAdapterId::new("vue"),
         LanguageId::new("vue"),
         Present(VueSemanticAuthority),
-    );
+    )
+    .expect("the test manifest is admitted");
 }

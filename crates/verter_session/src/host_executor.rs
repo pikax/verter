@@ -543,9 +543,17 @@ impl HostStageExecutor {
                         return Err(StageError::stack_unavailable(*needed));
                     }
                 }
-                let envelope = published
-                    .into_envelope()
-                    .ok_or_else(|| StageError::new("carrier publication did not admit"))?;
+                let envelope = match published {
+                    crate::carrier_publication_store::PublicationOutcome::Published(envelope)
+                    | crate::carrier_publication_store::PublicationOutcome::Adopted(envelope) => {
+                        envelope
+                    }
+                    failure => {
+                        return Err(StageError::new(format!(
+                            "carrier publication did not admit: {failure:?}"
+                        )))
+                    }
+                };
                 (
                     Arc::clone(envelope.artifact()),
                     crate::carrier_publication_store::RegisteredFileStructure::new(envelope),

@@ -1,0 +1,60 @@
+{
+  "schema": 2,
+  "caseId": "v-bind/static-dynamic",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-bind/static-dynamic.vue",
+    "sha256": "f1f5e466f7a777fa082733b9ddbcfa1ce2437cd599ac582d0619ca30c26ea2f4"
+  },
+  "options": {
+    "sha256": "cfd4688572029b8e8f3d61e1520f60a3765e0d1082eb03619ea5a7544d4e1051",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/v-bind/static-dynamic.vue",
+      "id": "v-bind/static-dynamic",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/v-bind/static-dynamic.js",
+      "sha256": "c0f0e87485cdf7cf8c9c135949555d4baac65418f070082a9020d8743cc2ad70",
+      "bytes": 765
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/v-bind/static-dynamic.map.json",
+      "sha256": "0d10a7de777cec794d9445dba1c7fcae7ea04b573bae14e830eb64d24c1e17a7"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "mergeProps",
+      "alias": "_mergeProps"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    }
+  ]
+}

@@ -219,16 +219,14 @@ fn bench_resolve(c: &mut Criterion) {
     let mut group = c.benchmark_group("resolve");
 
     group.bench_function("canonical", |b| {
-        b.iter(|| {
-            black_box(host.resolve(black_box("/src/Comp.vue")));
-        })
+        b.iter(|| black_box(host.resolve(black_box("/src/Comp.vue"))))
     });
 
     group.bench_function("bundler_query", |b| {
         b.iter(|| {
             black_box(host.resolve(black_box(
                 "/src/Comp.vue?vue&type=style&index=0&scoped=true&lang.css",
-            )));
+            )))
         })
     });
 

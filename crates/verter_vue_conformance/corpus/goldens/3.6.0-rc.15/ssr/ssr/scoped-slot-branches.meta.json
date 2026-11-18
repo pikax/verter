@@ -1,0 +1,91 @@
+{
+  "schema": 2,
+  "caseId": "ssr/scoped-slot-branches",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/scoped-slot-branches.vue",
+    "sha256": "e58468ed5605826894dfa6bd13af9735cc2059631111530a32eadcbe12f57b91"
+  },
+  "options": {
+    "sha256": "b6b56be7e884eb8694ed9c1e01bc83787736341656b9769157e5c55dababe53e",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/ssr/scoped-slot-branches.vue",
+      "id": "ssr/scoped-slot-branches",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/scoped-slot-branches.js",
+      "sha256": "4104c83ca57b79fec792087132575ccc567cce192dcec7b62f079473b08fd4be",
+      "bytes": 1577
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/scoped-slot-branches.map.json",
+      "sha256": "8551e598ab362692a525b6e963c9c957601c263bba1f5230a3fd28179f229553"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createBlock",
+      "alias": "_createBlock"
+    },
+    {
+      "imported": "createCommentVNode",
+      "alias": "_createCommentVNode"
+    },
+    {
+      "imported": "createTextVNode",
+      "alias": "_createTextVNode"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "Fragment",
+      "alias": "_Fragment"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "withCtx",
+      "alias": "_withCtx"
+    }
+  ]
+}

@@ -695,6 +695,8 @@ pub struct ServerCore {
     /// init task. Background tasks check this before committing results to discard
     /// stale work when a newer init supersedes them.
     init_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Progress of the live initialization, including its ownership publication.
+    initialization_progress: tokio::sync::watch::Sender<(u64, bool)>,
     /// This server's interactive-handler activity: every request handler
     /// holds a guard on it, and the background scanner and heartbeat read
     /// it. Owned per server, so no other server in the process shares it.
@@ -1679,6 +1681,7 @@ impl VerterLanguageServer {
             workspace_scan_demanded: std::sync::atomic::AtomicBool::new(false),
             workspace_scan_settled: tokio::sync::Notify::new(),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            initialization_progress: tokio::sync::watch::channel((0, false)).0,
             handler_activity: Arc::new(HandlerActivity::default()),
             ownership_generation_fence: Arc::new(
                 crate::configured_owner::OwnershipGenerationFence::default(),

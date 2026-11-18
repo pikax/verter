@@ -44,8 +44,12 @@ export interface BindingInitializer {
      */
     asyncComponentSource?: string;
   };
+  /** `const x = ns.foo()`. */
+  MemberCall?: { object: string; property: string };
   Literal?: { kind: string };
   Reference?: { name: string };
+  /** `c` in `const { b: c } = ns`. */
+  MemberReference?: { object: string; property: string };
   Other?: Record<string, never>;
 }
 

@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/ssr/slot-handler-statements.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;sBAQE,CAEY;;;;;UADV,aAA8C;YAArC,OAAK,aAAE,QAAC,OAAO,QAAC;aAAO,OAAK",
+  "sourcesContent": [
+    "\n  <ChildComp>\n    <button @click=\"a = ''; b = ''\">reset</button>\n  </ChildComp>\n"
+  ]
+}

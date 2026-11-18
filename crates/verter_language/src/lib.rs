@@ -68,6 +68,6 @@ pub use parse_identity::{
     VUE_SYNTAX_COMPATIBILITY_EPOCH,
 };
 pub use registry::{
-    GatedCandidate, LanguageRegistry, LanguageRow, RowClassification, StaticClassification,
-    SVELTE_RUNE_MODULE_LANGUAGE_ID,
+    CarrierExtensionError, GatedCandidate, LanguageRegistry, LanguageRow, RowClassification,
+    StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
 };

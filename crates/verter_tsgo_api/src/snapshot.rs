@@ -81,7 +81,7 @@ impl RealDirSource for EmptyRealDirSource {
 /// The tsgo wire and the gate harness both compare on forward-slash paths
 /// (harness.mjs `norm`), so the overlay keys are stored normalized and lookups
 /// normalize the incoming path the same way. This is portable across OSes.
-fn norm_path(p: &str) -> String {
+pub(crate) fn norm_path(p: &str) -> String {
     p.replace('\\', "/")
 }
 

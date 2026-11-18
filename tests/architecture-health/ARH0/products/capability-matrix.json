@@ -9,7 +9,7 @@
       "capability": "vue-sfc-compilation-conformance",
       "status": "implemented",
       "engine": "vue/@vue/compiler-sfc/@vue/compiler-core",
-      "version": "3.6.0-rc.5",
+      "version": "3.6.0-rc.15",
       "versionSource": "package.json",
       "consumers": [
         "crates/verter_vue_conformance",

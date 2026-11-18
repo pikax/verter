@@ -60,17 +60,18 @@ type __VerterUsePeeled<N> = { readonly __verterUsePeeled: N };
 type __VerterUseOrdered<T, Acc> = T extends readonly [infer H, ...infer R] ? __VerterUseOrdered<R, Acc & H> : Acc;
 type __VerterUseTupleRest<C> = C extends new <T extends any[]>(...args: T) => { readonly args: T } ? true : C extends new <T extends readonly any[]>(...args: T) => { readonly args: T } ? true : false;
 type __VerterUseConstruct<A extends readonly unknown[], I> = __VerterUseOpenArgs<A> extends true ? (I extends { readonly $props: infer P } ? new (props: P) => I : new (props: Record<string, never>) => I) : new (...args: A) => I;
-type __VerterUseConstructs<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends abstract new (...args: infer A) => infer I ? (A extends readonly [__VerterUsePeeled<number>] ? __VerterUseOrdered<Out, unknown> : __VerterUseSame<[A, I], Prev> extends true ? __VerterUseOrdered<Out, unknown> : __VerterUseConstructs<C, Seen & { new (...args: A): I; new (...args: [__VerterUsePeeled<Out["length"]>]): never }, [A, I], [__VerterUseConstruct<A, I>, ...Out]>) : C;
+type __VerterUseConstructs<C, Seen, Prev, Out extends readonly unknown[], Single = never, Fallback = C> = (Seen & C) extends abstract new (...args: infer A) => infer I ? (A extends readonly [__VerterUsePeeled<number>] ? ([Single] extends [never] ? __VerterUseOrdered<Out, unknown> : Out extends readonly [unknown] ? Single : Fallback) : __VerterUseSame<[A, I], Prev> extends true ? ([Single] extends [never] ? __VerterUseOrdered<Out, unknown> : Fallback) : __VerterUseConstructs<C, Seen & { new (...args: A): I; new (...args: [__VerterUsePeeled<Out["length"]>]): never }, [A, I], [__VerterUseConstruct<A, I>, ...Out], Single, Fallback>) : Fallback;
 type __VerterUseCall<A> = A extends readonly [infer P, ...infer X] ? new (props: P) => __VerterUseFunctional<P, X extends readonly [infer Y, ...unknown[]] ? Y : unknown> : new (props: Record<string, never>) => __VerterUseFunctional<unknown, unknown>;
-type __VerterUseCalls<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends (...args: infer A) => infer R ? (A extends readonly [__VerterUsePeeled<number>] ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseSame<[A, R], Prev> extends true ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseCalls<C, Seen & { (...args: A): R; (...args: [__VerterUsePeeled<Out["length"]>]): never }, [A, R], [__VerterUseCall<A>, ...Out]>) : unknown;
-type __VerterUseContract<C> = __VerterUseTupleRest<C> extends true ? C : C extends abstract new (...args: infer A) => unknown ? (__VerterUseOpenArgs<A> extends true ? __VerterUseConstructs<C, unknown, never, []> : C) : __VerterUseCalls<C, unknown, never, []>;
+type __VerterUseCalls<C, Seen, Prev, Out extends readonly unknown[], Public extends boolean = false> = (Seen & C) extends (...args: infer A) => infer R ? (Public extends true ? C : A extends readonly [__VerterUsePeeled<number>] ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseSame<[A, R], Prev> extends true ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseCalls<C, Seen & { (...args: A): R; (...args: [__VerterUsePeeled<Out["length"]>]): never }, [A, R], [__VerterUseCall<A>, ...Out]>) : (Public extends true ? __VerterUseConstruct<any[], import("vue").ComponentInstance<C>> : unknown);
+type __VerterUseContract<C, Public extends boolean = false> = __VerterUseTupleRest<C> extends true ? C : C extends abstract new (...args: infer A) => unknown ? (Public extends true ? C : __VerterUseOpenArgs<A> extends true ? __VerterUseConstructs<C, unknown, never, []> : C) : __VerterUseCalls<C, unknown, never, [], Public>;
 type __VerterUseTolerant<P, I> = (0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : (0 extends 1 & I ? P : {})) : P) & Record<string, unknown>;
 type __VerterUseFunctional<P, X> = { readonly $props: P; readonly $slots: X extends { slots: infer S } ? S : {}; $emit: X extends { emit: infer E } ? E : never };
-declare function __VerterUseComponent<C, A>(component: C, tolerant: A): __VerterUseContract<C> & A;
+declare function __VerterUseComponent<C, A>(component: C, tolerant: A): __VerterUseConstructs<__VerterUseContract<C>, unknown, never, [], A, __VerterUseContract<C> & A>;
 declare function __VerterUseConstructor<C extends new <T extends any[]>(...args: T) => { readonly args: T }>(component: C): C;
 declare function __VerterUseConstructor<C extends new <T extends readonly any[]>(...args: T) => { readonly args: T }>(component: C): C;
 declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: __VerterUseTolerant<P, I>) => I;
 declare function __VerterUseConstructor<P, X, R>(component: (props: P, ctx: X) => R): new (props: P & Record<string, unknown>) => __VerterUseFunctional<P, X>;
+declare function __VerterPublicDefault<C>(component: C): __VerterUseContract<C, true>;
 type __VerterUseComponentProps<C> = C extends abstract new (props: infer P) => unknown ? P : never;
 type __VerterUseMemberOpen<S> = S extends unknown ? (string extends keyof S ? true : number extends keyof S ? true : symbol extends keyof S ? true : false) : never;
 type __VerterUseDrop<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -80,12 +81,13 @@ type __VerterUseKnownSpread<S, P, O extends PropertyKey> = __VerterUseOpen<S> ex
 declare function __VerterUseSpread<C, S, O extends PropertyKey>(component: C, spread: S & __VerterUseKnownSpread<S, __VerterUseComponentProps<C>, O>, overwritten: readonly O[]): S;
 type __VerterUseKeyOn<P, K extends PropertyKey> = P extends unknown ? (K extends keyof P ? true : false) : never;
 type __VerterUseFallthrough<K extends PropertyKey> = K extends `${string}-${string}` ? true : K extends `on${Capitalize<string>}` ? true : K extends "id" | "role" | "tabindex" | "slot" | "lang" | "dir" | "hidden" | "draggable" | "autofocus" | "inert" | "popover" | "part" | "nonce" | "is" | "accesskey" | "contenteditable" | "spellcheck" | "translate" | "inputmode" ? true : false;
-type __VerterUseDirectOk<P, K extends PropertyKey> = 0 extends 1 & P ? true : string extends keyof P ? true : number extends keyof P ? true : symbol extends keyof P ? true : [__VerterUseKeyOn<P, K>] extends [false] ? __VerterUseFallthrough<K> extends true ? true : false : true;
-declare function __VerterUseDirect<C, I, K extends PropertyKey>(component: C, instance: I, key: 0 extends 1 & C ? K : (__VerterUseDirectOk<I extends { readonly $props: infer P } ? P : never, K> extends true ? K : never)): void;
+type __VerterUseDirectOk<P, K extends PropertyKey, A extends PropertyKey = K> = 0 extends 1 & P ? true : string extends keyof P ? true : number extends keyof P ? true : symbol extends keyof P ? true : [__VerterUseKeyOn<P, K>] extends [false] ? [__VerterUseKeyOn<P, A>] extends [false] ? __VerterUseFallthrough<K> extends true ? true : false : true : true;
+declare function __VerterUseDirect<C, I, K extends PropertyKey, A extends PropertyKey = K>(component: C, instance: I, key: 0 extends 1 & C ? K : (__VerterUseDirectOk<I extends { readonly $props: infer P } ? P : never, K, A> extends true ? K : never), authored?: A): void;
 type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;
 type __VerterUseListener<I, K extends PropertyKey, F extends PropertyKey = K> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : F extends keyof P ? P[F] : (...args: any[]) => unknown) : (...args: any[]) => unknown;
 type __VerterUseSlotProps<I, K extends PropertyKey> = I extends { readonly $slots: infer S } ? (K extends keyof S ? (NonNullable<S[K]> extends (props: infer A, ...rest: any[]) => any ? A : unknown) : unknown) : unknown;
 type __VerterUseModel<I, K extends PropertyKey> = NonNullable<__VerterUseProp<I, K>> extends (value: infer V, ...rest: any[]) => any ? V : unknown;
+void (null! as [__VerterUseListener<unknown, never>, __VerterUseSlotProps<unknown, never>, __VerterUseModel<unknown, never>]);
 function __VerterGenericUseScope<T extends { id: number; label: string }>() {
 const props = defineProps<{ items: T[] }>();
 const rows: Row[] = [];
@@ -241,3 +243,36 @@ const directGenericRestOverload: "precise" = new GenericRestOverloads({ kind: "p
 const adaptedGenericRestOverload: "precise" = new (__VerterUseComponent(GenericRestOverloads, __VerterUseConstructor(GenericRestOverloads)))({ kind: "precise", n: 1 }).tag;
 const directGenericRestOverloadTuple: [{ kind: string }] = new GenericRestOverloads({ kind: "generic" }).args;
 const adaptedGenericRestOverloadTuple: [{ kind: string }] = new (__VerterUseComponent(GenericRestOverloads, __VerterUseConstructor(GenericRestOverloads)))({ kind: "generic" }).args;
+
+// Public defaults retain authored signatures; Options members come from Vue.
+function publicDefaultSignaturesAndOptionsMembers() {
+  const options = { data() { return { count: 1 }; } };
+  const component = __VerterPublicDefault(options);
+  type Instance = InstanceType<typeof component>;
+  const count: __VerterUseSame<Instance["count"], number> = true;
+  const instance = null! as Instance;
+  const numeric: number = instance.count;
+  // @ts-expect-error Options data must not widen to any or disappear to never.
+  const incompatible: string = instance.count;
+
+  const generic = <T,>(props: { value: T }) => props.value;
+  const callable = __VerterPublicDefault(generic);
+  const sameCallable: __VerterUseSame<typeof callable, typeof generic> = true;
+  const inferred: number = callable({ value: 1 });
+  const constructor = null! as {
+    new <const T extends string = "idle">(props: { value: T }): { value: T };
+    readonly marker: "static";
+  };
+  const normalizedConstructor = __VerterPublicDefault(constructor);
+  const sameConstructor: __VerterUseSame<typeof normalizedConstructor, typeof constructor> = true;
+  const specialized: "ready" = new normalizedConstructor({ value: "ready" }).value;
+  const overloaded = null! as {
+    new (props: { kind: "number" }): { value: number };
+    new (props: { kind: "string" }): { value: string };
+  };
+  const normalizedOverloads = __VerterPublicDefault(overloaded);
+  const sameOverloads: __VerterUseSame<typeof normalizedOverloads, typeof overloaded> = true;
+  const firstOverload: number = new normalizedOverloads({ kind: "number" }).value;
+  const lastOverload: string = new normalizedOverloads({ kind: "string" }).value;
+  return [count, numeric, incompatible, sameCallable, inferred, sameConstructor, specialized, sameOverloads, firstOverload, lastOverload];
+}

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::diagnostics::{Diagnostic, DiagnosticSeverity};
 use crate::parser::types::ParsedSfc;
 
-use super::types::{CompileDiagnostic, CompileDiagnosticSeverity};
+use super::types::{CompileDiagnostic, CompileDiagnosticSeverity, VerterCustomBlock};
 
 /// Synthetic script block for a completely EMPTY SFC — one with no script,
 /// no template, no styles, and no custom blocks (e.g. a freshly created
@@ -29,23 +29,17 @@ pub(super) fn empty_sfc_script_block(
     duration_ms: f64,
 ) -> Option<super::types::VerterScriptBlock> {
     use crate::assembly::fragment::SfcExportPlacement;
-    use crate::script::{push_default_export_statement, push_sfc_binding};
-    use crate::template::code_gen::shared::helpers::escape_js_string_into;
+    use crate::script::push_default_export_statement;
     if parsed.template_ast().is_some()
         || !parsed.style_nodes().is_empty()
         || !custom_blocks.is_empty()
     {
         return None;
     }
-    let mut code = String::with_capacity(160 + runtime_module.len());
-    code.push_str("import { defineComponent as _defineComponent } from \"");
-    escape_js_string_into(&mut code, runtime_module);
-    code.push_str("\";\nconst ");
-    let binding_range = push_sfc_binding(&mut code);
-    code.push_str(" = /*@__PURE__*/_defineComponent({\n  __name: \"");
-    escape_js_string_into(&mut code, component_name);
-    code.push_str("\",\n});\n");
+    let (mut code, mut binding_ranges) =
+        crate::script::empty_component_scaffold(component_name, runtime_module);
     let (export_binding_range, export_statement_range) = push_default_export_statement(&mut code);
+    binding_ranges.push(export_binding_range);
     Some(super::types::VerterScriptBlock {
         code,
         duration_ms,
@@ -55,7 +49,7 @@ pub(super) fn empty_sfc_script_block(
         generated_template_hole: None,
         runtime_imports: vec!["_defineComponent"],
         sfc_export_placement: Some(SfcExportPlacement {
-            binding_ranges: vec![binding_range, export_binding_range],
+            binding_ranges,
             export_statement_range: Some(export_statement_range),
         }),
     })
@@ -135,6 +129,35 @@ pub(crate) fn compute_scope_id(component_name: &str) -> [u8; 8] {
     scope_id
 }
 
+/// The runtime scope identity: an explicitly supplied id is already resolved.
+pub(crate) fn resolve_scope_id(component_name: &str, component_id: Option<&str>) -> [u8; 8] {
+    if let Some(id) = component_id {
+        let mut bytes = [b'0'; 8];
+        let len = id.len().min(bytes.len());
+        bytes[..len].copy_from_slice(&id.as_bytes()[..len]);
+        if std::str::from_utf8(&bytes).is_ok() {
+            bytes
+        } else {
+            [b'0'; 8]
+        }
+    } else {
+        compute_scope_id(component_name)
+    }
+}
+
+/// A style dialect outside the rewrite owner's vocabulary is a refusal.
+pub(crate) fn unknown_style_diagnostic(content: verter_span::Span) -> Diagnostic {
+    let expected = verter_css_syntax::CssDialect::LANG_SPELLINGS
+        .map(|(spelling, _)| spelling)
+        .join(", ");
+    Diagnostic::error_with_message(
+        "style-planner",
+        crate::diagnostics::CompilerErrorCode::XCssParseError,
+        format!("style rewrite refused unknown dialect; expected one of: {expected}"),
+        content,
+    )
+}
+
 /// Convert plugin diagnostics to public `CompileDiagnostic` structs.
 pub(crate) fn convert_diagnostics(diagnostics: &[Diagnostic]) -> Vec<CompileDiagnostic> {
     diagnostics
@@ -170,7 +193,7 @@ pub fn format_import_specifier(name: &str) -> String {
 }
 
 /// Extract SFC block byte ranges from root nodes for inter-block gap removal.
-pub(super) fn extract_block_ranges(parsed: &ParsedSfc, _input: &str) -> Vec<(u32, u32)> {
+pub(crate) fn extract_block_ranges(parsed: &ParsedSfc, _input: &str) -> Vec<(u32, u32)> {
     let mut ranges = Vec::new();
 
     // Template
@@ -240,6 +263,62 @@ pub(super) fn extract_attrs(
                 _ => String::new(),
             };
             (name.to_string(), value)
+        })
+        .collect()
+}
+
+/// The custom blocks of a component, one per parser-owned unknown block in
+/// source order. `source_content` yields the identity of `input`'s bytes;
+/// it is called once, and only when there is a block, so a carrier without
+/// custom blocks hashes nothing.
+pub(crate) fn custom_block_facts(
+    parsed: &ParsedSfc,
+    input: &str,
+    source_content: impl FnOnce() -> verter_identity::identity::ContentId,
+) -> Vec<VerterCustomBlock> {
+    if parsed.unknown_nodes().is_empty() {
+        return Vec::new();
+    }
+    let source_content = source_content();
+    parsed
+        .unknown_nodes()
+        .iter()
+        .enumerate()
+        .map(|(source_order, node)| {
+            let tag_name = &input[node.tag_open.start as usize..node.tag_open.name_end as usize];
+            // Extract tag name (skip the '<')
+            let block_type = tag_name.strip_prefix('<').unwrap_or(tag_name).to_string();
+            let content = node
+                .content
+                .map(|span| input[span.start as usize..span.end as usize].to_string())
+                .unwrap_or_default();
+            let attrs = extract_attrs(&node.attributes, input);
+            // Exact-case names, as Vue's own `createBlock` reads them and as
+            // the descriptor contract binds `lang`/`src` to their attribute:
+            // `LANG="json"` stays an ordinary attribute.
+            let lang = attrs
+                .iter()
+                .find(|(key, _)| key.as_str() == "lang")
+                .map(|(_, value)| value.clone());
+            let src = attrs
+                .iter()
+                .find(|(key, _)| key.as_str() == "src")
+                .map(|(_, value)| value.clone());
+            // A self-closing block has no content span; anchor its region at
+            // the tag's content-start position instead of rescanning for one.
+            let region = node
+                .content
+                .unwrap_or_else(|| crate::common::Span::new(node.tag_open.end, node.tag_open.end));
+            VerterCustomBlock {
+                block_type,
+                content,
+                attrs,
+                region,
+                source_order: source_order as u32,
+                lang,
+                src,
+                source_content: source_content.clone(),
+            }
         })
         .collect()
 }

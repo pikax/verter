@@ -1,9 +1,55 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { withTemporaryRepository } from "../../tests/sfc-projection/temporary-repository.mjs";
+
+test("mutation proofs use writable copies and clean up on success and failure", async () => {
+  const original = fs.mkdtempSync(path.join(os.tmpdir(), "verter-readonly-fixture-"));
+  const source = path.join(original, "source.rs");
+  const dependencies = [
+    "node_modules/root-dependency/index.js",
+    "packages/playground/node_modules/typescript/lib/typescript.js",
+  ];
+  let copy;
+  try {
+    fs.writeFileSync(source, "clean");
+    fs.chmodSync(source, 0o444);
+    for (const relative of dependencies) {
+      const dependency = path.join(original, relative);
+      fs.mkdirSync(path.dirname(dependency), { recursive: true });
+      fs.writeFileSync(dependency, 'module.exports = "dependency";');
+    }
+    const result = withTemporaryRepository(original, (root) => {
+      copy = root;
+      const require = createRequire(path.join(root, "package.json"));
+      for (const relative of dependencies) {
+        assert.equal(require(path.join(root, relative)), "dependency");
+      }
+      fs.writeFileSync(path.join(root, "source.rs"), "mutated");
+      return fs.readFileSync(path.join(root, "source.rs"), "utf8");
+    });
+    assert.equal(result, "mutated");
+    assert.equal(fs.readFileSync(source, "utf8"), "clean");
+    assert.equal(fs.existsSync(copy), false);
+    await assert.rejects(
+      withTemporaryRepository(original, async (root) => {
+        copy = root;
+        fs.writeFileSync(path.join(root, "source.rs"), "another mutation");
+        throw new Error("proof failed");
+      }),
+      /proof failed/,
+    );
+    assert.equal(fs.readFileSync(source, "utf8"), "clean");
+    assert.equal(fs.existsSync(copy), false);
+  } finally {
+    fs.chmodSync(source, 0o600);
+    fs.rmSync(original, { recursive: true, force: true });
+  }
+});
 
 import {
   MANDATORY_CASES,

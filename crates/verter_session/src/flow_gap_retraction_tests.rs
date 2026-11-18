@@ -134,6 +134,34 @@ fn record_trace(id: &str, trace: &Trace) {
 }
 
 fn assert_partial(trace: &Trace, gap: FlowGap) {
+    assert_gap_partiality(trace, gap);
+    for sample in [&trace.first, &trace.second] {
+        assert!(
+            !sample
+                .projected
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Primitive(Any)"),
+            "a gap must not fabricate any: {trace:#?}"
+        );
+    }
+}
+
+/// A gap inside a cycle of inferred returns: the cycle's answer is the
+/// checker's circular return (TS7023), `any` exactly, while the gap still
+/// keeps the result partial, cold and candidate-free.
+fn assert_partial_circular_return(trace: &Trace, gap: FlowGap) {
+    assert_gap_partiality(trace, gap);
+    for sample in [&trace.first, &trace.second] {
+        assert_eq!(
+            sample.json.as_deref(),
+            Some(r#"{"kind":"primitive","name":"any"}"#),
+            "a cycle answers the checker's circular return: {trace:#?}"
+        );
+    }
+}
+
+fn assert_gap_partiality(trace: &Trace, gap: FlowGap) {
     let expected = Some(FlowReturnDegradation::FlowGap(gap));
     for sample in [&trace.first, &trace.second] {
         assert_eq!(
@@ -156,14 +184,6 @@ fn assert_partial(trace: &Trace, gap: FlowGap) {
         assert!(
             sample.json.is_some(),
             "partial result must project: {trace:#?}"
-        );
-        assert!(
-            !sample
-                .projected
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Primitive(Any)"),
-            "a gap must not fabricate any: {trace:#?}"
         );
     }
     assert_eq!(
@@ -1150,10 +1170,12 @@ fn flow_gap_partial_propagates_through_consumer_and_scc_gates() {
         ),
         FileLanguage::script_ts(),
     );
+    // `left` and `right` require each other's returns: the checker answers
+    // both with its circular return (TS7023), `any`.
     for function in ["left", "right"] {
         let trace = run_on(&host, canonical, function);
         record_trace(&format!("scc_gate_{function}"), &trace);
-        assert_partial(&trace, FlowGap::UnmodeledExpression);
+        assert_partial_circular_return(&trace, FlowGap::UnmodeledExpression);
     }
 }
 

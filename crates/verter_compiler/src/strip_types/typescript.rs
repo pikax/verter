@@ -247,6 +247,11 @@ impl<'a, 'ct, M: verter_audit::observe::ObserveExec> TypeStripper<'a, 'ct, M> {
                 self.visit_block(&t.block.body);
                 if let Some(handler) = &t.handler {
                     if let Some(param) = &handler.param {
+                        // `catch (err: unknown)`: the annotation lives on the
+                        // parameter, not on its binding pattern.
+                        if let Some(annotation) = &param.type_annotation {
+                            self.remove(annotation.span.start, annotation.span.end);
+                        }
                         self.visit_binding_pattern(&param.pattern);
                     }
                     self.visit_block(&handler.body.body);
@@ -1281,3 +1286,7 @@ fn escape_js_string(s: &str) -> String {
 
 mod spans;
 pub use spans::collect_ts_removal_spans;
+pub(crate) use spans::{
+    collect_parameter_ts_removal_spans, collect_program_ts_removal_spans,
+    collect_ts_removal_spans_with_annotation_offset,
+};

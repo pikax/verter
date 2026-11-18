@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::{service_fs_callback, spawn_actor, ActorRequest, CancelToken, RequestOptions};
+use super::{
+    service_fs_callback, spawn_actor, ActorRequest, CancelToken, HostReads, RequestOptions,
+};
 use crate::lane::Lane;
 use crate::proto::frame::{decode_frame, encode_frame, MessageType};
 use crate::snapshot::OverlaySnapshot;
@@ -812,15 +814,16 @@ fn service_fs_callback_readfile_tags_three_states() {
         .file("/a.ts", "X")
         .absent_file("/gone.ts")
         .build();
+    let reads = HostReads::default();
 
     // Found -> the overlay's value
-    let found = service_fs_callback(&snap, "readFile", br#""/a.ts""#).unwrap();
+    let found = service_fs_callback(&snap, &reads, "readFile", br#""/a.ts""#).unwrap();
     assert_eq!(found, r#"{"kind":"value","value":"X"}"#);
     // NotFound -> missing (never a fall-through to a stale on-disk copy)
-    let nf = service_fs_callback(&snap, "readFile", br#""/gone.ts""#).unwrap();
+    let nf = service_fs_callback(&snap, &reads, "readFile", br#""/gone.ts""#).unwrap();
     assert_eq!(nf, r#"{"kind":"missing"}"#);
     // FallThrough -> the engine reads the host filesystem
-    let ft = service_fs_callback(&snap, "readFile", br#""/unknown.ts""#).unwrap();
+    let ft = service_fs_callback(&snap, &reads, "readFile", br#""/unknown.ts""#).unwrap();
     assert_eq!(ft, r#"{"kind":"useOS"}"#);
 }
 
@@ -845,23 +848,25 @@ fn service_fs_callback_file_exists_and_realpath_and_entries() {
         .file("/repo/overlay.ts", "Y")
         .real_dir_source(std::sync::Arc::new(R(real)))
         .build();
+    let reads = HostReads::default();
 
     assert_eq!(
-        service_fs_callback(&snap, "fileExists", br#""/repo/overlay.ts""#).unwrap(),
+        service_fs_callback(&snap, &reads, "fileExists", br#""/repo/overlay.ts""#).unwrap(),
         r#"{"kind":"value","value":true}"#
     );
     assert_eq!(
-        service_fs_callback(&snap, "fileExists", br#""/repo/missing.ts""#).unwrap(),
+        service_fs_callback(&snap, &reads, "fileExists", br#""/repo/missing.ts""#).unwrap(),
         r#"{"kind":"useOS"}"#,
         "an unknown file is served from the host filesystem"
     );
     assert_eq!(
-        service_fs_callback(&snap, "realpath", br#""/repo/overlay.ts""#).unwrap(),
+        service_fs_callback(&snap, &reads, "realpath", br#""/repo/overlay.ts""#).unwrap(),
         r#"{"kind":"value","value":"/repo/overlay.ts"}"#
     );
 
     // getAccessibleEntries merges real + overlay into one tagged value.
-    let entries = service_fs_callback(&snap, "getAccessibleEntries", br#""/repo""#).unwrap();
+    let entries =
+        service_fs_callback(&snap, &reads, "getAccessibleEntries", br#""/repo""#).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&entries).unwrap();
     assert_eq!(parsed["kind"], "value", "{entries}");
     assert_eq!(
@@ -872,12 +877,91 @@ fn service_fs_callback_file_exists_and_realpath_and_entries() {
     assert_eq!(parsed["value"]["directories"], serde_json::json!([]));
     // A directory nothing knows is served from the host filesystem.
     assert_eq!(
-        service_fs_callback(&snap, "getAccessibleEntries", br#""/elsewhere""#).unwrap(),
+        service_fs_callback(&snap, &reads, "getAccessibleEntries", br#""/elsewhere""#).unwrap(),
         r#"{"kind":"useOS"}"#
     );
 
     // NEGATIVE: an unknown callback name is a typed error string.
-    assert!(service_fs_callback(&snap, "totallyUnknown", br#""/x""#).is_err());
+    assert!(service_fs_callback(&snap, &reads, "totallyUnknown", br#""/x""#).is_err());
+}
+
+// Only the paths the engine is sent to disk for are recorded: overlay
+// answers (found, known-absent, known directories) are the overlay's own and
+// change only through a published snapshot. A failed lookup the disk answers
+// is recorded, so a file created there later is a change the program read.
+#[test]
+fn service_fs_callback_records_only_paths_the_engine_reads_from_disk() {
+    let snap = OverlaySnapshot::builder()
+        .file("/repo/overlay.ts", "Y")
+        .absent_file("/repo/gone.ts")
+        .directory("/repo/virtual")
+        .build();
+    let reads = HostReads::default();
+    for (name, path) in [
+        ("readFile", r#""/repo/overlay.ts""#),
+        ("readFile", r#""/repo/gone.ts""#),
+        ("fileExists", r#""/repo/overlay.ts""#),
+        ("directoryExists", r#""/repo/virtual""#),
+        ("readFile", r#""C:\\repo\\shared\\types.d.ts""#),
+        ("fileExists", r#""/repo/shared/types.ts""#),
+        ("directoryExists", r#""/repo/shared""#),
+        ("readFile", r#""C:/repo/shared/types.d.ts""#),
+    ] {
+        service_fs_callback(&snap, &reads, name, path.as_bytes()).unwrap();
+    }
+    assert_eq!(
+        reads.paths(),
+        [
+            "/repo/shared",
+            "/repo/shared/types.ts",
+            "C:/repo/shared/types.d.ts",
+        ],
+        "disk paths only, slash-normalized, sorted and deduplicated"
+    );
+}
+
+// The actor records the engine's disk reads on the handle every clone
+// shares. The record accumulates over the connection: a later request's
+// reads join the earlier ones, which the engine still holds.
+#[tokio::test]
+async fn handle_accumulates_the_disk_reads_of_the_connection() {
+    let (stream, from_engine, mut to_engine) = duplex();
+    let snap = OverlaySnapshot::builder().file("/repo/a.ts", "A").build();
+    let handle = spawn_actor(stream, snap, 8);
+    let engine = tokio::spawn(async move {
+        for paths in [
+            &[("readFile", "/repo/a.ts"), ("readFile", "/repo/b.d.ts")][..],
+            &[("fileExists", "/repo/c.ts")][..],
+        ] {
+            let raw = to_engine.recv().await.unwrap();
+            let (req, _) = decode_frame(&raw, 0).unwrap();
+            let name = req.name.to_vec();
+            for (callback, path) in paths {
+                let arg = serde_json::to_vec(path).unwrap();
+                from_engine
+                    .send(encode_frame(MessageType::Call, callback.as_bytes(), &arg))
+                    .await
+                    .unwrap();
+                to_engine.recv().await.unwrap();
+            }
+            from_engine
+                .send(encode_frame(MessageType::Response, &name, b"null"))
+                .await
+                .unwrap();
+        }
+    });
+    let reader = handle.clone();
+    handle
+        .request("updateSnapshot", b"{}".to_vec(), RequestOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(reader.host_reads(), ["/repo/b.d.ts"]);
+    handle
+        .request("updateSnapshot", b"{}".to_vec(), RequestOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(reader.host_reads(), ["/repo/b.d.ts", "/repo/c.ts"]);
+    engine.await.unwrap();
 }
 
 /// A transport that accepts frames but NEVER responds.
