@@ -158,7 +158,7 @@ fn namespace_and_custom_element_contracts_use_the_admitted_population() {
 #[test]
 fn static_text_spreads_class_style_and_open_attribute_families_are_checked() {
     let source = concat!(
-        "<template><button disabled title=\"a &amp; b\" class=\"base\" :class=\"classes\" ",
+        "<template><button disabled autofocus=\"\" title=\"a &amp; b\" class=\"base\" :class=\"classes\" ",
         "style=\"color:red\" :style=\"styles\" :aria-checked=\"checked\" :data-id=\"id\" ",
         "v-bind=\"attrs\" v-on=\"listeners\" /></template>",
     );
@@ -166,7 +166,8 @@ fn static_text_spreads_class_style_and_open_attribute_families_are_checked() {
     assert!(native.complete);
     let text = text(source, &plan, &native);
     for member in [
-        "\"disabled\": \"\"",
+        "\"disabled\": true",
+        "\"autofocus\": \"\"",
         "\"title\": \"a & b\"",
         "\"class\": \"base\"",
         "\"class\": (classes)",
