@@ -173,6 +173,7 @@ fn unchecked(config: &Path) -> ProjectCheck {
     ProjectCheck {
         config: Arc::from(config.to_string_lossy().as_ref()),
         carriers: Vec::new(),
+        imported_carriers: Vec::new(),
         unowned_carriers: Vec::new(),
         foreign_surfaces: Vec::new(),
         diagnostics: Vec::new(),

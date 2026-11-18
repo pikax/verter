@@ -56,14 +56,25 @@ impl WatchedProject {
     /// new session. A path the program stopped importing stays until then:
     /// the engine still holds its old text, and serves it if the import
     /// returns, so it must still be told when the path changes.
+    ///
+    /// The carriers the program reached by import are read too: the engine
+    /// reads their projections, so each carrier itself is what changes.
     fn program_reads(&self) -> Vec<PathBuf> {
-        self.live
+        let mut reads = self
+            .live
             .as_ref()
             .map(LiveProgram::host_reads)
             .unwrap_or_default()
             .into_iter()
             .map(PathBuf::from)
-            .collect()
+            .collect::<Vec<_>>();
+        reads.extend(
+            self.check
+                .imported_carriers
+                .iter()
+                .map(|carrier| PathBuf::from(&*carrier.carrier)),
+        );
+        reads
     }
 }
 
@@ -334,6 +345,7 @@ impl WatchSession {
                 check: ProjectCheck {
                     config: Arc::from(canonicalize_path(&project.config.to_string_lossy())),
                     carriers: Vec::new(),
+                    imported_carriers: Vec::new(),
                     unowned_carriers: Vec::new(),
                     foreign_surfaces: Vec::new(),
                     diagnostics: Vec::new(),

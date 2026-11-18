@@ -375,6 +375,38 @@ fn the_virtual_file_is_named_by_the_descriptor_column() {
 }
 
 #[test]
+fn a_checking_module_path_names_its_carrier_and_no_other_path_does() {
+    let adapter = ContentMapperProjectionAdapter::new();
+    for dialect in [".ts", ".tsx", ".js", ".jsx"] {
+        assert_eq!(
+            adapter
+                .carrier_of_checking_module(&format!("{CARRIER}{dialect}"))
+                .as_deref(),
+            Some(CARRIER),
+            "{dialect}"
+        );
+    }
+    assert_eq!(
+        adapter
+            .carrier_of_checking_module("C:\\ws\\src\\Comp.vue.ts")
+            .as_deref(),
+        Some("c:/ws/src/Comp.vue")
+    );
+    for other in [
+        // The declaration companion is where a real declaration is found,
+        // never a checking module.
+        "/ws/src/Comp.d.vue.ts",
+        "/ws/src/Comp.vue.verter.ts",
+        "/ws/src/Comp.vue",
+        "/ws/src/Comp.ts",
+        "/ws/src/.vue.ts",
+        "/ws/src/Widget.svelte.ts",
+    ] {
+        assert_eq!(adapter.carrier_of_checking_module(other), None, "{other}");
+    }
+}
+
+#[test]
 fn projects_with_different_custom_elements_never_share_a_result() {
     let carrier = concat!(
         "<template>\n  <my-widget :value=\"count\" />\n</template>\n",
