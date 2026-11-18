@@ -1056,13 +1056,18 @@ pub trait OwnedLowering {
         &self,
         demands: &[verter_session_query::source::demand::TypeBodyBatchDemand<'_>],
     ) -> verter_session_query::source::demand::BatchedBodies;
+    /// The augmentation-scoped type declaration `(scope, owner, name)` of
+    /// `input`'s file, prepared once per prepared bundle: every later read
+    /// shares the committed declaration.
     fn prepare_augmentation_type(
         &self,
         input: &PreparedInputRecord,
         scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> verter_session_query::inputs::prepared::PreparedDeclOutcome<PreparedTypeDecl>;
+    ) -> verter_session_query::inputs::prepared::PreparedDeclOutcome<
+        verter_retention::heap_size::OwnedValue<PreparedTypeDecl>,
+    >;
     fn prepare_augmentation_value(
         &self,
         input: &PreparedInputRecord,

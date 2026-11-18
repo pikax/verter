@@ -1161,7 +1161,9 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 name: &str,
             ) -> verter_session_query::inputs::prepared::PreparedDeclOutcome<
-                verter_session_query::type_solver::PreparedTypeDecl,
+                verter_retention::heap_size::OwnedValue<
+                    verter_session_query::type_solver::PreparedTypeDecl,
+                >,
             > {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::prepare_augmentation_type");
                 let Some(bundle) = SourceInputProvider::prepared(self, input) else {

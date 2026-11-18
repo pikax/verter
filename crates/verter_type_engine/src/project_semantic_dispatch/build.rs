@@ -241,6 +241,123 @@ struct ContributorPrefetch {
     )>,
 }
 
+/// The read of one contributing type body's authored shape an
+/// augmentation fold stands at ([`ProjectSemanticDispatch::advance_augmentation_fold`]):
+/// the body's `LowerLocator` read, answered whole, and where its answer
+/// settles.
+struct ContributorShapeRead {
+    read: super::lower::LowerRead,
+    finish: ContributorShapeFinish,
+}
+
+/// Where a contributor shape read's answer settles: the planned body whose
+/// shape it is, by its position among the fold's planned bodies.
+struct ContributorShapeFinish {
+    body: u32,
+}
+
+/// Where an augmentation fold stands after an advance.
+enum FoldProgress {
+    /// The fold reads this contributor shape next; it holds no other
+    /// pending read.
+    Read(ContributorShapeRead),
+    /// Every contributor is folded.
+    Folded,
+}
+
+/// What planning an augmentation fold produced.
+enum AugmentationFoldStart {
+    /// The fold answered while planning: no declaration beside the base
+    /// contributes.
+    Answered(FoldedAugmentation),
+    /// The fold, standing before its first contributor.
+    Folding(Box<AugmentationFold>),
+}
+
+/// An augmenter whose contributing blocks an augmentation fold is folding,
+/// with what folding them reads.
+struct AugmenterBlocks {
+    canonical: Arc<str>,
+    indexed: Arc<verter_session_query::inputs::indexed::IndexedInputRecord>,
+    bundle: verter_session_query::inputs::prepared::PreparedInputRef,
+    /// The augmenter's contributing blocks: each one's raw specifier,
+    /// owner and scope.
+    matched: Vec<(
+        String,
+        verter_type_expr::TopLevelOwnerId,
+        verter_session_query::declarations::AugmentationScopeKind,
+    )>,
+    /// The next block to fold.
+    next: usize,
+    /// Whether a block folded so far contributed.
+    any_contribution: bool,
+    /// The exact artifact key the augmenter serves from.
+    effective_artifact_key: verter_session_query::source::artifact_key::FileArtifactKey,
+}
+
+/// An augmentation fold in progress
+/// ([`ProjectSemanticDispatch::fold_augmentation_contributions`]): what
+/// planning it read, its contributors in declaration precedence order,
+/// what folding them has gathered and where the fold stands. Owns
+/// everything it holds, so the fold can stand at a read between advances.
+struct AugmentationFold {
+    contribution: AugmentationContribution,
+    target: verter_session_query::resolution::AugmentationTargetKind,
+    decl_name: Arc<str>,
+    context: crate::semantic_query::ProjectionReductionContext,
+    excluded_contributor: Option<Arc<str>>,
+    key: verter_session_query::resolution::AugmentationTargetKey,
+    augmenter_set: Arc<verter_session_query::resolution::AugmenterSet>,
+    index_resolutions: crate::resolver_core::request_ports::AugmenterResolutions,
+    population_hit: verter_session_query::inputs::contributors::SymbolContributors,
+    population_evidence: Option<Arc<population_reads::PopulationEvidence>>,
+    neutral_class_base: bool,
+    ordered: Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]>,
+    /// The demanding file's project when the fold gathers enum blocks.
+    request_project: Option<Option<verter_session_query::resolution::ProjectStableKey>>,
+    prefetched: Vec<Option<ContributorPrefetch>>,
+    /// Keeps the batch-lowered type bodies for the shape reads that follow.
+    _batched_bodies: Option<verter_session_query::source::demand::BatchedBodies>,
+    contributor_nodes: Vec<SemanticNodeId>,
+    planned_bodies: Vec<PlannedContributorBody>,
+    context_free: bool,
+    signature_groups: Vec<Vec<SemanticNodeId>>,
+    enum_blocks: Vec<EnumContribution>,
+    /// One exact served identity per contributor. A type-body population
+    /// must cover it coherently before its observations can be substituted.
+    contributor_roots: Vec<AugmentationContributorRoot>,
+    source_env_unobservable: bool,
+    /// Stale-key self-heals the fold discovered, written back into the
+    /// cached `AugmenterSet` when the fold finishes so the NEXT stitch hits
+    /// the fast exact-key path instead of re-healing every call.
+    refreshed_keys: Vec<(
+        usize,
+        verter_session_query::source::artifact_key::FileArtifactKey,
+    )>,
+    base_position: Option<usize>,
+    /// The next contributor in `ordered` to fold.
+    position: usize,
+    /// The augmenter whose blocks the fold is folding.
+    augmenter: Option<AugmenterBlocks>,
+    /// Whether the fold stands at a contributor shape read.
+    awaiting_shape: bool,
+}
+
+/// The canonical file of an augmentation fold's `candidate`.
+fn fold_candidate_canonical<'s>(
+    augmenter_set: &'s verter_session_query::resolution::AugmenterSet,
+    population: &'s verter_session_query::inputs::contributors::SymbolContributors,
+    candidate: verter_session_query::inputs::contributors::AugmentationCandidate,
+) -> &'s str {
+    use verter_session_query::inputs::contributors::AugmentationCandidate;
+    match candidate {
+        AugmentationCandidate::Augmenter(i) => augmenter_set.entries[i].canonical().as_ref(),
+        AugmentationCandidate::FileScope(i) => {
+            population.entries[i].artifact_key.canonical.as_ref()
+        }
+    }
+}
+
 /// One contributing type body of an augmentation fold, fetched but not
 /// yet projected: its role-free authored shape and everything projecting
 /// it reads. Nothing here depends on the demanding projection context, so
@@ -7391,6 +7508,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the call signatures an augmenting block's function declarations add
     /// to an exported function value (file-scope global declarations never
     /// contribute those).
+    ///
+    /// This is the fold's in-place driver: it plans the fold
+    /// ([`Self::plan_augmentation_fold`]), answers each contributor shape
+    /// read the fold stands at as soon as it is named
+    /// ([`Self::advance_augmentation_fold`]) and finishes it
+    /// ([`Self::finish_augmentation_fold`]).
     #[allow(clippy::too_many_arguments)]
     fn fold_augmentation_contributions(
         &self,
@@ -7402,32 +7525,53 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         excluded_contributor: Option<&str>,
         prepare: impl FnOnce(),
     ) -> Option<FoldedAugmentation> {
-        use verter_session_query::declarations::AugmentationScopeKind;
-        use verter_session_query::resolution::AugmentationTargetKind;
-
         prepare();
         // Every read the fold consumes from here on — the index read, the
         // augmenter target resolutions, the contributor artifacts — decides
         // whether its healed keys may be written back to the shared index.
         let refusals = crate::fact_tracing::RefusalObservationScope::enter();
+        let mut fold = match self.plan_augmentation_fold(
+            contribution,
+            target,
+            decl_name,
+            context,
+            request_canonical,
+            excluded_contributor,
+        ) {
+            AugmentationFoldStart::Answered(folded) => return Some(folded),
+            AugmentationFoldStart::Folding(fold) => fold,
+        };
+        let mut delivered = None;
+        loop {
+            match self.advance_augmentation_fold(&mut fold, delivered.take()) {
+                FoldProgress::Read(ContributorShapeRead { read, finish }) => {
+                    delivered = Some((finish, self.answer_lower_read(read)));
+                }
+                FoldProgress::Folded => return self.finish_augmentation_fold(*fold, refusals),
+            }
+        }
+    }
+
+    /// Plan an augmentation fold: read the augmentation index and the
+    /// contributor population for `target`, observe their facts, order the
+    /// contributors and prefetch what folding them reads. Answers in place
+    /// when neither an augmenting block nor another file-scope declaration
+    /// contributes.
+    fn plan_augmentation_fold(
+        &self,
+        contribution: AugmentationContribution,
+        target: verter_session_query::resolution::AugmentationTargetKind,
+        decl_name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+        request_canonical: &str,
+        excluded_contributor: Option<&str>,
+    ) -> AugmentationFoldStart {
+        use verter_session_query::resolution::AugmentationTargetKind;
+
         // The source boundary captures the same session population and host
         // environment, ingests program roots, and returns an owned index read.
         let (key, augmenter_set, index_resolutions) =
             self.ctx.augmentation_index_with_resolutions(target.clone());
-        // A specifier the index population resolved in this read is not
-        // resolved again: the answer is the one the same fold just read.
-        let resolve_module_file = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
-            if let Some(resolved) = index_resolutions.get(augmenter).and_then(|specs| {
-                specs
-                    .iter()
-                    .find(|(resolved_spec, _)| resolved_spec.as_ref() == spec)
-            }) {
-                return resolved.1.clone();
-            }
-            self.ctx
-                .resolve_type_dependency_canonical(augmenter, spec)
-                .map(Arc::from)
-        };
 
         // Fact rail, part 1 — the augmenter-set shape fact (invalidates on
         // augmenter add/remove/reorder and binding-owner/name/space changes). Observed onto the active tracer so it
@@ -7446,10 +7590,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // has nothing keyed on the augmenter set and serves stale once either
         // of those happens.
         //
-        // The fingerprint is stable across the rest of this function: the
-        // stale-key self-heal below re-publishes under the IDENTICAL
-        // fingerprint by construction, so observing before it is equivalent to
-        // observing after it.
+        // The fingerprint is stable across the rest of the fold: the
+        // stale-key self-heal its finish performs re-publishes under the
+        // IDENTICAL fingerprint by construction, so observing before it is
+        // equivalent to observing after it.
         //
         // The shape fact's `canonical_id` is attribution only —
         // `ModuleAugmentationIndexShape` validation keys entirely on the typed
@@ -7532,7 +7676,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         });
         if augmenter_set.entries.is_empty() && !has_file_scope {
-            return Some(FoldedAugmentation::Absent(population_evidence));
+            return AugmentationFoldStart::Answered(FoldedAugmentation::Absent(
+                population_evidence,
+            ));
         }
 
         // An empty, nongeneric interface adds neither a member nor a
@@ -7546,26 +7692,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .is_some_and(|base| base.kind == verter_session_query::declarations::TypeDeclKind::Class
                         && base.type_parameters.is_empty()));
 
-        let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
-        // A type body's contributions are planned here and projected under
-        // each demanding context by the caller.
-        let mut planned_bodies: Vec<PlannedContributorBody> = Vec::new();
-        let mut context_free = true;
-        let mut signature_groups: Vec<Vec<SemanticNodeId>> = Vec::new();
-        let mut enum_blocks: Vec<EnumContribution> = Vec::new();
-        // One exact served identity per contributor. A type-body population
-        // must cover it coherently before its observations can be substituted.
-        let mut contributor_roots: Vec<AugmentationContributorRoot> = Vec::new();
-        let mut source_env_unobservable = false;
-        // Stale-key self-heals discovered below are written back into the
-        // cached `AugmenterSet` after the loop so the NEXT stitch hits the
-        // fast exact-key path instead of re-healing every call.
-        let mut refreshed_keys: Vec<(
-            usize,
-            verter_session_query::source::artifact_key::FileArtifactKey,
-        )> = Vec::new();
-        let mut base_position: Option<usize> = None;
-        use verter_session_query::inputs::contributors::AugmentationCandidate as OrderedOrigin;
         let ordered = self.ctx.augmentation_contributor_order(
             request_canonical,
             &key,
@@ -7578,80 +7704,55 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // declares another project's enum of the name.
         let request_project = (contribution == AugmentationContribution::EnumBlocks)
             .then(|| self.ctx.project_stable_key_for_canonical(request_canonical));
-        let candidate_canonical = |candidate: OrderedOrigin| -> &str {
-            match candidate {
-                OrderedOrigin::Augmenter(i) => augmenter_set.entries[i].canonical().as_ref(),
-                OrderedOrigin::FileScope(i) => {
-                    population_hit.entries[i].artifact_key.canonical.as_ref()
-                }
-            }
-        };
-        // Which declaration blocks of an augmenter contribute to
-        // `decl_name`: each `ModuleAugmentationFact` of the block that
-        // targets this declaration, as its raw specifier (the key its typed
-        // inner body is retained under) and its owner.
-        let matched_augmentations =
-            |augmenter_canonical: &str,
-             art: &crate::resolver_core::request_ports::AugmenterArtifactAnswer|
-             -> Vec<(
-                String,
-                verter_type_expr::TopLevelOwnerId,
-                AugmentationScopeKind,
-            )> {
-                let mut matched_specs: Vec<(
-                    String,
-                    verter_type_expr::TopLevelOwnerId,
-                    AugmentationScopeKind,
-                )> = Vec::new();
-                for fact in art.augmentations.iter() {
-                    if fact.augmented_name.as_ref() != decl_name {
-                        continue;
-                    }
-                    if contribution != AugmentationContribution::TypeBody
-                        && fact.space != verter_session_query::facts::registry::SymbolSpace::Value
-                    {
-                        continue;
-                    }
-                    let resolved = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
-                    && verter_session_query::source::augmentation::fact_augments_resolved_module(fact) {
-                    resolve_module_file(augmenter_canonical, fact.specifier.as_ref())
-                } else { None };
-                    if !verter_session_query::source::augmentation::augmenter_matches_target(
-                        fact,
-                        &key,
-                        resolved.as_deref(),
-                    ) {
-                        continue;
-                    }
-                    let spec = fact.specifier.as_ref();
-                    if matched_specs
-                        .iter()
-                        .any(|(matched, owner, _)| matched == spec && *owner == fact.owner)
-                    {
-                        continue;
-                    }
-                    // A `declare global` augmenter is indexed under the global
-                    // tag; its retained body lives in the GLOBAL augmentation
-                    // scope, not in a module scope named after the tag.
-                    let scope = if spec
-                        == verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG
-                    {
-                        AugmentationScopeKind::Global
-                    } else {
-                        AugmentationScopeKind::Module(spec.to_string())
-                    };
-                    matched_specs.push((spec.to_string(), fact.owner, scope));
-                }
-                matched_specs
-            };
-        // Every contributor's source, artifact answer and contributing
-        // blocks, read once up front so the type bodies the fold lowers can
-        // be lowered as ONE batch — one lowering-service rendezvous per
-        // worker shard — before the fold reads them one by one.
-        let mut prefetched: Vec<Option<ContributorPrefetch>> = Vec::with_capacity(ordered.len());
-        for candidate in ordered.iter().copied() {
-            let canonical = candidate_canonical(candidate);
-            if excluded_contributor == Some(canonical) || request_project.is_some() {
+        let mut fold = Box::new(AugmentationFold {
+            contribution,
+            target,
+            decl_name: Arc::from(decl_name),
+            context,
+            excluded_contributor: excluded_contributor.map(Arc::from),
+            key,
+            augmenter_set,
+            index_resolutions,
+            population_hit,
+            population_evidence,
+            neutral_class_base,
+            ordered,
+            request_project,
+            prefetched: Vec::new(),
+            _batched_bodies: None,
+            contributor_nodes: Vec::new(),
+            planned_bodies: Vec::new(),
+            context_free: true,
+            signature_groups: Vec::new(),
+            enum_blocks: Vec::new(),
+            contributor_roots: Vec::new(),
+            source_env_unobservable: false,
+            refreshed_keys: Vec::new(),
+            base_position: None,
+            position: 0,
+            augmenter: None,
+            awaiting_shape: false,
+        });
+        self.prefetch_augmentation_contributors(&mut fold);
+        AugmentationFoldStart::Folding(fold)
+    }
+
+    /// Every contributor's source, artifact answer and contributing blocks,
+    /// read once up front so the type bodies the fold lowers can be lowered
+    /// as ONE batch — one lowering-service rendezvous per worker shard —
+    /// before the fold reads them one by one.
+    fn prefetch_augmentation_contributors(&self, fold: &mut AugmentationFold) {
+        use verter_session_query::inputs::contributors::AugmentationCandidate as OrderedOrigin;
+        use verter_session_query::resolution::AugmentationTargetKind;
+
+        let mut prefetched: Vec<Option<ContributorPrefetch>> =
+            Vec::with_capacity(fold.ordered.len());
+        for candidate in fold.ordered.iter().copied() {
+            let canonical =
+                fold_candidate_canonical(&fold.augmenter_set, &fold.population_hit, candidate);
+            if fold.excluded_contributor.as_deref() == Some(canonical)
+                || fold.request_project.is_some()
+            {
                 prefetched.push(None);
                 continue;
             }
@@ -7670,27 +7771,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             if let OrderedOrigin::Augmenter(augmenter_idx) = candidate {
                 let declares_from_script =
-                    matches!(target, AugmentationTargetKind::GlobalAugmentation)
+                    matches!(fold.target, AugmentationTargetKind::GlobalAugmentation)
                         && verter_session_query::inputs::contributors::classify_shallow_module_kind(
                             &prefetch.indexed.shallow_state,
                         ) == verter_session_query::inputs::contributors::FileModuleKind::Script;
                 if !declares_from_script {
-                    let augmenter = &augmenter_set.entries[augmenter_idx];
+                    let augmenter = &fold.augmenter_set.entries[augmenter_idx];
                     if let Some(art) = self.ctx.augmenter_artifact_answer(
                         &augmenter.artifact_key,
                         prefetch.indexed.whole_hash,
                     ) {
-                        prefetch.matched = matched_augmentations(canonical, &art);
+                        prefetch.matched = self.matched_augmentations(fold, canonical, &art);
                         prefetch.art = Some(art);
                     }
                 }
             }
             prefetched.push(Some(prefetch));
         }
-        let _batched_bodies = (contribution == AugmentationContribution::TypeBody).then(|| {
+        fold.prefetched = prefetched;
+        if fold.contribution != AugmentationContribution::TypeBody {
+            return;
+        }
+        let batched = {
+            let decl_name: &str = &fold.decl_name;
             let mut demands: Vec<verter_session_query::source::demand::TypeBodyBatchDemand<'_>> =
                 Vec::new();
-            for (candidate, prefetch) in ordered.iter().zip(&prefetched) {
+            for (candidate, prefetch) in fold.ordered.iter().zip(&fold.prefetched) {
                 let Some(prefetch) = prefetch else {
                     continue;
                 };
@@ -7698,7 +7804,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let OrderedOrigin::FileScope(i) = *candidate {
                     demands.push(verter_session_query::source::demand::TypeBodyBatchDemand {
                         source,
-                        owner: population_hit.entries[i].owner,
+                        owner: fold.population_hit.entries[i].owner,
                         name: decl_name,
                         scope: None,
                     });
@@ -7713,530 +7819,786 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             self.ctx.batch_type_bodies(&demands)
-        });
-        for (position, candidate) in ordered.iter().copied().enumerate() {
-            let canonical = candidate_canonical(candidate);
-            if excluded_contributor == Some(canonical) {
-                base_position.get_or_insert(contributor_nodes.len() + planned_bodies.len());
+        };
+        fold._batched_bodies = Some(batched);
+    }
+
+    /// Which declaration blocks of an augmenter contribute to the folded
+    /// declaration: each `ModuleAugmentationFact` of the block that targets
+    /// it, as its raw specifier (the key its typed inner body is retained
+    /// under), its owner and its scope.
+    fn matched_augmentations(
+        &self,
+        fold: &AugmentationFold,
+        augmenter_canonical: &str,
+        art: &crate::resolver_core::request_ports::AugmenterArtifactAnswer,
+    ) -> Vec<(
+        String,
+        verter_type_expr::TopLevelOwnerId,
+        verter_session_query::declarations::AugmentationScopeKind,
+    )> {
+        use verter_session_query::declarations::AugmentationScopeKind;
+        let decl_name: &str = &fold.decl_name;
+        // A specifier the index population resolved in this read is not
+        // resolved again: the answer is the one the same fold just read.
+        let resolve_module_file = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
+            if let Some(resolved) = fold.index_resolutions.get(augmenter).and_then(|specs| {
+                specs
+                    .iter()
+                    .find(|(resolved_spec, _)| resolved_spec.as_ref() == spec)
+            }) {
+                return resolved.1.clone();
+            }
+            self.ctx
+                .resolve_type_dependency_canonical(augmenter, spec)
+                .map(Arc::from)
+        };
+        let mut matched_specs: Vec<(
+            String,
+            verter_type_expr::TopLevelOwnerId,
+            AugmentationScopeKind,
+        )> = Vec::new();
+        for fact in art.augmentations.iter() {
+            if fact.augmented_name.as_ref() != decl_name {
                 continue;
             }
-            if let Some(project) = &request_project {
-                let owner = self.ctx.project_stable_key_for_canonical(canonical);
-                if owner.is_some() && owner != *project {
-                    continue;
-                }
+            if fold.contribution != AugmentationContribution::TypeBody
+                && fact.space != verter_session_query::facts::registry::SymbolSpace::Value
+            {
+                continue;
             }
-            let prefetch = prefetched[position].take();
-            match candidate {
-                OrderedOrigin::Augmenter(augmenter_idx) => {
-                    let augmenter = &augmenter_set.entries[augmenter_idx];
-                    let augmenter_canonical = augmenter.canonical();
-                    let (prefetched_art, prefetched_matched, prefetched_indexed) = match prefetch {
-                        Some(prefetch) => {
-                            (prefetch.art, Some(prefetch.matched), Some(prefetch.indexed))
-                        }
-                        None => (None, None, None),
-                    };
-                    let Some(indexed) = prefetched_indexed.or_else(|| {
-                        self.ctx
-                            .ensure_indexed_ready_serve(augmenter_canonical.as_ref())
-                            .map(|serve| serve.indexed)
-                    }) else {
-                        // A set member the live view cannot serve is a torn state:
-                        // its contribution (and source-env identity) cannot be
-                        // observed coherently — the parent result must not warm. The
-                        // generalized non-cacheability rail is fanned ONCE at the single
-                        // CONSUMER (`instantiate_shell`, where this flag becomes
-                        // `output.cache_suppress`), covering every unobservable source.
-                        source_env_unobservable = true;
-                        continue;
-                    };
-                    // `declare global` augments the global scope only from a
-                    // MODULE: in a script it is an error and binds nothing
-                    // (the augmenter set still fingerprints the file, so the
-                    // script gaining module syntax misses the warm read).
-                    if matches!(target, AugmentationTargetKind::GlobalAugmentation)
-                        && verter_session_query::inputs::contributors::classify_shallow_module_kind(
-                            &indexed.shallow_state,
-                        ) == verter_session_query::inputs::contributors::FileModuleKind::Script
-                    {
-                        continue;
-                    }
-                    // The addressable contribution pointers: each augmenter
-                    // `ModuleAugmentationFact` that targets THIS decl gives the raw
-                    // `declare module "<spec>"` specifier under which the typed inner
-                    // body is retained in `augmentation_scopes`.
-                    //
-                    // Self-heal a STALE captured `artifact_key`: a cosmetic /
-                    // member-body re-key of the augmenter advances its content hash
-                    // (draining the captured key) without moving its decl skeleton,
-                    // so the cached `AugmenterSet` keeps the pre-edit key. Skipping
-                    // the augmenter on that miss would silently drop a real
-                    // augmentation. `ensure_indexed_ready_serve` above already materialised
-                    // the augmenter's CURRENT version, so `indexed.whole_hash` is the
-                    // scheduler-authoritative current content hash.
-                    let (art, matched_specs) = match prefetched_art {
-                        Some(art) => (art, prefetched_matched.unwrap_or_default()),
-                        None => {
-                            let Some(art) = self.ctx.augmenter_artifact_answer(
-                                &augmenter.artifact_key,
-                                indexed.whole_hash,
-                            ) else {
-                                // Unhealable captured key: the augmenter's exact artifact
-                                // identity is unobservable — refuse warm admission. The
-                                // generalized non-cacheability rail is fanned ONCE at the
-                                // consumer (see the unservable arm above).
-                                source_env_unobservable = true;
-                                continue;
-                            };
-                            let matched = matched_augmentations(augmenter_canonical.as_ref(), &art);
-                            (art, matched)
-                        }
-                    };
-                    // The EXACT key the contributor read serves from (the healed
-                    // current key when the captured one was stale).
-                    let refreshed_key = art.refreshed_key.clone();
-                    let effective_artifact_key = refreshed_key
-                        .clone()
-                        .unwrap_or_else(|| augmenter.artifact_key.clone());
-                    if let Some(refreshed_key) = refreshed_key {
-                        refreshed_keys.push((augmenter_idx, refreshed_key));
-                    }
-                    if matched_specs.is_empty() {
-                        continue;
-                    }
+            let resolved = if matches!(
+                fold.key.target,
+                verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(
+                    _
+                )
+            )
+                && verter_session_query::source::augmentation::fact_augments_resolved_module(fact)
+            {
+                resolve_module_file(augmenter_canonical, fact.specifier.as_ref())
+            } else {
+                None
+            };
+            if !verter_session_query::source::augmentation::augmenter_matches_target(
+                fact,
+                &fold.key,
+                resolved.as_deref(),
+            ) {
+                continue;
+            }
+            let spec = fact.specifier.as_ref();
+            if matched_specs
+                .iter()
+                .any(|(matched, owner, _)| matched == spec && *owner == fact.owner)
+            {
+                continue;
+            }
+            // A `declare global` augmenter is indexed under the global
+            // tag; its retained body lives in the GLOBAL augmentation
+            // scope, not in a module scope named after the tag.
+            let scope =
+                if spec == verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG {
+                    AugmentationScopeKind::Global
+                } else {
+                    AugmentationScopeKind::Module(spec.to_string())
+                };
+            matched_specs.push((spec.to_string(), fact.owner, scope));
+        }
+        matched_specs
+    }
 
-                    let Some(bundle) = self.ctx.prepared_decl_bundle(augmenter_canonical.as_ref())
-                    else {
-                        source_env_unobservable = true;
-                        continue;
-                    };
-
-                    let mut any_contribution = false;
-                    for (spec, contributor_owner, _) in &matched_specs {
-                        let aug_scope = NodeScopeId::File {
-                            canonical_id: verter_type_expr::OwnedStr::from(augmenter_canonical),
-                            owner: *contributor_owner,
-                            whole_hash: indexed.whole_hash,
-                            local_scope: None,
-                        };
-                        let aug_scope_payload = Some(
-                    crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                        &bundle,
-                        *contributor_owner,
-                    ),
+    /// Advance an augmentation fold to the next contributor shape read it
+    /// stands at, or to the end of its contributors. `delivered` answers the
+    /// read the previous advance named, and only that read: a fold holds at
+    /// most one pending read, settled here before the fold moves on.
+    fn advance_augmentation_fold(
+        &self,
+        fold: &mut AugmentationFold,
+        delivered: Option<(ContributorShapeFinish, super::lower::LowerDelivery)>,
+    ) -> FoldProgress {
+        match delivered {
+            Some((finish, delivery)) => {
+                let awaiting = std::mem::take(&mut fold.awaiting_shape);
+                assert!(
+                    awaiting,
+                    "an augmentation fold received an answer without a pending read"
                 );
-                        let aug_shadowing =
+                let super::lower::LowerDelivery::Whole(read) = delivery else {
+                    unreachable!("a contributor shape read is answered whole");
+                };
+                let shape = match self.finish_locator_shape_read(read) {
+                    QueryResult::Value(node) => Some(node),
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => None,
+                };
+                fold.planned_bodies[finish.body as usize].shape = shape;
+                fold.context_free &= shape.is_some();
+            }
+            None => assert!(
+                !fold.awaiting_shape,
+                "an augmentation fold advanced past its pending read"
+            ),
+        }
+        loop {
+            if let Some(mut blocks) = fold.augmenter.take() {
+                if let Some(read) = self.advance_augmenter_blocks(fold, &mut blocks) {
+                    fold.augmenter = Some(blocks);
+                    fold.awaiting_shape = true;
+                    return FoldProgress::Read(read);
+                }
+                if blocks.any_contribution {
+                    // Root on the OVERLAY-AWARE content version the body was
+                    // actually lowered from (`indexed.whole_hash` == `aug_scope`'s
+                    // hash), NOT `get_whole_hash` (which can report the BASE hash
+                    // under a session view). A session-overlay augmenter rooted on
+                    // the base hash would tear: the value reflects overlay content
+                    // but the fact pins base content, so a BASE re-query validates
+                    // the session candidate and is poisoned. Rooting on the
+                    // overlay hash makes the base re-query miss and recompute.
+                    // The version root and the source-env artifact key travel as
+                    // ONE carrier: a contributor cannot be version-rooted without
+                    // its source-env identity.
+                    fold.contributor_roots.push(AugmentationContributorRoot {
+                        canonical: verter_type_expr::OwnedStr::from(&blocks.canonical),
+                        whole_hash: blocks.indexed.whole_hash,
+                        artifact_key: blocks.effective_artifact_key,
+                    });
+                }
+                continue;
+            }
+            let Some(&candidate) = fold.ordered.get(fold.position) else {
+                return FoldProgress::Folded;
+            };
+            let position = fold.position;
+            fold.position += 1;
+            if let Some(read) = self.advance_augmentation_contributor(fold, position, candidate) {
+                fold.awaiting_shape = true;
+                return FoldProgress::Read(read);
+            }
+        }
+    }
+
+    /// Fold the contributor at `position` of the fold's order: an
+    /// augmenter opens its contributing blocks for the fold to walk; a
+    /// file-scope declaration contributes its enum block, or plans its type
+    /// body and names the read of that body's shape.
+    fn advance_augmentation_contributor(
+        &self,
+        fold: &mut AugmentationFold,
+        position: usize,
+        candidate: verter_session_query::inputs::contributors::AugmentationCandidate,
+    ) -> Option<ContributorShapeRead> {
+        use verter_session_query::inputs::contributors::AugmentationCandidate as OrderedOrigin;
+        use verter_session_query::resolution::AugmentationTargetKind;
+
+        let canonical =
+            fold_candidate_canonical(&fold.augmenter_set, &fold.population_hit, candidate);
+        if fold.excluded_contributor.as_deref() == Some(canonical) {
+            fold.base_position
+                .get_or_insert(fold.contributor_nodes.len() + fold.planned_bodies.len());
+            return None;
+        }
+        if let Some(project) = &fold.request_project {
+            let owner = self.ctx.project_stable_key_for_canonical(canonical);
+            if owner.is_some() && owner != *project {
+                return None;
+            }
+        }
+        let prefetch = fold.prefetched[position].take();
+        match candidate {
+            OrderedOrigin::Augmenter(augmenter_idx) => {
+                let augmenter_set = Arc::clone(&fold.augmenter_set);
+                let augmenter = &augmenter_set.entries[augmenter_idx];
+                let augmenter_canonical = augmenter.canonical();
+                let (prefetched_art, prefetched_matched, prefetched_indexed) = match prefetch {
+                    Some(prefetch) => {
+                        (prefetch.art, Some(prefetch.matched), Some(prefetch.indexed))
+                    }
+                    None => (None, None, None),
+                };
+                let Some(indexed) = prefetched_indexed.or_else(|| {
+                    self.ctx
+                        .ensure_indexed_ready_serve(augmenter_canonical.as_ref())
+                        .map(|serve| serve.indexed)
+                }) else {
+                    // A set member the live view cannot serve is a torn state:
+                    // its contribution (and source-env identity) cannot be
+                    // observed coherently — the parent result must not warm. The
+                    // generalized non-cacheability rail is fanned ONCE at the single
+                    // CONSUMER (`instantiate_shell`, where this flag becomes
+                    // `output.cache_suppress`), covering every unobservable source.
+                    fold.source_env_unobservable = true;
+                    return None;
+                };
+                // `declare global` augments the global scope only from a
+                // MODULE: in a script it is an error and binds nothing
+                // (the augmenter set still fingerprints the file, so the
+                // script gaining module syntax misses the warm read).
+                if matches!(fold.target, AugmentationTargetKind::GlobalAugmentation)
+                    && verter_session_query::inputs::contributors::classify_shallow_module_kind(
+                        &indexed.shallow_state,
+                    ) == verter_session_query::inputs::contributors::FileModuleKind::Script
+                {
+                    return None;
+                }
+                // The addressable contribution pointers: each augmenter
+                // `ModuleAugmentationFact` that targets THIS decl gives the raw
+                // `declare module "<spec>"` specifier under which the typed inner
+                // body is retained in `augmentation_scopes`.
+                //
+                // Self-heal a STALE captured `artifact_key`: a cosmetic /
+                // member-body re-key of the augmenter advances its content hash
+                // (draining the captured key) without moving its decl skeleton,
+                // so the cached `AugmenterSet` keeps the pre-edit key. Skipping
+                // the augmenter on that miss would silently drop a real
+                // augmentation. `ensure_indexed_ready_serve` above already materialised
+                // the augmenter's CURRENT version, so `indexed.whole_hash` is the
+                // scheduler-authoritative current content hash.
+                let (art, matched) = match prefetched_art {
+                    Some(art) => (art, prefetched_matched.unwrap_or_default()),
+                    None => {
+                        let Some(art) = self
+                            .ctx
+                            .augmenter_artifact_answer(&augmenter.artifact_key, indexed.whole_hash)
+                        else {
+                            // Unhealable captured key: the augmenter's exact artifact
+                            // identity is unobservable — refuse warm admission. The
+                            // generalized non-cacheability rail is fanned ONCE at the
+                            // consumer (see the unservable arm above).
+                            fold.source_env_unobservable = true;
+                            return None;
+                        };
+                        let matched =
+                            self.matched_augmentations(fold, augmenter_canonical.as_ref(), &art);
+                        (art, matched)
+                    }
+                };
+                // The EXACT key the contributor read serves from (the healed
+                // current key when the captured one was stale).
+                let refreshed_key = art.refreshed_key.clone();
+                let effective_artifact_key = refreshed_key
+                    .clone()
+                    .unwrap_or_else(|| augmenter.artifact_key.clone());
+                if let Some(refreshed_key) = refreshed_key {
+                    fold.refreshed_keys.push((augmenter_idx, refreshed_key));
+                }
+                if matched.is_empty() {
+                    return None;
+                }
+
+                let Some(bundle) = self.ctx.prepared_decl_bundle(augmenter_canonical.as_ref())
+                else {
+                    fold.source_env_unobservable = true;
+                    return None;
+                };
+                fold.augmenter = Some(AugmenterBlocks {
+                    canonical: Arc::clone(augmenter_canonical),
+                    indexed,
+                    bundle,
+                    matched,
+                    next: 0,
+                    any_contribution: false,
+                    effective_artifact_key,
+                });
+                None
+            }
+            OrderedOrigin::FileScope(_)
+                if fold.contribution == AugmentationContribution::FunctionSignatures =>
+            {
+                None
+            }
+            // A script's block of the global enum: its own declaration
+            // of the name.
+            OrderedOrigin::FileScope(file_scope_idx)
+                if fold.contribution == AugmentationContribution::EnumBlocks =>
+            {
+                let entry = &fold.population_hit.entries[file_scope_idx];
+                let canonical = entry.artifact_key.canonical.as_ref();
+                let Some(indexed) = prefetch.map(|prefetch| prefetch.indexed).or_else(|| {
+                    self.ctx
+                        .ensure_indexed_ready_serve(canonical)
+                        .map(|serve| serve.indexed)
+                }) else {
+                    fold.source_env_unobservable = true;
+                    return None;
+                };
+                let Some(art) = self
+                    .ctx
+                    .augmenter_artifact_answer(&entry.artifact_key, indexed.whole_hash)
+                else {
+                    fold.source_env_unobservable = true;
+                    return None;
+                };
+                let prepared =
+                    match self
+                        .ctx
+                        .prepared_value_decl(canonical, entry.owner, &fold.decl_name)
+                    {
+                        Ok(Some(prepared)) => prepared,
+                        Ok(None) => return None,
+                        Err(_) => {
+                            fold.source_env_unobservable = true;
+                            return None;
+                        }
+                    };
+                let members = prepared.enum_members.as_ref().filter(|_| {
+                    prepared.kind == verter_session_query::declarations::ValueDeclKind::Enum
+                })?;
+                fold.enum_blocks.push(EnumContribution {
+                    canonical: Arc::clone(&entry.artifact_key.canonical),
+                    owner: entry.owner,
+                    scope: None,
+                    members: Arc::clone(&members.members),
+                });
+                fold.contributor_roots.push(AugmentationContributorRoot {
+                    canonical: verter_type_expr::OwnedStr::from(
+                        entry.artifact_key.canonical.clone(),
+                    ),
+                    whole_hash: indexed.whole_hash,
+                    artifact_key: art
+                        .refreshed_key
+                        .clone()
+                        .unwrap_or_else(|| entry.artifact_key.clone()),
+                });
+                None
+            }
+            OrderedOrigin::FileScope(file_scope_idx) => {
+                let entry = &fold.population_hit.entries[file_scope_idx];
+                let canonical = entry.artifact_key.canonical.as_ref();
+                let Some(indexed) = prefetch.map(|prefetch| prefetch.indexed).or_else(|| {
+                    self.ctx
+                        .ensure_indexed_ready_serve(canonical)
+                        .map(|serve| serve.indexed)
+                }) else {
+                    fold.source_env_unobservable = true;
+                    return None;
+                };
+                let Some(art) = self
+                    .ctx
+                    .augmenter_artifact_answer(&entry.artifact_key, indexed.whole_hash)
+                else {
+                    fold.source_env_unobservable = true;
+                    return None;
+                };
+                let effective_artifact_key = art
+                    .refreshed_key
+                    .clone()
+                    .unwrap_or_else(|| entry.artifact_key.clone());
+
+                let Some(bundle) = self.ctx.prepared_decl_bundle(canonical) else {
+                    fold.source_env_unobservable = true;
+                    return None;
+                };
+                let prepared =
+                    match self
+                        .ctx
+                        .prepared_type_from_input(&bundle, entry.owner, &fold.decl_name)
+                    {
+                        Ok(Some(prepared)) => prepared,
+                        Ok(None) => return None,
+                        Err(_) => {
+                            fold.source_env_unobservable = true;
+                            return None;
+                        }
+                    };
+                let aug_scope = NodeScopeId::File {
+                    canonical_id: verter_type_expr::OwnedStr::from(
+                        entry.artifact_key.canonical.clone(),
+                    ),
+                    owner: entry.owner,
+                    whole_hash: indexed.whole_hash,
+                    local_scope: None,
+                };
+                let aug_scope_payload = Some(self.declaration_scope_payload(
+                    &bundle,
+                    canonical,
+                    entry.owner,
+                    &fold.decl_name,
+                ));
+                let aug_shadowing =
                     crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
                         aug_scope_payload.as_ref(),
                     );
-                        // A `declare global` augmenter is indexed under the global tag;
-                        // its retained body lives in the GLOBAL augmentation scope, not
-                        // in a module scope named after the tag.
-                        let is_global = spec.as_str()
-                            == verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
-                        let scope_kind = if is_global {
-                            AugmentationScopeKind::Global
-                        } else {
-                            AugmentationScopeKind::Module(spec.clone())
-                        };
-                        let aug_scope = Self::augmentation_body_scope(
-                            aug_scope,
-                            &indexed.shallow_state.headers,
-                            &scope_kind,
-                            decl_name,
-                        );
-                        if contribution == AugmentationContribution::EnumBlocks {
-                            // The block's members, read in the block's own
-                            // scope: a same-named declaration of the file
-                            // itself is another declaration.
-                            let prepared = match self.ctx.prepare_augmentation_value(
-                                &bundle,
-                                &scope_kind,
-                                *contributor_owner,
-                                decl_name,
-                            ) {
-                                verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
-                                    Some(prepared),
-                                ) => prepared,
-                                verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
-                                    None,
-                                ) => continue,
-                                verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss
-                                | verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
-                                    source_env_unobservable = true;
-                                    continue;
-                                }
-                            };
-                            let Some(members) = prepared.enum_members.as_ref().filter(|_| {
-                                prepared.kind
-                                    == verter_session_query::declarations::ValueDeclKind::Enum
-                            }) else {
-                                continue;
-                            };
-                            enum_blocks.push(EnumContribution {
-                                canonical: Arc::clone(augmenter_canonical),
-                                owner: *contributor_owner,
-                                scope: Some(scope_kind),
-                                members: Arc::clone(&members.members),
-                            });
-                            any_contribution = true;
-                            continue;
-                        }
-                        if contribution == AugmentationContribution::FunctionSignatures {
-                            let prepared = match self.ctx.prepare_augmentation_value(&bundle,
-                                &scope_kind,
-                                *contributor_owner,
-                                decl_name,
-                            ) {
-                                verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
-                                    Some(prepared),
-                                ) => prepared,
-                                verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
-                                    None,
-                                ) => continue,
-                                verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss
-                                | verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
-                                    source_env_unobservable = true;
-                                    continue;
-                                }
-                            };
-                            let signatures: Vec<SemanticNodeId> =
-                                crate::semantic_query::visible_overload_ordinals(
-                                    prepared
-                                        .signatures
-                                        .iter()
-                                        .map(|signature| signature.has_implementation_body),
-                                )
-                                .into_iter()
-                                .map(|ordinal| {
-                                    let locator =
-                                        verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(
-                                            verter_type_expr::locators::AugmentationBodyLocator {
-                                                anchor: verter_type_expr::locators::AuthoredAnchor {
-                                                    canonical_id: verter_type_expr::OwnedStr::from(augmenter_canonical),
-                                                    owner: *contributor_owner,
-                                                    symbol: verter_type_expr::OwnedStr::from(decl_name),
-                                                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                                                },
-                                                scope: if is_global {
-                                                    verter_type_expr::locators::AuthoredAugmentationScope::Global
-                                                } else {
-                                                    verter_type_expr::locators::AuthoredAugmentationScope::Module {
-                                                        specifier: verter_type_expr::OwnedStr::from(spec.as_str()),
-                                                    }
-                                                },
-                                                path: verter_type_expr::OwnedSlice::from(
-                                                    vec![verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
-                                                        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                                                    }]
-                                                    .into_boxed_slice(),
-                                                ),
-                                            },
-                                        );
-                                    let mut subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                                    self.lower_located_body_with_provenance(
-                                        locator,
-                                        verter_session_query::declarations::TypeDeclKind::Alias,
-                                        &[],
-                                        &prepared.name_resolution,
-                                        &FxHashMap::default(),
-                                        &aug_scope,
-                                        aug_scope_payload.as_ref(),
-                                        &aug_shadowing,
-                                        &mut subs,
-                                        context.into_structural_provenance(),
-                                    )
-                                })
-                                .collect();
-                            if signatures.is_empty() {
-                                continue;
-                            }
-                            contributor_nodes.extend(signatures.iter().copied());
-                            signature_groups.push(signatures);
-                            any_contribution = true;
-                            continue;
-                        }
-                        let aug_prepared = match self.ctx.prepare_augmentation_type(
-                            &bundle,
-                            &scope_kind,
-                            *contributor_owner,
-                            decl_name,
-                        ) {
-                            verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
-                                Some(prepared),
-                            ) => prepared,
-                            // Genuine absence: this augmenter has no contributor for the spec.
-                            verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
-                                None,
-                            ) => continue,
-                            // A broken decl-body lease pin (the augmenter body demand
-                            // ReturnOnly'd): the augmenter's source-env is UNOBSERVABLE —
-                            // fold into the fold's no-warm rail so the enclosing query's
-                            // `cache_suppress` is set, rather than silently dropping the
-                            // contributor and warm-admitting an under-merged surface. The
-                            // generalized non-cacheability rail is fanned ONCE at the
-                            // consumer (`instantiate_shell`) for every unobservable
-                            // source, so the enclosing component-meta tracer refuses the
-                            // final result too. A later demand under a live lease recovers.
-                            verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss => {
-                                source_env_unobservable = true;
-                                continue;
-                            }
-                            verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
-                                source_env_unobservable = true;
-                                continue;
-                            }
-                        };
-                        // Demand the augmenter's RETAINED contribution body through
-                        // the augmenter's OWN `LowerLocator` (the augmentation-scoped
-                        // locator leaf) — never an inline lowering of another file's
-                        // prepared body. An augmenter contribution is never the
-                        // macro-T own body — the projection downgrades provenance to
-                        // structural (same rule the builtin / heritage paths apply).
+                let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                    verter_type_expr::locators::TypeBodySlot {
+                        anchor: verter_type_expr::locators::AuthoredAnchor {
+                            canonical_id: verter_type_expr::OwnedStr::from(
+                                entry.artifact_key.canonical.clone(),
+                            ),
+                            owner: entry.owner,
+                            symbol: verter_type_expr::OwnedStr::from(&fold.decl_name),
+                            space: if entry.origin
+                                == verter_session_query::inputs::contributors::ContributorOrigin::FileScopeNamespace
+                            {
+                                verter_type_expr::locators::LocatorSymbolSpace::Namespace
+                            } else {
+                                verter_type_expr::locators::LocatorSymbolSpace::Type
+                            },
+                        },
+                        path: verter_type_expr::OwnedSlice::from(
+                            Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
+                                .into_boxed_slice(),
+                        ),
+                    },
+                );
+                let root = AugmentationContributorRoot {
+                    canonical: verter_type_expr::OwnedStr::from(
+                        entry.artifact_key.canonical.clone(),
+                    ),
+                    whole_hash: indexed.whole_hash,
+                    artifact_key: effective_artifact_key,
+                };
+                let body = PlannedContributorBody {
+                    shape: None,
+                    owner_symbol: verter_type_expr::OwnedStr::from(&fold.decl_name),
+                    prepared,
+                    augmentation: None,
+                    scope: aug_scope,
+                    scope_payload: aug_scope_payload,
+                    shadowing: aug_shadowing,
+                };
+                let read = self.plan_contributor_shape(fold, locator, body);
+                fold.contributor_roots.push(root);
+                read
+            }
+        }
+    }
+
+    /// Fold the open augmenter's contributing blocks from where the fold
+    /// left them, until one names its body's shape read or none remains.
+    fn advance_augmenter_blocks(
+        &self,
+        fold: &mut AugmentationFold,
+        blocks: &mut AugmenterBlocks,
+    ) -> Option<ContributorShapeRead> {
+        use verter_session_query::declarations::AugmentationScopeKind;
+
+        while blocks.next < blocks.matched.len() {
+            let (spec, contributor_owner, _) = &blocks.matched[blocks.next];
+            blocks.next += 1;
+            let decl_name: &str = &fold.decl_name;
+            let augmenter_canonical = &blocks.canonical;
+            let indexed = &blocks.indexed;
+            let aug_scope = NodeScopeId::File {
+                canonical_id: verter_type_expr::OwnedStr::from(augmenter_canonical),
+                owner: *contributor_owner,
+                whole_hash: indexed.whole_hash,
+                local_scope: None,
+            };
+            let aug_scope_payload = Some(
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    &blocks.bundle,
+                    *contributor_owner,
+                ),
+            );
+            let aug_shadowing =
+                crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+                    aug_scope_payload.as_ref(),
+                );
+            // A `declare global` augmenter is indexed under the global tag;
+            // its retained body lives in the GLOBAL augmentation scope, not
+            // in a module scope named after the tag.
+            let is_global = spec.as_str()
+                == verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
+            let scope_kind = if is_global {
+                AugmentationScopeKind::Global
+            } else {
+                AugmentationScopeKind::Module(spec.clone())
+            };
+            let aug_scope = Self::augmentation_body_scope(
+                aug_scope,
+                &indexed.shallow_state.headers,
+                &scope_kind,
+                decl_name,
+            );
+            if fold.contribution == AugmentationContribution::EnumBlocks {
+                // The block's members, read in the block's own
+                // scope: a same-named declaration of the file
+                // itself is another declaration.
+                let prepared = match self.ctx.prepare_augmentation_value(
+                    &blocks.bundle,
+                    &scope_kind,
+                    *contributor_owner,
+                    decl_name,
+                ) {
+                    verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(Some(
+                        prepared,
+                    )) => prepared,
+                    verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(None) => {
+                        continue
+                    }
+                    verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss
+                    | verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
+                        fold.source_env_unobservable = true;
+                        continue;
+                    }
+                };
+                let Some(members) = prepared.enum_members.as_ref().filter(|_| {
+                    prepared.kind == verter_session_query::declarations::ValueDeclKind::Enum
+                }) else {
+                    continue;
+                };
+                fold.enum_blocks.push(EnumContribution {
+                    canonical: Arc::clone(augmenter_canonical),
+                    owner: *contributor_owner,
+                    scope: Some(scope_kind),
+                    members: Arc::clone(&members.members),
+                });
+                blocks.any_contribution = true;
+                continue;
+            }
+            if fold.contribution == AugmentationContribution::FunctionSignatures {
+                let prepared = match self.ctx.prepare_augmentation_value(
+                    &blocks.bundle,
+                    &scope_kind,
+                    *contributor_owner,
+                    decl_name,
+                ) {
+                    verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(Some(
+                        prepared,
+                    )) => prepared,
+                    verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(None) => {
+                        continue
+                    }
+                    verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss
+                    | verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
+                        fold.source_env_unobservable = true;
+                        continue;
+                    }
+                };
+                let signatures: Vec<SemanticNodeId> =
+                    crate::semantic_query::visible_overload_ordinals(
+                        prepared
+                            .signatures
+                            .iter()
+                            .map(|signature| signature.has_implementation_body),
+                    )
+                    .into_iter()
+                    .map(|ordinal| {
                         let locator =
                             verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(
                                 verter_type_expr::locators::AugmentationBodyLocator {
                                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                                        canonical_id: verter_type_expr::OwnedStr::from(
-                                            augmenter_canonical,
-                                        ),
+                                        canonical_id: verter_type_expr::OwnedStr::from(augmenter_canonical),
                                         owner: *contributor_owner,
                                         symbol: verter_type_expr::OwnedStr::from(decl_name),
-                                        space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                                     },
                                     scope: if is_global {
                                         verter_type_expr::locators::AuthoredAugmentationScope::Global
                                     } else {
                                         verter_type_expr::locators::AuthoredAugmentationScope::Module {
-                                specifier: verter_type_expr::OwnedStr::from(spec.as_str()),
-                            }
+                                            specifier: verter_type_expr::OwnedStr::from(spec.as_str()),
+                                        }
                                     },
-                                    // The whole augmentation contribution body (no sub-slot).
                                     path: verter_type_expr::OwnedSlice::from(
-                                        Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
-                                            .into_boxed_slice(),
+                                        vec![verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
+                                            ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                                        }]
+                                        .into_boxed_slice(),
                                     ),
                                 },
                             );
-                        if neutral_class_base
-                            && aug_prepared.kind
-                                == verter_session_query::declarations::TypeDeclKind::Interface
-                            && aug_prepared.type_parameters.is_empty()
-                            && aug_prepared.member_index.is_empty()
-                        {
-                            let empty = |body: &TypeExpr| {
-                                matches!(body,
-                                TypeExpr::Object(object) if object.properties.is_empty())
-                            };
-                            if self.ctx.deref_authored_body(&indexed.shallow_state, &locator).is_ok_and(|body| {
-                                body.type_parameters.is_empty() && match &body.shape {
-                                    verter_session_query::source::deref::DerefedBodyShape::Single(body) => empty(body),
-                                    verter_session_query::source::deref::DerefedBodyShape::Merged(bodies) => !bodies.is_empty() && bodies.iter().all(empty),
-                                }
-                            }) {
-                                // The exact body port already observed content.
-                                // Keep the previous source-environment/refusal
-                                // rail even though no graph body is demanded.
-                                if crate::fact_signature_helpers::observe_file_source_env_from_artifact_key(
-                                    self.ctx, Some(&effective_artifact_key)).is_none() {
-                                    source_env_unobservable = true;
-                                }
-                                continue;
-                            }
-                        }
-                        let shape = self.fetch_located_shape(locator);
-                        context_free &= shape.is_some();
-                        planned_bodies.push(PlannedContributorBody {
-                            shape,
-                            owner_symbol: verter_type_expr::OwnedStr::from(decl_name),
-                            prepared: verter_retention::heap_size::OwnedValue::new(aug_prepared),
-                            augmentation: Some(scope_kind),
-                            scope: aug_scope,
-                            scope_payload: aug_scope_payload,
-                            shadowing: aug_shadowing,
-                        });
-                        any_contribution = true;
-                    }
-                    if any_contribution {
-                        // Root on the OVERLAY-AWARE content version the body was
-                        // actually lowered from (`indexed.whole_hash` == `aug_scope`'s
-                        // hash), NOT `get_whole_hash` (which can report the BASE hash
-                        // under a session view). A session-overlay augmenter rooted on
-                        // the base hash would tear: the value reflects overlay content
-                        // but the fact pins base content, so a BASE re-query validates
-                        // the session candidate and is poisoned. Rooting on the
-                        // overlay hash makes the base re-query miss and recompute.
-                        // The version root and the source-env artifact key travel as
-                        // ONE carrier: a contributor cannot be version-rooted without
-                        // its source-env identity.
-                        contributor_roots.push(AugmentationContributorRoot {
-                            canonical: verter_type_expr::OwnedStr::from(augmenter_canonical),
-                            whole_hash: indexed.whole_hash,
-                            artifact_key: effective_artifact_key,
-                        });
-                    }
-                }
-                OrderedOrigin::FileScope(_)
-                    if contribution == AugmentationContribution::FunctionSignatures =>
-                {
+                        let mut subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                        self.lower_located_body_with_provenance(
+                            locator,
+                            verter_session_query::declarations::TypeDeclKind::Alias,
+                            &[],
+                            &prepared.name_resolution,
+                            &FxHashMap::default(),
+                            &aug_scope,
+                            aug_scope_payload.as_ref(),
+                            &aug_shadowing,
+                            &mut subs,
+                            fold.context.into_structural_provenance(),
+                        )
+                    })
+                    .collect();
+                if signatures.is_empty() {
                     continue;
                 }
-                // A script's block of the global enum: its own declaration
-                // of the name.
-                OrderedOrigin::FileScope(file_scope_idx)
-                    if contribution == AugmentationContribution::EnumBlocks =>
-                {
-                    let entry = &population_hit.entries[file_scope_idx];
-                    let canonical = entry.artifact_key.canonical.as_ref();
-                    let Some(indexed) = prefetch.map(|prefetch| prefetch.indexed).or_else(|| {
-                        self.ctx
-                            .ensure_indexed_ready_serve(canonical)
-                            .map(|serve| serve.indexed)
-                    }) else {
-                        source_env_unobservable = true;
-                        continue;
-                    };
-                    let Some(art) = self
-                        .ctx
-                        .augmenter_artifact_answer(&entry.artifact_key, indexed.whole_hash)
-                    else {
-                        source_env_unobservable = true;
-                        continue;
-                    };
-                    let prepared =
-                        match self
-                            .ctx
-                            .prepared_value_decl(canonical, entry.owner, decl_name)
-                        {
-                            Ok(Some(prepared)) => prepared,
-                            Ok(None) => continue,
-                            Err(_) => {
-                                source_env_unobservable = true;
-                                continue;
-                            }
-                        };
-                    let Some(members) = prepared.enum_members.as_ref().filter(|_| {
-                        prepared.kind == verter_session_query::declarations::ValueDeclKind::Enum
-                    }) else {
-                        continue;
-                    };
-                    enum_blocks.push(EnumContribution {
-                        canonical: Arc::clone(&entry.artifact_key.canonical),
-                        owner: entry.owner,
-                        scope: None,
-                        members: Arc::clone(&members.members),
-                    });
-                    contributor_roots.push(AugmentationContributorRoot {
-                        canonical: verter_type_expr::OwnedStr::from(
-                            entry.artifact_key.canonical.clone(),
-                        ),
-                        whole_hash: indexed.whole_hash,
-                        artifact_key: art
-                            .refreshed_key
-                            .clone()
-                            .unwrap_or_else(|| entry.artifact_key.clone()),
-                    });
+                fold.contributor_nodes.extend(signatures.iter().copied());
+                fold.signature_groups.push(signatures);
+                blocks.any_contribution = true;
+                continue;
+            }
+            let aug_prepared = match self.ctx.prepare_augmentation_type(
+                &blocks.bundle,
+                &scope_kind,
+                *contributor_owner,
+                decl_name,
+            ) {
+                verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(Some(
+                    prepared,
+                )) => prepared,
+                // Genuine absence: this augmenter has no contributor for the spec.
+                verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(None) => {
+                    continue
                 }
-                OrderedOrigin::FileScope(file_scope_idx) => {
-                    let entry = &population_hit.entries[file_scope_idx];
-                    let canonical = entry.artifact_key.canonical.as_ref();
-                    let Some(indexed) = prefetch.map(|prefetch| prefetch.indexed).or_else(|| {
-                        self.ctx
-                            .ensure_indexed_ready_serve(canonical)
-                            .map(|serve| serve.indexed)
-                    }) else {
-                        source_env_unobservable = true;
-                        continue;
-                    };
-                    let Some(art) = self
-                        .ctx
-                        .augmenter_artifact_answer(&entry.artifact_key, indexed.whole_hash)
-                    else {
-                        source_env_unobservable = true;
-                        continue;
-                    };
-                    let refreshed_key = art.refreshed_key.clone();
-                    let effective_artifact_key = refreshed_key
-                        .clone()
-                        .unwrap_or_else(|| entry.artifact_key.clone());
-
-                    let Some(bundle) = self.ctx.prepared_decl_bundle(canonical) else {
-                        source_env_unobservable = true;
-                        continue;
-                    };
-                    let prepared =
-                        match self
-                            .ctx
-                            .prepared_type_from_input(&bundle, entry.owner, decl_name)
-                        {
-                            Ok(Some(prepared)) => prepared,
-                            Ok(None) => continue,
-                            Err(_) => {
-                                source_env_unobservable = true;
-                                continue;
-                            }
-                        };
-                    let aug_scope = NodeScopeId::File {
-                        canonical_id: verter_type_expr::OwnedStr::from(
-                            entry.artifact_key.canonical.clone(),
-                        ),
-                        owner: entry.owner,
-                        whole_hash: indexed.whole_hash,
-                        local_scope: None,
-                    };
-                    let aug_scope_payload = Some(self.declaration_scope_payload(
-                        &bundle,
-                        canonical,
-                        entry.owner,
-                        decl_name,
-                    ));
-                    let aug_shadowing =
-                        crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
-                            aug_scope_payload.as_ref(),
-                        );
-                    let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                verter_type_expr::locators::TypeBodySlot {
+                // A broken decl-body lease pin (the augmenter body demand
+                // ReturnOnly'd): the augmenter's source-env is UNOBSERVABLE —
+                // fold into the fold's no-warm rail so the enclosing query's
+                // `cache_suppress` is set, rather than silently dropping the
+                // contributor and warm-admitting an under-merged surface. The
+                // generalized non-cacheability rail is fanned ONCE at the
+                // consumer (`instantiate_shell`) for every unobservable
+                // source, so the enclosing component-meta tracer refuses the
+                // final result too. A later demand under a live lease recovers.
+                verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss => {
+                    fold.source_env_unobservable = true;
+                    continue;
+                }
+                verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
+                    fold.source_env_unobservable = true;
+                    continue;
+                }
+            };
+            // Demand the augmenter's RETAINED contribution body through
+            // the augmenter's OWN `LowerLocator` (the augmentation-scoped
+            // locator leaf) — never an inline lowering of another file's
+            // prepared body. An augmenter contribution is never the
+            // macro-T own body — the projection downgrades provenance to
+            // structural (same rule the builtin / heritage paths apply).
+            let locator = verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(
+                verter_type_expr::locators::AugmentationBodyLocator {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: verter_type_expr::OwnedStr::from(entry.artifact_key.canonical.clone()),
-                        owner: entry.owner,
+                        canonical_id: verter_type_expr::OwnedStr::from(augmenter_canonical),
+                        owner: *contributor_owner,
                         symbol: verter_type_expr::OwnedStr::from(decl_name),
-                        space: if entry.origin
-                            == verter_session_query::inputs::contributors::ContributorOrigin::FileScopeNamespace
-                        {
-                            verter_type_expr::locators::LocatorSymbolSpace::Namespace
-                        } else {
-                            verter_type_expr::locators::LocatorSymbolSpace::Type
-                        },
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                     },
+                    scope: if is_global {
+                        verter_type_expr::locators::AuthoredAugmentationScope::Global
+                    } else {
+                        verter_type_expr::locators::AuthoredAugmentationScope::Module {
+                            specifier: verter_type_expr::OwnedStr::from(spec.as_str()),
+                        }
+                    },
+                    // The whole augmentation contribution body (no sub-slot).
                     path: verter_type_expr::OwnedSlice::from(
                         Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
                             .into_boxed_slice(),
                     ),
                 },
             );
-                    let shape = self.fetch_located_shape(locator);
-                    context_free &= shape.is_some();
-                    planned_bodies.push(PlannedContributorBody {
-                        shape,
-                        owner_symbol: verter_type_expr::OwnedStr::from(decl_name),
-                        prepared,
-                        augmentation: None,
-                        scope: aug_scope,
-                        scope_payload: aug_scope_payload,
-                        shadowing: aug_shadowing,
-                    });
-                    contributor_roots.push(AugmentationContributorRoot {
-                        canonical: verter_type_expr::OwnedStr::from(
-                            entry.artifact_key.canonical.clone(),
-                        ),
-                        whole_hash: indexed.whole_hash,
-                        artifact_key: effective_artifact_key,
-                    });
-                    let _ = art;
+            if fold.neutral_class_base
+                && aug_prepared.kind == verter_session_query::declarations::TypeDeclKind::Interface
+                && aug_prepared.type_parameters.is_empty()
+                && aug_prepared.member_index.is_empty()
+            {
+                let empty = |body: &TypeExpr| {
+                    matches!(body,
+                    TypeExpr::Object(object) if object.properties.is_empty())
+                };
+                if self
+                    .ctx
+                    .deref_authored_body(&indexed.shallow_state, &locator)
+                    .is_ok_and(|body| {
+                        body.type_parameters.is_empty()
+                            && match &body.shape {
+                                verter_session_query::source::deref::DerefedBodyShape::Single(
+                                    body,
+                                ) => empty(body),
+                                verter_session_query::source::deref::DerefedBodyShape::Merged(
+                                    bodies,
+                                ) => !bodies.is_empty() && bodies.iter().all(empty),
+                            }
+                    })
+                {
+                    // The exact body port already observed content.
+                    // Keep the previous source-environment/refusal
+                    // rail even though no graph body is demanded.
+                    if crate::fact_signature_helpers::observe_file_source_env_from_artifact_key(
+                        self.ctx,
+                        Some(&blocks.effective_artifact_key),
+                    )
+                    .is_none()
+                    {
+                        fold.source_env_unobservable = true;
+                    }
+                    continue;
                 }
             }
+            let body = PlannedContributorBody {
+                shape: None,
+                owner_symbol: verter_type_expr::OwnedStr::from(decl_name),
+                prepared: aug_prepared,
+                augmentation: Some(scope_kind),
+                scope: aug_scope,
+                scope_payload: aug_scope_payload,
+                shadowing: aug_shadowing,
+            };
+            let read = self.plan_contributor_shape(fold, locator, body);
+            blocks.any_contribution = true;
+            if read.is_some() {
+                return read;
+            }
         }
+        None
+    }
+
+    /// Plan one contributing type `body` of a fold and name the read of the
+    /// authored shape `locator` locates, which settles the body's shape.
+    /// A locator whose read cannot be named plans the body without a shape,
+    /// as a read answering no value would, and issues no read.
+    fn plan_contributor_shape(
+        &self,
+        fold: &mut AugmentationFold,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+        body: PlannedContributorBody,
+    ) -> Option<ContributorShapeRead> {
+        let key = self.locator_shape_key(locator);
+        let finish = ContributorShapeFinish {
+            body: u32::try_from(fold.planned_bodies.len())
+                .expect("an augmentation fold plans fewer than u32::MAX bodies"),
+        };
+        fold.planned_bodies.push(body);
+        match key {
+            Ok(key) => Some(ContributorShapeRead {
+                read: super::lower::LowerRead {
+                    key,
+                    shape: super::lower::LowerReadShape::Whole,
+                },
+                finish,
+            }),
+            Err(_) => {
+                fold.context_free = false;
+                None
+            }
+        }
+    }
+
+    /// Finish a fold every contributor of which is folded: write healed
+    /// augmenter keys back when no read the fold consumed was refused,
+    /// verify the population covers every served contributor and complete
+    /// the plan or the contributions.
+    fn finish_augmentation_fold(
+        &self,
+        fold: AugmentationFold,
+        refusals: crate::fact_tracing::RefusalObservationScope,
+    ) -> Option<FoldedAugmentation> {
+        let AugmentationFold {
+            contribution,
+            target,
+            key,
+            augmenter_set,
+            population_evidence,
+            contributor_nodes,
+            planned_bodies,
+            context_free,
+            signature_groups,
+            enum_blocks,
+            contributor_roots,
+            mut source_env_unobservable,
+            refreshed_keys,
+            base_position,
+            awaiting_shape,
+            _batched_bodies,
+            ..
+        } = fold;
+        assert!(
+            !awaiting_shape,
+            "an augmentation fold finished with a pending read"
+        );
 
         // Test-injection: taint the (successfully-collected) contribution set as
         // if one contributor's source-env identity were unobservable — the exact

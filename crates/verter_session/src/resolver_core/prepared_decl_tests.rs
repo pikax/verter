@@ -1207,6 +1207,58 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
     );
 }
 
+/// An augmentation-scoped type declaration is prepared once per cache: a
+/// second read shares the committed declaration, a broken decl-body lease
+/// on a declaration not yet prepared leaves its slot vacant (never a warm
+/// absence) while the committed one keeps answering, and a name no block
+/// declares is a genuine absence.
+#[test]
+fn augmentation_type_decl_prepares_once_per_cache() {
+    use verter_session_query::declarations::AugmentationScopeKind;
+
+    let source = "declare module \"ext\" { interface A { x: string } }
+                  declare module \"ext\" { interface B { y: number } }
+";
+    let state = ShallowFileState::service_backed_for_test(source);
+    let cache = build_prepared_type_decl_cache(
+        "/ws/fixture.ts",
+        Arc::clone(&state),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
+        Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
+    );
+    let scope = AugmentationScopeKind::Module("ext".to_string());
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let prepare = |name: &str| cache.prepare_augmentation_type_decl_outcome_in(&scope, owner, name);
+
+    let PreparedDeclOutcome::Ready(Some(first)) = prepare("A") else {
+        panic!("augmentation symbol A prepares under a live lease");
+    };
+    assert!(cache.augmentation_slot_committed_for_test(&scope, owner, "A"));
+    let PreparedDeclOutcome::Ready(Some(second)) = prepare("A") else {
+        panic!("a second read of A answers from its committed slot");
+    };
+    assert!(
+        crate::resolver_core::CachedValue::ptr_eq(&first, &second),
+        "every read of one augmentation declaration shares its one preparation"
+    );
+
+    state.decl_bodies().release_retained_snapshot_for_test();
+    assert!(
+        matches!(prepare("B"), PreparedDeclOutcome::LeaseMiss),
+        "a broken-lease preparation surfaces the distinct LeaseMiss"
+    );
+    assert!(
+        !cache.augmentation_slot_committed_for_test(&scope, owner, "B"),
+        "a lease miss leaves the slot vacant, never a warm absence"
+    );
+    let PreparedDeclOutcome::Ready(Some(warm)) = prepare("A") else {
+        panic!("a committed augmentation declaration answers without its lease");
+    };
+    assert!(crate::resolver_core::CachedValue::ptr_eq(&first, &warm));
+    assert!(matches!(prepare("C"), PreparedDeclOutcome::Ready(None)));
+}
+
 // ---------------------------------------------------------------------
 // Cold single-flight around the warm prepared-decl slot.
 //
