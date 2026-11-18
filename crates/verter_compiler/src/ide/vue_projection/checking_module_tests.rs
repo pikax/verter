@@ -2863,7 +2863,7 @@ fn fallthrough_declarations_follow_runtime_roots() {
 }
 
 #[test]
-fn fallthrough_component_roots_withhold_extras_without_widening_numeric_props() {
+fn fallthrough_component_roots_publish_extras_without_widening_numeric_props() {
     let module = composed(
         r#"<script setup lang="ts">
 import Child from './Child.vue';
@@ -2872,7 +2872,7 @@ defineProps<{ value: number }>();
     );
     let text = module.checking_text();
     assert!(
-        module
+        !module
             .withheld
             .iter()
             .any(|product| product.family == ObligationFamily::Fallthrough),
@@ -2884,7 +2884,10 @@ defineProps<{ value: number }>();
         .find(|line| line.starts_with("type __VerterPublicProps ="))
         .unwrap();
     assert!(props.contains("({ value: number })"), "{props}");
-    assert!(!props.contains("__VerterFallthrough"), "{props}");
+    assert!(props.contains("__VerterFallthrough"), "{props}");
+    assert!(props.contains("Extract<ReturnType<typeof __VerterSetupScope>"), "{props}");
+    assert!(text.contains("if (__VerterRootProbe) return __VerterRootArm"), "{text}");
+    assert!(text.contains("readonly $attrs: Record<string, unknown>"), "{text}");
     assert!(
         !text.contains("format: (value: unknown) => string"),
         "{text}"
