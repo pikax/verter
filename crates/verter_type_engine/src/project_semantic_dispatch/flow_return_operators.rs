@@ -537,7 +537,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         matches!(
             self.dispatch
                 .graph()
-                .node_data(self.dispatch.resolved_reduction_view(arm))
+                .node_data(self.reduction_view(arm))
                 .as_deref(),
             Some(SemanticNodeData::Tuple { elements, .. })
                 if !elements.iter().any(|element| element.rest)
@@ -551,7 +551,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
             matches!(
                 self.dispatch
                     .graph()
-                    .node_data(self.dispatch.resolved_reduction_view(arm))
+                    .node_data(self.reduction_view(arm))
                     .as_deref(),
                 Some(
                     SemanticNodeData::Array { .. }
@@ -600,7 +600,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     ) -> Option<SemanticNodeId> {
         let mut elements = Vec::new();
         for arm in self.operand_arms(object) {
-            let resolved = self.dispatch.resolved_reduction_view(arm);
+            let resolved = self.reduction_view(arm);
             let data = self.dispatch.graph().node_data(resolved);
             let element = match data.as_deref()? {
                 SemanticNodeData::Array { element, .. } => *element,
