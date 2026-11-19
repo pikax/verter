@@ -177,6 +177,12 @@ static_assertions::const_assert!(std::mem::size_of::<ReadWait>() <= 16);
 static_assertions::const_assert!(std::mem::size_of::<ReadDelivery>() <= 16);
 // A delivery is held across a suspension and may resume on another thread.
 static_assertions::assert_impl_all!(ReadDelivery: Send);
+// A class member read its holder keeps between the classes it names is
+// exclusively owned and may resume on another thread, as may the class it
+// names.
+static_assertions::assert_not_impl_any!(crate::project_semantic_dispatch::build::ClassMemberRead: Clone, Copy);
+static_assertions::assert_impl_all!(crate::project_semantic_dispatch::build::ClassMemberRead: Send);
+static_assertions::assert_impl_all!(crate::project_semantic_dispatch::build::ClassMemberKey: Send);
 // A site waiting on a read it requested sits on the run's stack.
 static_assertions::const_assert!(std::mem::size_of::<super::ReadSite<'static>>() <= 24);
 static_assertions::const_assert!(

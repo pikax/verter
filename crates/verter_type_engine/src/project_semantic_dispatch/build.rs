@@ -10681,6 +10681,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// A base the selective route cannot serve (a value-only base, a merged
     /// class) or one the path already followed (a circular chain) is read
     /// through the previous class's `extends` arm whole.
+    ///
+    /// The in-place driver of [`Self::begin_class_member_read`]: each class
+    /// the read names is delivered where the read stands
+    /// ([`Self::deliver_class_member_read`]), over the same steps, with the
+    /// read's heritage state on the stack.
     pub(super) fn class_member_source(
         &self,
         canonical: &str,
@@ -10689,48 +10694,117 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         name: &str,
     ) -> Option<SemanticNodeId> {
-        let mut followed: FxHashSet<(
-            verter_type_expr::OwnedStr,
-            verter_type_expr::TopLevelOwnerId,
-            verter_type_expr::OwnedStr,
-        )> = FxHashSet::default();
-        let mut at: (
-            Arc<str>,
-            verter_type_expr::TopLevelOwnerId,
-            Arc<str>,
-            Vec<SemanticNodeId>,
-        ) = (
-            std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from(canonical)),
-            owner,
-            std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from(class)),
-            args.to_vec(),
-        );
-        // The `extends` arm of the class last followed: what the read
-        // answers with when the next class cannot answer selectively.
-        let mut through: Option<SemanticNodeId> = None;
+        self.drive_class_member_in_place(canonical, owner, class, args, name, |key| {
+            self.deliver_class_member_read(key)
+        })
+    }
+
+    /// [`Self::class_member_source`] with each class the read names answered
+    /// by `deliver`.
+    fn drive_class_member_in_place(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+        mut deliver: impl FnMut(&ClassMemberKey) -> ClassMemberDelivery,
+    ) -> Option<SemanticNodeId> {
+        let (mut read, mut key) = ClassMemberRead::new(canonical, owner, class, args, name);
         loop {
-            let (canonical, owner, class, args) = at;
-            if !followed.insert((
-                verter_type_expr::OwnedStr::from(canonical.clone()),
-                owner,
-                verter_type_expr::OwnedStr::from(class.clone()),
-            )) {
-                return through;
+            let delivered = deliver(&key);
+            match Self::class_member_delivered(&mut read, delivered) {
+                ClassMemberAdvance::Done(source) => return source,
+                ClassMemberAdvance::Read(next) => key = next,
             }
-            match self.class_member_step(&canonical, owner, &class, &args, name) {
-                None => return through,
-                Some(ClassMemberStep::Declared(node)) => return Some(node),
-                Some(ClassMemberStep::Inherited { heritage, base }) => {
-                    through = Some(heritage);
-                    let Some((base, base_args)) = base else {
-                        return through;
-                    };
-                    at = (
-                        std::sync::Arc::<str>::from(base.canonical_id.as_str()),
-                        base.owner,
-                        std::sync::Arc::<str>::from(base.decl_name.as_str()),
-                        base_args,
-                    );
+        }
+    }
+
+    /// The first stage of [`Self::class_member_source`] as a read its
+    /// consumer holds: the read standing at the class it names first, the
+    /// reading class itself, which it names without stepping
+    /// ([`ClassMemberRead`]). Nothing of the class is read, lowered or
+    /// observed until the consumer delivers that class.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn begin_class_member_read(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> ClassMemberReadStep {
+        let (read, key) = ClassMemberRead::new(canonical, owner, class, args, name);
+        ClassMemberReadStep::Read(key, Box::new(read))
+    }
+
+    /// The answer to one class a member read names: that class's own
+    /// members of the demanded name, else its `extends` arm and the class
+    /// declaration the arm references. The class's reads are made here,
+    /// where the delivery is made, not where the read stands.
+    pub(super) fn deliver_class_member_read(&self, key: &ClassMemberKey) -> ClassMemberDelivery {
+        ClassMemberDelivery(self.class_member_step(
+            &key.canonical,
+            key.owner,
+            &key.class,
+            &key.args,
+            &key.name,
+        ))
+    }
+
+    /// The next stage of a member read standing at a class, given
+    /// `delivered`, that class's answer: the read answers, or names the
+    /// base class it follows next.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn resume_class_member_read(
+        &self,
+        mut read: Box<ClassMemberRead>,
+        delivered: ClassMemberDelivery,
+    ) -> ClassMemberReadStep {
+        match Self::class_member_delivered(&mut read, delivered) {
+            ClassMemberAdvance::Done(source) => ClassMemberReadStep::Done(source),
+            ClassMemberAdvance::Read(next) => ClassMemberReadStep::Read(next, read),
+        }
+    }
+
+    /// Release a member read standing at a class. Between classes the read
+    /// holds only the classes it followed and node ids: no recording, cost
+    /// scope or observation stays open.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn abandon_class_member_read(&self, read: Box<ClassMemberRead>) {
+        drop(read);
+    }
+
+    /// One step of a member read: the class it stood at answered
+    /// `delivered`. A class declaring the member answers the read; a class
+    /// that does not hands on its `extends` arm, which answers the read when
+    /// the arm names no class declaration, or when the class it names was
+    /// already followed (a circular chain), and otherwise names that base
+    /// next, applied to the clause's arguments. A class the selective route
+    /// cannot serve answers with the `extends` arm last handed on.
+    fn class_member_delivered(
+        read: &mut ClassMemberRead,
+        delivered: ClassMemberDelivery,
+    ) -> ClassMemberAdvance {
+        match delivered.0 {
+            None => ClassMemberAdvance::Done(read.through),
+            Some(ClassMemberStep::Declared(node)) => ClassMemberAdvance::Done(Some(node)),
+            Some(ClassMemberStep::Inherited { heritage, base }) => {
+                read.through = Some(heritage);
+                let Some((base, base_args)) = base else {
+                    return ClassMemberAdvance::Done(read.through);
+                };
+                let next = ClassMemberKey {
+                    canonical: Arc::<str>::from(base.canonical_id.as_str()),
+                    owner: base.owner,
+                    class: Arc::<str>::from(base.decl_name.as_str()),
+                    args: base_args,
+                    name: read.name.clone(),
+                };
+                if read.follow(&next) {
+                    ClassMemberAdvance::Read(next)
+                } else {
+                    ClassMemberAdvance::Done(read.through)
                 }
             }
         }
@@ -22399,6 +22473,103 @@ enum ClassMemberStep {
     },
 }
 
+/// The class a member read ([`ProjectSemanticDispatch::class_member_source`])
+/// names next: the class declaration, the type arguments it is applied to and
+/// the demanded member name. Owned, so the read's holder can deliver it
+/// ([`ProjectSemanticDispatch::deliver_class_member_read`]) wherever it
+/// answers its reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClassMemberKey {
+    canonical: Arc<str>,
+    owner: verter_type_expr::TopLevelOwnerId,
+    class: Arc<str>,
+    args: Vec<SemanticNodeId>,
+    name: Arc<str>,
+}
+
+impl ClassMemberKey {
+    /// The file declaring the class this key names.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn canonical(&self) -> &str {
+        &self.canonical
+    }
+
+    /// The class declaration this key names.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn class(&self) -> &str {
+        &self.class
+    }
+}
+
+/// The answer one delivered [`ClassMemberKey`] gives its member read: the
+/// class's own members of the demanded name, its `extends` arm and the base
+/// that arm names, or nothing the selective route can serve.
+pub(super) struct ClassMemberDelivery(Option<ClassMemberStep>);
+
+/// A member read ([`ProjectSemanticDispatch::class_member_source`]) between
+/// two of the classes it names: the demanded name, every class the read has
+/// followed up the inheritance path, and the `extends` arm of the class last
+/// followed, which answers the read when the next class cannot answer
+/// selectively. The class each delivery answers is consumed by the step that
+/// receives it: either it answers the read, or its base is recorded in
+/// `followed` and named next.
+pub(super) struct ClassMemberRead {
+    name: Arc<str>,
+    followed: FxHashSet<(Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>)>,
+    through: Option<SemanticNodeId>,
+}
+
+impl ClassMemberRead {
+    /// A read of member `name` standing at the reading class, which it has
+    /// followed and names first.
+    fn new(
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> (Self, ClassMemberKey) {
+        let name = Arc::<str>::from(name);
+        let key = ClassMemberKey {
+            canonical: Arc::<str>::from(canonical),
+            owner,
+            class: Arc::<str>::from(class),
+            args: args.to_vec(),
+            name: name.clone(),
+        };
+        let mut read = Self {
+            name,
+            followed: FxHashSet::default(),
+            through: None,
+        };
+        read.follow(&key);
+        (read, key)
+    }
+
+    /// Record the class `key` names as followed; `false` when the path
+    /// already followed it.
+    fn follow(&mut self, key: &ClassMemberKey) -> bool {
+        self.followed
+            .insert((key.canonical.clone(), key.owner, key.class.clone()))
+    }
+}
+
+/// Where a member read stands after its latest stage.
+pub(super) enum ClassMemberReadStep {
+    /// Where the member reads from; `None` when no class on the path
+    /// answers it.
+    Done(Option<SemanticNodeId>),
+    /// The read names this class next, holding everything it followed.
+    Read(ClassMemberKey, Box<ClassMemberRead>),
+}
+
+/// What one delivered class decided for a member read.
+enum ClassMemberAdvance {
+    Done(Option<SemanticNodeId>),
+    /// The read follows the base this key names next.
+    Read(ClassMemberKey),
+}
+
 /// The lib conditional's recursion on one evaluation path, counted the way
 /// the checker counts it.
 #[derive(Debug)]
@@ -23541,6 +23712,110 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             observations_complete: !completeness.is_partial() && !frame.result_is_partial,
             cache_suppress: frame.cache_suppress,
             partial_reasons: frame.partial_reasons,
+        }
+    }
+}
+
+/// One member read as a test observes it
+/// ([`ProjectSemanticDispatch::trace_class_member_read_for_tests`]).
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClassMemberTraceForTests {
+    /// Where the member reads from.
+    pub source: Option<SemanticNodeId>,
+    /// Every class the read named, in order, as `(file, class)`.
+    pub requested: Vec<(String, String)>,
+    pub observations_complete: bool,
+    pub cache_suppress: bool,
+    pub partial_reasons: crate::semantic_query::PartialReasonSet,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Where member `name` of the ordinary-file class `class` (applied to
+    /// `args`) reads from, through the stepped read
+    /// ([`Self::begin_class_member_read`] / [`Self::resume_class_member_read`])
+    /// or through the in-place driver [`Self::class_member_source`] drives,
+    /// each class the read names delivered by
+    /// [`Self::deliver_class_member_read`] and recorded. The in-place run
+    /// also checks [`Self::class_member_source`] answers what the traced
+    /// driver answered.
+    pub fn trace_class_member_read_for_tests(
+        &self,
+        canonical: &str,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+        stepped: bool,
+    ) -> ClassMemberTraceForTests {
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let (_connected, _) = self.enter_connected_demand(false);
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let mut requested = Vec::new();
+        let mut deliver = |key: &ClassMemberKey| {
+            requested.push((key.canonical().to_owned(), key.class().to_owned()));
+            assert!(
+                requested.len() <= 16,
+                "a member read names each class on its path once"
+            );
+            self.deliver_class_member_read(key)
+        };
+        let source = if stepped {
+            let mut step = self.begin_class_member_read(canonical, owner, class, args, name);
+            loop {
+                match step {
+                    ClassMemberReadStep::Done(source) => break source,
+                    ClassMemberReadStep::Read(key, read) => {
+                        let delivered = deliver(&key);
+                        step = self.resume_class_member_read(read, delivered);
+                    }
+                }
+            }
+        } else {
+            self.drive_class_member_in_place(canonical, owner, class, args, name, &mut deliver)
+        };
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        let frame = frame.finish();
+        scope.discard();
+        if !stepped {
+            assert_eq!(
+                self.class_member_source(canonical, owner, class, args, name),
+                source,
+                "the in-place entry uses the traced driver"
+            );
+        }
+        ClassMemberTraceForTests {
+            source,
+            requested,
+            observations_complete: !completeness.is_partial() && !frame.result_is_partial,
+            cache_suppress: frame.cache_suppress,
+            partial_reasons: frame.partial_reasons,
+        }
+    }
+
+    /// The class a member read of `name` on the ordinary-file class `class`
+    /// names first, as `(file, class)`, taken from the read's first stage
+    /// alone; the read is then abandoned undelivered. `None` when that stage
+    /// already answers.
+    pub fn begin_class_member_read_for_tests(
+        &self,
+        canonical: &str,
+        class: &str,
+        name: &str,
+    ) -> Option<(String, String)> {
+        match self.begin_class_member_read(
+            canonical,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            class,
+            &[],
+            name,
+        ) {
+            ClassMemberReadStep::Done(_) => None,
+            ClassMemberReadStep::Read(key, read) => {
+                self.abandon_class_member_read(read);
+                Some((key.canonical().to_owned(), key.class().to_owned()))
+            }
         }
     }
 }

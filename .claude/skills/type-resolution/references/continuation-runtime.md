@@ -398,6 +398,26 @@ between reads by `resolve_signature_source_carrier`, in place. That settle is
 the walk's one read it does not name. The read is `Send`, never `Clone` or
 `Copy`. The conditional decision holds it as its `KeySet` operation.
 
+**Class member sources.** `build.rs` owns `ClassMemberRead`, the owned form
+of `class_member_source`. It holds the demanded name, every class the read
+has followed up the inheritance path, and the `extends` arm of the class last
+followed. `begin_class_member_read` names the reading class as an owned
+`ClassMemberKey` (file, owner, class, the clause's type arguments, the name)
+without reading, lowering or observing any of it. The holder delivers a key
+with `deliver_class_member_read`, which makes that class's reads where the
+delivery is made: the class's own members of the name (the exact member read
+first, then the selected member positions), else its `extends` arm and the
+class declaration that arm names. `resume_class_member_read` consumes one
+`ClassMemberDelivery` and returns `ClassMemberReadStep::Done` or the next
+class's key; a base already followed (a circular chain), an arm naming no
+class, or a class the selective route cannot serve answers with the arm last
+handed on. `abandon_class_member_read` releases a read: between classes it
+holds only names and node ids. `class_member_source` keeps its signature and
+is the in-place loop over the same steps, with the read on the stack; it
+allocates no box. The read is `Send`, never `Clone` or `Copy`, so the flow
+body can hold it as a request; until it does, the flow driver's
+`class_member_source` still drives it in place.
+
 ### Indexed argument reads in flow bodies
 
 The flow reader advances the shared `IndexedValueRun` with suspension enabled.
