@@ -1742,10 +1742,11 @@ fn delete(range: SourceRange) -> EmitOp<'static> {
 /// The module layout over the carrier, as emit operations and the template
 /// scope's replacement (see `scope_at`):
 ///
-/// - the normal script, the setup imports and the setup type declarations
-///   the public declaration may name at module scope, verbatim (the setup
-///   ones moved ahead of the setup scope, in source order, each with its
-///   own line end);
+/// - the normal script, the setup imports, the setup type declarations the
+///   public declaration may name at module scope and the exported setup
+///   types, verbatim (the setup ones moved ahead of the setup scope, in
+///   source order, each with its own line end, an exported one keeping its
+///   `export`);
 /// - the preludes, each once in key order, the global component fallbacks
 ///   and the public declaration over the setup scope;
 /// - one function over the authored generic binder holding the remaining
@@ -1799,8 +1800,10 @@ fn module_layout(
             for (ordinal, statement) in facts.statements.iter().enumerate() {
                 let hoisted = match &statement.kind {
                     SetupStatementKind::Import { .. } => true,
-                    SetupStatementKind::TypeDeclaration { name } => {
-                        module_types.contains(name.as_str())
+                    // An exported type is a module export, so it always
+                    // stands at module scope with its `export` keyword.
+                    SetupStatementKind::TypeDeclaration { name, exported } => {
+                        *exported || module_types.contains(name.as_str())
                     }
                     SetupStatementKind::Declaration { .. } | SetupStatementKind::Other => false,
                 };
@@ -2047,9 +2050,10 @@ fn exposed_binding(facts: &TsSetupProjection, callee: SourceRange) -> Option<Exp
 }
 
 /// Names of the setup type declarations that may stand at module scope:
-/// those the public declaration names (the binder capture's lifted
-/// declarations) that are free in no binder parameter, depend on no setup
-/// value, transitively, and share no name with a normal-script binding.
+/// those the public declaration or an exported setup type names (the binder
+/// capture's lifted declarations) that are free in no binder parameter,
+/// depend on no setup value, transitively, and share no name with a
+/// normal-script binding.
 /// Every other setup type declaration stays in the setup scope, where the
 /// binder and the setup values are in scope and where a setup declaration
 /// shadows a normal-script one of the same name instead of merging with it.

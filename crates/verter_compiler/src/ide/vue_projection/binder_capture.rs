@@ -101,7 +101,7 @@ pub enum DependencyOrigin {
     },
     /// Multiple compatible local declarations, such as merged interfaces.
     LocalDeclarations {
-        /// Indices into the source declaration inventory.
+        /// Indices into [`BinderCapturePlan::declarations`].
         indices: Vec<usize>,
     },
     /// An imported binding, retained as an import rather than lifted.
@@ -437,7 +437,13 @@ pub fn capture_binder_plan(
     };
 
     let (lifted, cycles) = close_over_declarations(&slices, &declarations, &resolver);
-    let lifted = assign_binder_names(
+    let positions: FxHashMap<usize, usize> = lifted
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| (entry.index, position))
+        .collect();
+    let mut slices = slices;
+    let mut lifted = assign_binder_names(
         lifted,
         &declarations,
         &binder,
@@ -459,6 +465,19 @@ pub fn capture_binder_plan(
             )
         },
     );
+    // Local origins index the lifted declarations the plan publishes, not
+    // the source inventory the closure walked.
+    for dependency in slices
+        .iter_mut()
+        .flat_map(|slice| &mut slice.dependencies)
+        .chain(
+            lifted
+                .iter_mut()
+                .flat_map(|declaration| &mut declaration.dependencies),
+        )
+    {
+        lifted_origin(&mut dependency.origin, &positions);
+    }
 
     let mut module_bindings: Vec<String> = [normal_semantic.as_ref(), setup_semantic.as_ref()]
         .into_iter()
@@ -1383,6 +1402,20 @@ fn close_over_declarations(
             }
         }
     }
+    // An exported setup type is a module export Vue hoists, so it is public
+    // surface whether or not a macro names it.
+    for (index, record) in declarations.iter().enumerate() {
+        if record.from_setup
+            && record.exported
+            && matches!(
+                record.kind,
+                LiftedDeclarationKind::TypeAlias | LiftedDeclarationKind::Interface
+            )
+            && queued.insert(index)
+        {
+            pending.push(index);
+        }
+    }
     let mut lifted: Vec<PendingLift> = Vec::new();
     let mut cursor = 0;
     while cursor < pending.len() {
@@ -1592,6 +1625,22 @@ fn assign_binder_names<'a>(
             }
         })
         .collect()
+}
+
+/// `origin` with its source-inventory indices replaced by the positions of
+/// those declarations among the lifted ones. The closure lifts every local
+/// declaration a captured dependency reaches, so each index has a position.
+fn lifted_origin(origin: &mut DependencyOrigin, positions: &FxHashMap<usize, usize>) {
+    let lifted = |index: &mut usize| {
+        if let Some(&position) = positions.get(&*index) {
+            *index = position;
+        }
+    };
+    match origin {
+        DependencyOrigin::LocalDeclaration { index } => lifted(index),
+        DependencyOrigin::LocalDeclarations { indices } => indices.iter_mut().for_each(lifted),
+        _ => {}
+    }
 }
 
 fn closure_over(seed: &[usize], dependencies: &[Vec<usize>]) -> Vec<usize> {

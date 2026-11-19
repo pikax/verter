@@ -150,6 +150,9 @@ pub enum SetupStatementKind {
     TypeDeclaration {
         /// Declared type name.
         name: String,
+        /// Authored as `export type` / `export interface`: an ordinary
+        /// module export, as Vue hoists it, that keeps its `export` keyword.
+        exported: bool,
     },
     /// Value declaration; stays inside the setup body.
     Declaration {
@@ -711,18 +714,41 @@ fn classify(statement: &Statement<'_>) -> SetupStatementKind {
                     .unwrap_or_default()
             },
         },
-        Statement::TSTypeAliasDeclaration(decl) => SetupStatementKind::TypeDeclaration {
-            name: decl.id.name.to_string(),
-        },
-        Statement::TSInterfaceDeclaration(decl) => SetupStatementKind::TypeDeclaration {
-            name: decl.id.name.to_string(),
-        },
-        _ => match statement.as_declaration() {
-            Some(declaration) => SetupStatementKind::Declaration {
-                names: declaration_names(declaration),
-            },
-            None => SetupStatementKind::Other,
-        },
+        _ => {
+            // `export type` / `export interface` is a module export Vue
+            // hoists; any other export stays in the setup body, the error it
+            // is in Vue.
+            if let Some(export) = NamedExportParts::of_statement(statement) {
+                return match export.declaration.and_then(type_declaration_name) {
+                    Some(name) => SetupStatementKind::TypeDeclaration {
+                        name,
+                        exported: true,
+                    },
+                    None => SetupStatementKind::Other,
+                };
+            }
+            match statement.as_declaration() {
+                Some(declaration) => match type_declaration_name(declaration) {
+                    Some(name) => SetupStatementKind::TypeDeclaration {
+                        name,
+                        exported: false,
+                    },
+                    None => SetupStatementKind::Declaration {
+                        names: declaration_names(declaration),
+                    },
+                },
+                None => SetupStatementKind::Other,
+            }
+        }
+    }
+}
+
+/// The declared name of a type alias or an interface.
+fn type_declaration_name(declaration: &Declaration<'_>) -> Option<String> {
+    match declaration {
+        Declaration::TSTypeAliasDeclaration(decl) => Some(decl.id.name.to_string()),
+        Declaration::TSInterfaceDeclaration(decl) => Some(decl.id.name.to_string()),
+        _ => None,
     }
 }
 
