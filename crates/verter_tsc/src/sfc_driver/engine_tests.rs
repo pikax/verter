@@ -1248,6 +1248,51 @@ mod declaration_output {
         }
     }
 
+    /// A type exported from `<script setup>` is published by the carrier's
+    /// declaration, so a TypeScript root that imports it declares cleanly.
+    #[test]
+    fn a_type_exported_from_script_setup_is_published_in_the_carrier_declaration() {
+        let f = Fixture::new();
+        f.write("tsconfig.json", &project_config("dist"));
+        f.write(
+            "src/A.vue",
+            concat!(
+                "<script setup lang=\"ts\">\n",
+                "interface Cell { text: string }\n",
+                "export interface Row { id: string; cell: Cell }\n",
+                "defineProps<{ row: Row }>();\n",
+                "</script>\n",
+            ),
+        );
+        f.write(
+            "src/c.ts",
+            "import type { Row } from './A.vue';\nexport const read = (row: Row): string => row.cell.text;\n",
+        );
+        let outcome = declare(&f, BuildMode::Project, "tsconfig.json");
+        let project = &outcome.projects[0];
+        assert!(
+            project.engine_failure.is_none(),
+            "{:?}",
+            project.engine_failure
+        );
+        assert!(project.diagnostics.is_empty(), "{:?}", project.diagnostics);
+        let dist = f.dir.path().join("dist/src");
+        let carrier = std::fs::read_to_string(dist.join("A.vue.d.ts"))
+            .unwrap_or_else(|_| panic!("{:?}", files_under(&f.dir.path().join("dist"))));
+        assert!(
+            carrier.contains("export interface Row { id: string; cell: Cell }"),
+            "{carrier}"
+        );
+        assert!(
+            carrier.contains("interface Cell { text: string }"),
+            "{carrier}"
+        );
+        let root = std::fs::read_to_string(dist.join("c.d.ts"))
+            .unwrap_or_else(|_| panic!("{:?}", files_under(&f.dir.path().join("dist"))));
+        assert!(root.contains("./A.vue"), "{root}");
+        assert!(!root.contains("any"), "{root}");
+    }
+
     /// A package installed beside a member, where the stage's mirror does not
     /// look, is still the one the member's declaration reads, as a value and
     /// as a type, and the published declaration names it as authored.
@@ -2274,5 +2319,54 @@ const filter = reactive<{ input: string | string[] | number }>({ input: '' });
 "#,
         ),
     ]);
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn types_exported_from_script_setup_reach_carrier_and_typescript_importers() {
+    let f = Fixture::new();
+    f.base();
+    f.write(
+        "tsconfig.json",
+        r#"{"extends":"./base.json","include":["*.vue","*.ts"]}"#,
+    );
+    f.write(
+        "A.vue",
+        r#"<script setup lang="ts">
+export interface Row { id: string }
+defineProps<{ row: Row }>();
+</script>
+
+<template><p>{{ row.id }}</p></template>
+"#,
+    );
+    f.write(
+        "B.vue",
+        r#"<script setup lang="ts">
+import type { Row } from './A.vue';
+import A from './A.vue';
+const row: Row = { id: 'b' };
+</script>
+
+<template><A :row="row" /></template>
+"#,
+    );
+    // The imported type is the declared interface, not an `any` a missing
+    // export would leave behind.
+    f.write(
+        "c.ts",
+        concat!(
+            "import type { Row } from './A.vue';\n",
+            "export const row: Row = { id: 'c' };\n",
+            "// @ts-expect-error the id is a string\n",
+            "export const wrong: Row = { id: 1 };\n",
+        ),
+    );
+    let outcome = f.run();
+    assert_eq!(outcome.carriers_checked, 2);
+    let errors: Vec<_> = outcome_diagnostics(&outcome)
+        .into_iter()
+        .filter(|d| d.severity == crate::reporter::Severity::Error)
+        .collect();
     assert!(errors.is_empty(), "{errors:?}");
 }
