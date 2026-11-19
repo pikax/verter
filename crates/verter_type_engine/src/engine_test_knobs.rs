@@ -42,6 +42,12 @@ pub struct TestKnobs {
     /// discovered past a completed child still withholds the force's own
     /// result.
     pub semantic_operand_post_child_seam: SeamHook,
+    /// One-shot seam fired when a conditional decision resumes with a
+    /// lowered branch, after the decision's entry cancellation check and
+    /// before it resumes the operation that asked for the branch.
+    /// Cancellation tests cancel the request here, so a later check inside
+    /// the decision, not its entry check, is the first to observe it.
+    pub conditional_branch_delivery_seam: SeamHook,
     /// Per-host test-injection knob for the carrier-subject normalization
     /// prelude. When `true`, the traced carrier-normalization prelude
     /// (the entry admission's last stage (`query_entry`)) fans a synthetic

@@ -1,4 +1,4 @@
-> **Superseding note (conditional decisions):** The conditional decision-seam paragraph below is superseded by [Stepping conditional decisions](conditional-decisions.md#stepping-conditional-decisions). Conditional queries now retain one owned decision in `FamilyBuild::Conditional` and resume at the operation that named each read, inside its held observations. There is no ConditionalBuild/drain_conditional replay driver or decision-stage answer table. Completed operand deliveries remain scoped solely to relation computation through `OperandAnswerScope`; Flow's seam retains its own needs and gap handling. The synchronous lowering entry drives the same decision in place and still owns its branch callback.
+> **Superseding note (conditional decisions):** The conditional decision-seam paragraph below is superseded by [Stepping conditional decisions](conditional-decisions.md#stepping-conditional-decisions). Conditional queries now retain one owned decision in `FamilyBuild::Conditional` and resume at the operation that named each read, inside its held observations. There is no ConditionalBuild/drain_conditional replay driver or decision-stage answer table. Completed operand deliveries remain scoped solely to relation computation through `OperandAnswerScope`; Flow's seam retains its own needs and gap handling. A conditional written in syntax is held by the type lowering in a decision frame, whose reads are the lowering's whole reads and whose branches are its children ([The type lowering holds the decision](conditional-decisions.md#the-type-lowering-holds-the-decision)); there is no lowering callback entry.
 
 - `SemanticExecution` (`semantic_execution.rs`) — the continuation runtime: a request-scoped demand table (the execution's completed results), a frame arena and a ready queue driven by one loop. A frame needing another demand returns `EvalStep::Need` and is parked; completion enqueues its waiters and never resumes one recursively, a need of an open demand on the frame's own chain is a cycle the program answers, and a frame's step never drives a nested execution. An instantiation or a `typeof` evaluated outside any drive runs on it (`project_semantic_dispatch/query_frames.rs`): its build is a frame whose decl-body projection needs each instantiation it reaches instead of evaluating it in place, so an alias chain is a chain of frames bounded by neither the stack nor the native nested-query depth. A decl-body projection that reaches a value's `typeof` (no member path, no type arguments) needs it the same way, and that `typeof` builds as a frame of its own when the value's type is its authored annotation (`begin_typeof` / `drain_typeof`): the annotation's projection needs each instantiation it reaches, so `typeof __v` over `{ [K in keyof L99<0>]: L99<0>[K] }`, whose interface heritage nests a hundred levels, is a hundred frames. A frame owns its lease, tracer and build-local taint, installs them only for its own steps, replays each delivery's carrier into its tracer and folds its rails into its taint; code a step reaches synchronously evaluates in place and never drives.
 - A root `typeof` drives like an instantiation, and every `typeof` build that evaluates something its value's type comes from suspends on the runtime instead of evaluating what it reaches in place (`TypeofBuild`, `drain_typeof`):
@@ -299,8 +299,11 @@ access, and structural `typeof` positions yield reads. `typeof` lowers its
 arguments from structural frames after the value read succeeds. Function and
 constructor parameter, return, predicate-target and both binder-bound passes,
 mapped source/value/name-remap positions, and conditional check/extends operands
-(including infer constraints) also use structural frames. Conditional decisions
-and their selected branch callbacks still run in place. Import types use the
+(including infer constraints) also use structural frames. A conditional then
+holds its decision in a frame: the decision's reads are whole reads the
+lowering yields, consumed inside the decision's operation through the
+cursor's delivery closure, and the branches it asks for are child frames,
+each lowered at most once. Import types use the
 shared import-head planner, suspend on its anchor and finish, lower arguments
 only when consumed under the caller's context, and project qualified tails as
 whole reads. Type-parameter leaf bounds, script-setup bindings, spread objects
@@ -320,10 +323,15 @@ never keeps a guard across a read; its holder says who keeps the demand
 (`InstantiationDemand`). A suspending `TypeLowerRead` holder, like an
 overload set's stage, keeps it open for the lowering's whole extent
 (`Held`). The in-place drivers (`lower_type_expr_with_infer_factory`,
-`drive_type_lowering`) hold a slot instead (`InPlace`): each substitution
-enters the demand into the slot when it begins and leaves it with its
-answer, the span the public substitution entry holds, and the read between
-is answered inside it. Carrier finishes, anchor and import-head reads, and the
+`drive_type_lowering`) lend slots instead (`LowerDemand::InPlace`): each
+substitution enters the demand into its slot when it begins and leaves it
+with its answer, the span the public substitution entry holds, and the read
+between is answered inside it; the outermost held conditional decision holds
+its own slot from its start to its answer, the span the native decision
+driver holds. `drive_type_lowering` steps through `advance_type_lowering`,
+the one entry for an owned `TypeLowerRead`;
+`lower_type_expr_with_infer_factory` advances the cursor itself because its
+caller lends the infer factory. Carrier finishes, anchor and import-head reads, and the
 signature-list stage hold no ledger state across their reads.
 This helper does not make an arbitrary semantic root nonblocking.
 

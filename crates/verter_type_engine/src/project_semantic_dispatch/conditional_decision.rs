@@ -409,27 +409,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// Transient lowering ingress. Only selected syntax is lowered; no
-    /// callback or syntax enters graph identity. The conditional is decided
-    /// by the same procedure as a materialized one: lowering supplies only
-    /// the branches it demands.
-    pub(super) fn build_conditional_from_lowering(
-        &self,
-        check: SemanticNodeId,
-        extends: SemanticNodeId,
-        distributive: bool,
-        lower_branch: &mut dyn FnMut(bool) -> SemanticNodeId,
-    ) -> super::walk::QueryBuildOutput {
-        let mut decision = self.begin_conditional_decision(
-            check,
-            extends,
-            distributive,
-            DecisionBranches::Lowered,
-            super::helper_continuation::HelperDrive::InPlace,
-        );
-        self.drive_conditional_in_place(&mut decision, lower_branch)
-    }
-
     /// A check no lattice row absorbs and no distribution splits, proven
     /// positively: the type it completely names (an alias or an
     /// instantiation read through, `Id<any>` being `any`) is a non-extreme
@@ -1608,8 +1587,29 @@ pub(super) enum DecisionStep {
 
 pub(super) enum DecisionDelivery<'d> {
     Read(&'d mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>),
-    #[cfg(any(test, feature = "test-support"))]
-    Branch(SemanticNodeId),
+    /// A lowered branch, with the execution abort raised while it lowered.
+    /// The asking operation owns that abort: it observes it as its own,
+    /// as though it had lowered the branch inside its observation.
+    Branch {
+        node: SemanticNodeId,
+        abort: Option<ExecutionAbort>,
+    },
+}
+
+impl DecisionDelivery<'_> {
+    /// Let go of a delivery its decision stopped without consuming. A read
+    /// was never answered, so it carries nothing. A branch's abort was
+    /// raised by work already done for this request, and the branch's own
+    /// rail ended without bubbling it: it reaches the enclosing build here,
+    /// as a released held observation's abort does.
+    fn release(self) {
+        if let Self::Branch {
+            abort: Some(abort), ..
+        } = self
+        {
+            crate::request_context::observe_execution_abort(abort);
+        }
+    }
 }
 
 struct DecisionOp {
@@ -1871,8 +1871,6 @@ struct DecisionResult {
     observation: Option<super::flow_return_fact::ObservedRead<()>>,
 }
 
-type InPlaceBranches<'a> = Option<&'a mut dyn FnMut(bool) -> SemanticNodeId>;
-
 // Values stay in the caller's native result slot. Only control crosses an
 // operation boundary; a read-free decision allocates no result transport.
 enum OperationStep {
@@ -2128,7 +2126,7 @@ const _: () = assert!(std::mem::size_of::<OperationStep>() <= 24);
 macro_rules! conditional_operation {
     ($d:tt, $name:ident,
      [$this:ident, $decision:ident, $frame:ident, $delivered:ident,
-      $remaining:ident, $branches:ident, $result_slot:ident, $observation:ident, $child:ident,
+      $remaining:ident, $result_slot:ident, $observation:ident, $child:ident,
       $read:ident, $label:lifetime],
      $pattern:pat => $body:block) => {
         #[inline(never)]
@@ -2138,10 +2136,9 @@ macro_rules! conditional_operation {
             $frame: &mut DecisionOp,
             $delivered: &mut Option<DecisionDelivery<'_>>,
             $remaining: &mut usize,
-            $branches: &mut InPlaceBranches<'_>,
             $result_slot: &mut Option<DecisionResult>,
         ) -> Result<OperationStep, ExecutionAbort> {
-            let _ = (&$decision, &$delivered, &$remaining, &$branches);
+            let _ = (&$decision, &$delivered, &$remaining);
             #[allow(unused_mut)]
             let mut $observation = if $frame.operation.observes() {
                 Some(match $frame.observation.take() {
@@ -2160,7 +2157,7 @@ macro_rules! conditional_operation {
                         $d operation
                     };
                     match $this.run_decision_operation(
-                        $decision, operation, $delivered, $remaining, $branches, $result_slot,
+                        $decision, operation, $delivered, $remaining, $result_slot,
                     )? {
                         OperationStep::Done => DecisionResultRef(&mut *$result_slot),
                         pending => {
@@ -2234,16 +2231,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
+    /// Decide a materialized conditional in place: every read the decision
+    /// names is made inside the operation that names it. A materialized
+    /// decision applies its branches itself, so it never yields a branch.
     fn drive_conditional_in_place(
         &self,
         decision: &mut ConditionalDecision,
-        lower: &mut dyn FnMut(bool) -> SemanticNodeId,
     ) -> super::walk::QueryBuildOutput {
-        match self.drive_decision_operations(
-            decision,
-            DecisionOperation::Stage(StageAt::Prepare),
-            lower,
-        ) {
+        match self.drive_decision_operations(decision, DecisionOperation::Stage(StageAt::Prepare)) {
             Ok(DecisionValue::Output(output)) => output,
             Ok(_) => unreachable!("a complete conditional output"),
             Err(abort) => self.aborted_build_output(abort),
@@ -2291,17 +2286,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             )
     }
 
+    /// Whether the read a standing decision names counts a dispatch intent
+    /// where the operation reads it: a carrier read other than a `typeof`.
+    fn decision_read_counts_intent(
+        &self,
+        decision: &mut ConditionalDecision,
+        key: &SemanticQueryKey,
+    ) -> bool {
+        decision.ops.reverse();
+        let counts = Self::decision_reads_for_carrier(decision)
+            && !matches!(key, SemanticQueryKey::TypeOf { .. });
+        decision.ops.reverse();
+        counts
+    }
+
     fn drive_decision_operations(
         &self,
         decision: &mut ConditionalDecision,
         operation: DecisionOperation,
-        lower: &mut dyn FnMut(bool) -> SemanticNodeId,
     ) -> Result<DecisionValue, ExecutionAbort> {
         let (_connected, _) = self.enter_connected_demand(false);
-        let mut lowered = [None; 2];
-        let mut answer_branch =
-            |branch| *lowered[usize::from(branch)].get_or_insert_with(|| lower(branch));
-        let mut in_place_branches: InPlaceBranches<'_> = Some(&mut answer_branch);
         let mut remaining = 0;
         let mut delivered = None;
         let mut result_slot = None;
@@ -2310,7 +2314,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             operation,
             &mut delivered,
             &mut remaining,
-            &mut in_place_branches,
             &mut result_slot,
         );
         loop {
@@ -2326,17 +2329,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .adopt(self);
                 }
                 Ok(OperationStep::Read(key)) => {
-                    #[cfg(any(test, feature = "test-support"))]
-                    CONDITIONAL_READ_TRACE.with(|trace| {
-                        if let Some(trace) = trace.borrow_mut().as_mut() {
-                            trace.push((*key).clone());
-                        }
-                    });
-                    decision.ops.reverse();
-                    let counts = Self::decision_reads_for_carrier(decision)
-                        && !matches!(*key, SemanticQueryKey::TypeOf { .. });
+                    let counts = self.decision_read_counts_intent(decision, &key);
                     remaining = decision.ops.len();
-                    decision.ops.reverse();
                     let mut key = Some(*key);
                     let mut answer = || {
                         let key = key.take().expect("one operation read");
@@ -2351,7 +2345,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         DecisionOperation::Stage(StageAt::Prepare),
                         &mut delivery,
                         &mut remaining,
-                        &mut in_place_branches,
                         &mut result_slot,
                     );
                 }
@@ -2359,7 +2352,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     unreachable!("a stage transition stays in its dispatcher")
                 }
                 Ok(OperationStep::Branch(_)) => {
-                    unreachable!("the in-place driver answers branches inside their operations")
+                    unreachable!("a materialized decision applies its own branches")
                 }
                 Err(abort) => {
                     self.release_decision_operations(decision);
@@ -2369,13 +2362,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
+    /// The absorbing lattice rows alone, stepped from their operation: the
+    /// holder makes each read in place and answers each branch the rows ask
+    /// for once, from `branch`.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn conditional_absorption_from_steps(
         &self,
         check: SemanticNodeId,
         extends: SemanticNodeId,
         distributive: bool,
-        lower: &mut dyn FnMut(bool) -> SemanticNodeId,
+        branch: &mut dyn FnMut(bool) -> SemanticNodeId,
     ) -> Option<super::walk::QueryBuildOutput> {
         let mut decision = self.begin_conditional_decision(
             check,
@@ -2384,7 +2380,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             DecisionBranches::Lowered,
             super::helper_continuation::HelperDrive::InPlace,
         );
-        match self.drive_decision_operations(
+        let (_connected, _) = self.enter_connected_demand(false);
+        let mut answered = [None; 2];
+        let mut remaining = 0;
+        let mut result_slot = None;
+        let mut step = self.run_decision_operation(
             &mut decision,
             DecisionOperation::Absorb {
                 check,
@@ -2393,8 +2393,61 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 branches: [None; 2],
                 true_value: None,
             },
-            lower,
-        ) {
+            &mut None,
+            &mut remaining,
+            &mut result_slot,
+        );
+        let value = loop {
+            // A suspension retains its chain outermost last; the next run
+            // resumes all of it.
+            remaining = decision.ops.len();
+            step = match step {
+                Ok(OperationStep::Done) => {
+                    self.release_decision_operations(&mut decision);
+                    break result_slot
+                        .take()
+                        .expect("the completed absorption")
+                        .adopt(self);
+                }
+                Ok(OperationStep::Read(key)) => {
+                    let counts = self.decision_read_counts_intent(&mut decision, &key);
+                    let mut key = Some(*key);
+                    let mut answer = || {
+                        let key = key.take().expect("one operation read");
+                        if counts {
+                            self.record_dispatch_intent_counters(&key);
+                        }
+                        self.execute_read(key)
+                    };
+                    self.run_decision_operation(
+                        &mut decision,
+                        DecisionOperation::Stage(StageAt::Prepare),
+                        &mut Some(DecisionDelivery::Read(&mut answer)),
+                        &mut remaining,
+                        &mut result_slot,
+                    )
+                }
+                Ok(OperationStep::Branch(take_true)) => {
+                    let node =
+                        *answered[usize::from(take_true)].get_or_insert_with(|| branch(take_true));
+                    self.run_decision_operation(
+                        &mut decision,
+                        DecisionOperation::Stage(StageAt::Prepare),
+                        &mut Some(DecisionDelivery::Branch { node, abort: None }),
+                        &mut remaining,
+                        &mut result_slot,
+                    )
+                }
+                Ok(OperationStep::Next) => {
+                    unreachable!("a stage transition stays in its dispatcher")
+                }
+                Err(abort) => {
+                    self.release_decision_operations(&mut decision);
+                    break Err(abort);
+                }
+            };
+        };
+        match value {
             Ok(DecisionValue::Output(output)) => Some(output),
             Ok(DecisionValue::Node(None)) => None,
             Ok(_) => unreachable!("an absorption outcome"),
@@ -2427,37 +2480,59 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Consume a delivery under the observation of the operation that named
     /// it. Completed prefixes and native locals are never reconstructed.
+    ///
+    /// A delivery the decision stops without consuming leaves it here, and
+    /// only here, through [`DecisionDelivery::release`]: the abort a lowered
+    /// branch carries reaches the enclosing build as a released held
+    /// observation's does, never dropped with the delivery.
     pub(super) fn advance_conditional_decision(
         &self,
         decision: &mut ConditionalDecision,
         delivered: Option<DecisionDelivery<'_>>,
     ) -> DecisionStep {
-        self.advance_conditional_decision_with_branches(decision, delivered, &mut None)
+        let mut delivered = delivered;
+        let step = self.resume_conditional_decision(decision, &mut delivered);
+        if let Some(unconsumed) = delivered {
+            unconsumed.release();
+        }
+        step
     }
 
-    fn advance_conditional_decision_with_branches(
+    /// [`Self::advance_conditional_decision`]'s body. A terminal stop
+    /// returns with `delivered` still held when it comes before the standing
+    /// operation took it: a cancellation seen at the entry check or at any
+    /// check on the way down the retained chain, or an abort raised there;
+    /// the retained operations are released, and the delivery is left for
+    /// the caller to release.
+    fn resume_conditional_decision(
         &self,
         decision: &mut ConditionalDecision,
-        delivered: Option<DecisionDelivery<'_>>,
-        in_place_branches: &mut InPlaceBranches<'_>,
+        delivered: &mut Option<DecisionDelivery<'_>>,
     ) -> DecisionStep {
         if self.cancellation.is_cancelled() {
             self.release_conditional_decision(decision);
             return DecisionStep::Done(Box::new(self.cancelled_build_output()));
         }
-        let mut delivered = delivered;
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(delivered, Some(DecisionDelivery::Branch { .. })) {
+            self.binding
+                .observers
+                .forcing
+                .conditional_branch_delivery_seam
+                .fire_once();
+        }
         let mut result_slot = None;
         let mut remaining = decision.ops.len();
         decision.ops.reverse();
         let result = self.run_decision_operation(
             decision,
             DecisionOperation::Stage(StageAt::Prepare),
-            &mut delivered,
+            delivered,
             &mut remaining,
-            in_place_branches,
             &mut result_slot,
         );
-        if remaining > 0 {
+        let stopped = remaining > 0;
+        if stopped {
             verter_debug_assert!(
                 self.cancellation.is_cancelled() || result.is_err(),
                 "only a terminal stop bypasses retained descendants"
@@ -2465,10 +2540,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             decision.ops.reverse();
             self.release_conditional_decision(decision);
             remaining = 0;
-            delivered = None;
         }
         verter_debug_assert!(
-            delivered.is_none(),
+            stopped || delivered.is_none(),
             "a delivery is consumed by its standing operation"
         );
         verter_debug_assert!(remaining == 0, "every retained operation was resumed");
@@ -2543,7 +2617,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         initial: DecisionOperation,
         delivered: &mut Option<DecisionDelivery<'_>>,
         remaining: &mut usize,
-        in_place_branches: &mut InPlaceBranches<'_>,
         result_slot: &mut Option<DecisionResult>,
     ) -> Result<OperationStep, ExecutionAbort> {
         let mut frame = if *remaining > 0 {
@@ -2556,28 +2629,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         };
         match &frame.operation {
-            DecisionOperation::Stage(..) => self.run_conditional_stage(
-                decision,
-                &mut frame,
-                delivered,
-                remaining,
-                in_place_branches,
-                result_slot,
-            ),
-            DecisionOperation::Start { .. } => self.run_conditional_start(
-                decision,
-                &mut frame,
-                delivered,
-                remaining,
-                in_place_branches,
-                result_slot,
-            ),
+            DecisionOperation::Stage(..) => {
+                self.run_conditional_stage(decision, &mut frame, delivered, remaining, result_slot)
+            }
+            DecisionOperation::Start { .. } => {
+                self.run_conditional_start(decision, &mut frame, delivered, remaining, result_slot)
+            }
             DecisionOperation::Preparation { .. } => self.run_conditional_preparation(
                 decision,
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::OperandRead { .. } => self.run_conditional_operand_read(
@@ -2585,7 +2647,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::Operands { .. } => self.run_conditional_operands(
@@ -2593,7 +2654,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::Reduced { .. } => self.run_conditional_reduced(
@@ -2601,7 +2661,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::Template { .. } => self.run_conditional_template(
@@ -2609,7 +2668,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::Deferred { .. } => self.run_conditional_deferred(
@@ -2617,23 +2675,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
-            DecisionOperation::Fact { .. } => self.run_conditional_fact(
-                decision,
-                &mut frame,
-                delivered,
-                remaining,
-                in_place_branches,
-                result_slot,
-            ),
+            DecisionOperation::Fact { .. } => {
+                self.run_conditional_fact(decision, &mut frame, delivered, remaining, result_slot)
+            }
             DecisionOperation::KeySet { .. } => self.run_conditional_key_set(
                 decision,
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::NamedError { .. } => self.run_conditional_named_error(
@@ -2641,7 +2692,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::Indexed { .. } => self.run_conditional_indexed(
@@ -2649,7 +2699,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::Extreme { .. } => self.run_conditional_extreme(
@@ -2657,7 +2706,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::TupleProbe { .. } => self.run_conditional_tuple_probe(
@@ -2665,7 +2713,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::IsDeferred { .. } => self.run_conditional_is_deferred(
@@ -2673,31 +2720,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
-            DecisionOperation::Branch { .. } => self.run_conditional_branch(
-                decision,
-                &mut frame,
-                delivered,
-                remaining,
-                in_place_branches,
-                result_slot,
-            ),
-            DecisionOperation::Plain { .. } => self.run_conditional_plain(
-                decision,
-                &mut frame,
-                delivered,
-                remaining,
-                in_place_branches,
-                result_slot,
-            ),
+            DecisionOperation::Branch { .. } => {
+                self.run_conditional_branch(decision, &mut frame, delivered, remaining, result_slot)
+            }
+            DecisionOperation::Plain { .. } => {
+                self.run_conditional_plain(decision, &mut frame, delivered, remaining, result_slot)
+            }
             DecisionOperation::WrittenArm { .. } => self.run_conditional_written_arm(
                 decision,
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::Relation { .. } => self.run_conditional_relation(
@@ -2705,23 +2740,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
-            DecisionOperation::Absorb { .. } => self.run_conditional_absorb(
-                decision,
-                &mut frame,
-                delivered,
-                remaining,
-                in_place_branches,
-                result_slot,
-            ),
+            DecisionOperation::Absorb { .. } => {
+                self.run_conditional_absorb(decision, &mut frame, delivered, remaining, result_slot)
+            }
             DecisionOperation::Selection { .. } => self.run_conditional_selection(
                 decision,
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::PrepareSelection { .. } => self.run_conditional_prepare_selection(
@@ -2729,7 +2757,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::OperandWalk(..) => self.run_conditional_operand_walk(
@@ -2737,7 +2764,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
             DecisionOperation::Generic { .. } => self.run_conditional_generic(
@@ -2745,41 +2771,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
-            DecisionOperation::Member(..) => self.run_conditional_member(
-                decision,
-                &mut frame,
-                delivered,
-                remaining,
-                in_place_branches,
-                result_slot,
-            ),
+            DecisionOperation::Member(..) => {
+                self.run_conditional_member(decision, &mut frame, delivered, remaining, result_slot)
+            }
             DecisionOperation::Distribution { .. } => self.run_conditional_distribution(
                 decision,
                 &mut frame,
                 delivered,
                 remaining,
-                in_place_branches,
                 result_slot,
             ),
-            DecisionOperation::Winner { .. } => self.run_conditional_winner(
-                decision,
-                &mut frame,
-                delivered,
-                remaining,
-                in_place_branches,
-                result_slot,
-            ),
-            DecisionOperation::Commit { .. } => self.run_conditional_commit(
-                decision,
-                &mut frame,
-                delivered,
-                remaining,
-                in_place_branches,
-                result_slot,
-            ),
+            DecisionOperation::Winner { .. } => {
+                self.run_conditional_winner(decision, &mut frame, delivered, remaining, result_slot)
+            }
+            DecisionOperation::Commit { .. } => {
+                self.run_conditional_commit(decision, &mut frame, delivered, remaining, result_slot)
+            }
         }
     }
 
@@ -2790,7 +2799,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         frame: &mut DecisionOp,
         delivered: &mut Option<DecisionDelivery<'_>>,
         remaining: &mut usize,
-        in_place_branches: &mut InPlaceBranches<'_>,
         result_slot: &mut Option<DecisionResult>,
     ) -> Result<OperationStep, ExecutionAbort> {
         loop {
@@ -2807,7 +2815,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     frame,
                     delivered,
                     remaining,
-                    in_place_branches,
                     result_slot,
                 ),
                 DecisionOperation::Stage(StageAt::Absorb) => self.run_conditional_absorb_stage(
@@ -2815,7 +2822,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     frame,
                     delivered,
                     remaining,
-                    in_place_branches,
                     result_slot,
                 ),
                 DecisionOperation::Stage(StageAt::Distribute) => self
@@ -2824,7 +2830,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         frame,
                         delivered,
                         remaining,
-                        in_place_branches,
                         result_slot,
                     ),
                 DecisionOperation::Stage(StageAt::Select) => self.run_conditional_select_stage(
@@ -2832,7 +2837,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     frame,
                     delivered,
                     remaining,
-                    in_place_branches,
                     result_slot,
                 ),
                 DecisionOperation::Stage(StageAt::Winner) => self.run_conditional_winner_stage(
@@ -2840,7 +2844,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     frame,
                     delivered,
                     remaining,
-                    in_place_branches,
                     result_slot,
                 ),
                 _ => unreachable!("a conditional decision stage"),
@@ -2853,7 +2856,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_prepare_stage,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Stage(at) => {
             let result = child!(DecisionOperation::Preparation {
                 at: 0,
@@ -2878,7 +2881,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_absorb_stage,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Stage(at) => {
             verter_debug_assert!(
                 !decision.selection_started,
@@ -2899,7 +2902,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_distribute_stage,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Stage(at) => {
             if decision.distribution.is_some() {
                 let result = child!(DecisionOperation::Distribution { at: 0 })
@@ -2914,7 +2917,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_select_stage,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Stage(at) => {
             let result = child!(DecisionOperation::PrepareSelection {
                 at: 0,
@@ -2938,7 +2941,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_winner_stage,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Stage(_) => {
             break child!(DecisionOperation::Winner {
                 at: 0,
@@ -2950,7 +2953,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_start,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Start { at, keys_of } => {
             let operands = decision.prepared.expect("prepared operands").operands;
             let surface = match *at {
@@ -3008,7 +3011,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_preparation,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Preparation {
             at,
             demanded,
@@ -3119,7 +3122,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_operand_read,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::OperandRead { at, check } => {
             match *at {
                 0 => {
@@ -3180,7 +3183,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_operands,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Operands {
             at,
             check,
@@ -3353,7 +3356,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_reduced,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Reduced { node, requested } => {
             if !*requested {
                 let Some(key) = self.conditional_operand_key(*node) else {
@@ -3384,7 +3387,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_template,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Template { operand, requested } => {
             if !*requested {
                 let key = match self.graph().node_data(*operand).as_deref() {
@@ -3415,7 +3418,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_deferred,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Deferred {
             node,
             context,
@@ -3447,7 +3450,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_fact,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Fact {
             demand,
             read: retained,
@@ -3482,7 +3485,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     // inside the operation, and the walk continues from the carriers it
     // already settled.
     conditional_operation! { $, run_conditional_key_set,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::KeySet {
             base,
             read: retained,
@@ -3513,7 +3516,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     // the conditional is related, which has already read the name; an
     // optional probe, kept only when it finds that error.
     conditional_operation! { $, run_conditional_named_error,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::NamedError { operands, next } => {
             let Some(&operand) = operands.get(usize::from(*next)) else {
                 break DecisionValue::Node(None);
@@ -3540,7 +3543,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_indexed,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Indexed { node } => {
             if !matches!(
                 self.graph().node_data(*node).as_deref(),
@@ -3571,7 +3574,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_extreme,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Extreme {
             operand,
             at,
@@ -3673,7 +3676,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_tuple_probe,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::TupleProbe {
             node,
             next,
@@ -3739,7 +3742,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_is_deferred,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::IsDeferred {
             check,
             extends,
@@ -3803,7 +3806,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_branch,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Branch {
             take_true,
             raw,
@@ -3832,9 +3835,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }));
                 }
                 DecisionBranches::Lowered => {
-                    if let Some(answer) = in_place_branches.as_mut() {
-                        break DecisionValue::Node(Some(answer(*take_true)));
-                    }
                     if !*requested {
                         *requested = true;
                         let branch = *take_true;
@@ -3842,18 +3842,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         decision.ops.push(frame.take());
                         return Ok(OperationStep::Branch(branch));
                     }
-                    #[cfg(any(test, feature = "test-support"))]
-                    if let Some(DecisionDelivery::Branch(node)) = delivered.take() {
-                        break DecisionValue::Node(Some(node));
+                    let Some(DecisionDelivery::Branch { node, abort }) = delivered.take() else {
+                        unreachable!("a lowered branch delivery")
+                    };
+                    // An abort raised while the branch lowered is this
+                    // operation's, observed where the branch was asked
+                    // for: the decision aborts as it would had the branch
+                    // been lowered inside this operation.
+                    if let Some(abort) = abort {
+                        crate::request_context::observe_execution_abort(abort);
                     }
-                    unreachable!("a lowered branch delivery")
+                    break DecisionValue::Node(Some(node));
                 }
             };
         }
     }
 
     conditional_operation! { $, run_conditional_plain,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Plain { resolving } => {
             let named = if *resolving {
                 let outcome = child!(DecisionOperation::fact(
@@ -3879,7 +3885,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_written_arm,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::WrittenArm { at, arms, next } => {
             if *at == 0 {
                 *arms = match self.graph().node_data(decision.extends).as_deref() {
@@ -3939,14 +3945,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_relation,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Relation { check, extends } => {
             break DecisionValue::Relation(self.execute_relate_pair(*check, *extends));
         }
     }
 
     conditional_operation! { $, run_conditional_absorb,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Absorb {
             check,
             extends,
@@ -4062,7 +4068,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_selection,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Selection {
             at,
             check,
@@ -4112,7 +4118,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_prepare_selection,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::PrepareSelection {
             at,
             errors,
@@ -4215,7 +4221,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_operand_walk,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::OperandWalk(retained) => {
             let state = retained.as_mut().expect("a standing operand walk");
             if state.which == 2 {
@@ -4409,7 +4415,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_generic,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Generic { root, infer_operand, walk: retained } => {
             let mut fresh = None;
             let walk = match retained.as_deref_mut() {
@@ -4419,8 +4425,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let delivery = match delivered.take() {
                 Some(DecisionDelivery::Read(deliver)) => Some(deliver),
                 None => None,
-                #[cfg(any(test, feature = "test-support"))]
-                Some(DecisionDelivery::Branch(_)) => unreachable!("a generic walk reads a query"),
+                Some(DecisionDelivery::Branch { .. }) => {
+                    unreachable!("a generic walk reads a query")
+                }
             };
             match self.advance_generic_walk(walk, delivery) {
                 GenericStep::Done(generic) => break DecisionValue::Flag(generic),
@@ -4435,13 +4442,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_member,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Member(member) => {
-            match self.advance_conditional_decision_with_branches(
-                member,
-                delivered.take(),
-                in_place_branches,
-            ) {
+            match self.advance_conditional_decision(member, delivered.take()) {
                 DecisionStep::Done(output) => break DecisionValue::Output(*output),
                 DecisionStep::Read(key) => {
                     read!(*key);
@@ -4456,7 +4459,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_distribution,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Distribution { at } => {
             if *at == 0 {
                 let distribution = decision.distribution.as_ref().expect("a distribution");
@@ -4513,9 +4516,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                             },
                                             super::helper_continuation::HelperDrive::InPlace,
                                         );
-                                        self.drive_conditional_in_place(&mut child, &mut |_| {
-                                            unreachable!("materialized branches")
-                                        })
+                                        self.drive_conditional_in_place(&mut child)
                                     }
                                     Err(refusal) => *refusal,
                                 }
@@ -4526,32 +4527,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 read!(key);
                             }
                         }
+                        // A lowered member is never distributive; its branch
+                        // steps pass through to the holder's branch memo.
                         DecisionBranches::Lowered => {
-                            if let Some(branches) = in_place_branches.as_deref_mut() {
-                                let mut child = self.begin_conditional_decision(
+                            let result = child!(DecisionOperation::Member(Box::new(
+                                self.begin_conditional_decision(
                                     member,
                                     extends,
                                     false,
                                     DecisionBranches::Lowered,
-                                    super::helper_continuation::HelperDrive::InPlace,
-                                );
-                                self.drive_conditional_in_place(&mut child, branches)
-                            } else {
-                                let result = child!(DecisionOperation::Member(Box::new(
-                                    self.begin_conditional_decision(
-                                        member,
-                                        extends,
-                                        false,
-                                        DecisionBranches::Lowered,
-                                        super::helper_continuation::HelperDrive::InPlace
-                                    )
-                                )))
-                                .adopt(self)?;
-                                let DecisionValue::Output(output) = result else {
-                                    unreachable!()
-                                };
-                                output
-                            }
+                                    super::helper_continuation::HelperDrive::InPlace
+                                )
+                            )))
+                            .adopt(self)?;
+                            let DecisionValue::Output(output) = result else {
+                                unreachable!()
+                            };
+                            output
                         }
                     };
                     if let Some(scope) = observation.take() {
@@ -4619,7 +4611,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_winner,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Winner { at, winner, other } => {
             let prepared = decision.prepared.expect("prepared operands");
             let operands = prepared.operands;
@@ -4728,7 +4720,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     conditional_operation! { $, run_conditional_commit,
-        [self, decision, frame, delivered, remaining, in_place_branches, result_slot, observation, child, read, 'operation],
+        [self, decision, frame, delivered, remaining, result_slot, observation, child, read, 'operation],
         DecisionOperation::Commit {
             check,
             extends,
@@ -4860,11 +4852,6 @@ pub struct ConditionalReadForTests {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-std::thread_local! {
-    static CONDITIONAL_READ_TRACE: std::cell::RefCell<Option<Vec<SemanticQueryKey>>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(any(test, feature = "test-support"))]
 pub enum ConditionalProgressForTests {
     Done(Box<super::walk::QueryBuildOutput>),
     Read(SemanticQueryKey),
@@ -4942,7 +4929,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> ConditionalProgressForTests {
         let delivery = match (delivered, branch) {
             (Some(deliver), None) => Some(DecisionDelivery::Read(deliver)),
-            (None, Some(node)) => Some(DecisionDelivery::Branch(node)),
+            (None, Some(node)) => Some(DecisionDelivery::Branch { node, abort: None }),
             (None, None) => None,
             _ => panic!("one conditional delivery"),
         };
@@ -4999,40 +4986,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             },
             super::helper_continuation::HelperDrive::InPlace,
         );
-        self.drive_conditional_in_place(&mut decision, &mut |_| {
-            unreachable!("materialized branches")
-        })
-    }
-
-    pub fn conditional_build_from_lowering_for_tests(
-        &self,
-        check: SemanticNodeId,
-        extends: SemanticNodeId,
-        distributive: bool,
-        branches: &mut dyn FnMut(bool) -> SemanticNodeId,
-    ) -> super::walk::QueryBuildOutput {
-        self.build_conditional_from_lowering(check, extends, distributive, branches)
-    }
-
-    pub fn trace_conditional_from_lowering_for_tests(
-        &self,
-        check: SemanticNodeId,
-        extends: SemanticNodeId,
-        distributive: bool,
-        branches: &mut dyn FnMut(bool) -> SemanticNodeId,
-    ) -> (super::walk::QueryBuildOutput, Vec<SemanticQueryKey>) {
-        struct Restore(Option<Vec<SemanticQueryKey>>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                CONDITIONAL_READ_TRACE.with(|trace| *trace.borrow_mut() = self.0.take());
-            }
-        }
-        let outer = CONDITIONAL_READ_TRACE.with(|trace| trace.replace(Some(Vec::new())));
-        let _restore = Restore(outer);
-        let output = self.build_conditional_from_lowering(check, extends, distributive, branches);
-        let trace =
-            CONDITIONAL_READ_TRACE.with(|trace| trace.take().expect("an active decision trace"));
-        (output, trace)
+        self.drive_conditional_in_place(&mut decision)
     }
 
     pub fn conditional_standing_operation_for_tests(
