@@ -1069,12 +1069,18 @@ export function use() { return [lit, hop2, cycA, E.A, K.s, m, mTop, mCopy, mReg,
 /// none for a literal `const`, a copy chain, a copy cycle, an enum or
 /// static member or a namespace member; the callee and each value argument
 /// of every call a `const`'s initializer makes, through the copies that
-/// reach it. A holder may not answer such a read itself: its delivery, to
-/// one walk or to each walk of a list, is refused as needing an observed
-/// delivery, the walk left waiting and still answering alike in place.
+/// reach it. A holder that answers each such read itself, marked observed,
+/// polls the walk to the same answer through the same reads, every
+/// delivery accepted, leaving an enclosing build exactly as the
+/// synchronous drive does; so does a holder polling each walk of a list.
+/// A plain delivery, one holding no observation of its own, is refused as
+/// needing an observed delivery, the walk left waiting and still answering
+/// alike in place.
 ///
-/// Mutation: a delivered answer accepted (the walk resumed with it) turns
-/// the reading rows' refusals to `"accepted"`.
+/// Mutation: refusing the holder's observed delivery as a plain one turns
+/// the reading rows' polled deliveries to the refusal and their polled
+/// answers to `None`; accepting a plain delivery turns the plain refusal
+/// to `"accepted"`.
 #[test]
 fn a_stepped_widening_read_answers_as_the_in_place_read() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -1128,11 +1134,12 @@ fn a_stepped_widening_read_answers_as_the_in_place_read() {
         let answers = (
             trace.value_read_widens,
             trace.in_place,
+            trace.polled,
             trace.refused_then_in_place,
         );
-        if answers != (*widens, *widens, *widens) {
+        if answers != (*widens, *widens, Some(*widens), *widens) {
             failures.push(format!(
-                "{path:?}: (in place, stepped in place, refused then in place) {answers:?}, expected {widens}"
+                "{path:?}: (synchronous, stepped in place, polled, refused then in place) {answers:?}, expected {widens}"
             ));
         }
         if in_place_reads != expected_reads {
@@ -1140,22 +1147,40 @@ fn a_stepped_widening_read_answers_as_the_in_place_read() {
                 "{path:?}: stepped in-place reads {in_place_reads:?}, expected {expected_reads:?}"
             ));
         }
+        if trace.polled_reads != trace.in_place_reads {
+            failures.push(format!(
+                "{path:?}: the polled walk waits on other reads than the walk stepped in place"
+            ));
+        }
+        if trace.polled_partial != trace.synchronous_partial {
+            failures.push(format!(
+                "{path:?}: the polled drive leaves {:?} in its enclosing build, the synchronous drive {:?}",
+                trace.polled_partial, trace.synchronous_partial
+            ));
+        }
         let reading = !reads.is_empty();
+        let accepted = "accepted";
         let refusal = "needs an observed delivery";
         let delivery = (
-            trace.holder_delivery,
+            trace.polled_deliveries.clone(),
+            trace.plain_delivery,
             trace.listed_deliveries.clone(),
             trace.listed_waiting,
             trace.listed.clone(),
         );
-        let expected_delivery = if reading {
-            (Some(refusal), vec![(0, refusal), (1, refusal)], 2, None)
-        } else {
-            (None, Vec::new(), 0, Some(vec![*widens, *widens]))
-        };
+        let expected_delivery = (
+            vec![accepted; reads.len()],
+            reading.then_some(refusal),
+            reads
+                .iter()
+                .flat_map(|_| [(0, accepted), (1, accepted)])
+                .collect::<Vec<_>>(),
+            0,
+            Some(vec![*widens, *widens]),
+        );
         if delivery != expected_delivery {
             failures.push(format!(
-                "{path:?}: (holder delivery, listed deliveries, still waiting, listed) {delivery:?}, expected {expected_delivery:?}"
+                "{path:?}: (polled deliveries, plain delivery, listed deliveries, still waiting, listed) {delivery:?}, expected {expected_delivery:?}"
             ));
         }
         let first_read: Vec<(usize, &SemanticQueryKey)> = trace
@@ -1189,6 +1214,18 @@ fn a_stepped_widening_read_answers_as_the_in_place_read() {
 /// `Concat<T, T>` return checks that return as the expression's TS2800
 /// recovery, never the type node's TS2799, and the walk answers as the
 /// inline probe does.
+///
+/// That recovery is an operation-budget partial when it is read on its own,
+/// yet `mConcat` is no fresh literal, so the walk's freshness probe drops
+/// it: the synchronous drive leaves its enclosing build complete. A holder
+/// that answers each read itself, marked observed, and delivers it polls
+/// the walk to the same answer through the same reads and leaves the
+/// enclosing build exactly as complete.
+///
+/// Mutations: opening the holder's observed delivery outside the probe
+/// (adopting it before the probe resumes) leaves the budget partial in the
+/// polled drive's build; answering the holder's read unmarked refuses its
+/// delivery and leaves the polled answer `None`.
 #[test]
 fn a_widening_walk_reads_its_initializer_at_the_expression_site() {
     let source = format!(
@@ -1264,5 +1301,25 @@ fn a_widening_walk_reads_its_initializer_at_the_expression_site() {
         (trace.value_read_widens, trace.in_place),
         (false, false),
         "the walk answers as the inline probe does"
+    );
+    assert!(
+        trace.in_place_partials[2].as_ref().is_some_and(|reasons| {
+            reasons.contains(verter_type_engine::semantic_query::PartialReasonSet::OPERATION_BUDGET)
+        }),
+        "the declared-return recovery read on its own is an operation-budget partial, got {:?}",
+        trace.in_place_partials
+    );
+    assert_eq!(
+        trace.synchronous_partial, None,
+        "the synchronous drive drops the partial a call that is not fresh observed"
+    );
+    assert_eq!(
+        (trace.polled, &trace.polled_reads, &trace.polled_deliveries),
+        (Some(false), &trace.in_place_reads, &vec!["accepted"; 3]),
+        "a holder answering each read observed polls the walk to the synchronous answer"
+    );
+    assert_eq!(
+        trace.polled_partial, trace.synchronous_partial,
+        "the polled drive leaves the enclosing build as the synchronous drive does"
     );
 }
