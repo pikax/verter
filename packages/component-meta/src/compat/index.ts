@@ -18,6 +18,7 @@ export {
   mapSlotMeta,
   mapExposedMeta,
   mapComponentMeta,
+  projectNativeComponentMeta,
 } from "./checker.js";
 
 export type { CheckerWorkspace } from "./checker.js";

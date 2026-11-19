@@ -256,7 +256,6 @@ export class DecodedTypeGraph {
   readonly strings: readonly string[];
   readonly nodes: readonly GraphNodeRecord[];
   readonly descriptorMemo = new Map<number, TypeDescriptor>();
-  readonly descriptorMemoByContext = new WeakMap<object, Map<number, TypeDescriptor>>();
 
   constructor(strings: string[], nodes: GraphNodeRecord[]) {
     this.strings = Object.freeze(strings.slice());

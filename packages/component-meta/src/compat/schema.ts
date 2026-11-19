@@ -9,7 +9,22 @@ import { intrinsicDisplayName } from "@verter/type-ir";
 import type { PropertyMetaSchema, MetaCheckerOptions } from "./types.js";
 import { tupleDescriptorToString } from "../type-expr-bridge.js";
 
-const MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH = 1;
+/** One-level join of a non-generic reference to an unambiguous producer row. */
+export function joinRegistryRef(
+  descriptor: TypeDescriptor,
+  registry: Map<string, TypeDescriptor> | undefined,
+  visited: Set<string>,
+  depth: number,
+): TypeDescriptor | undefined {
+  if (
+    descriptor.kind !== "ref" ||
+    descriptor.typeArguments?.length ||
+    depth >= 1 ||
+    visited.has(descriptor.name)
+  )
+    return undefined;
+  return registry?.get(descriptor.name);
+}
 
 /**
  * Convert a TypeDescriptor to a PropertyMetaSchema.
@@ -190,24 +205,18 @@ function convertType(
         ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
         : td.name;
       if (ignore?.(name)) return name;
-      // Try to resolve from type registry (pre-parsed TypeDescriptor)
-      if (
-        typeRegistry &&
-        registryResolutionDepth < MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH &&
-        !visited?.has(td.name)
-      ) {
-        const resolved = typeRegistry.get(td.name);
-        if (resolved) {
-          visited?.add(td.name);
-          const result = convertType(
-            resolved,
-            options,
-            typeRegistry,
-            visited,
-            registryResolutionDepth + 1,
-          );
+      const resolved = joinRegistryRef(
+        td,
+        typeRegistry,
+        visited ?? new Set(),
+        registryResolutionDepth,
+      );
+      if (resolved) {
+        visited?.add(td.name);
+        try {
+          return convertType(resolved, options, typeRegistry, visited, registryResolutionDepth + 1);
+        } finally {
           visited?.delete(td.name);
-          return result;
         }
       }
       // Unresolved ref → structured object with empty schema (matches Volar for browser/external types)
@@ -266,31 +275,15 @@ function resolveIndexedAccessForSchema(
   registryResolutionDepth = 0,
 ): { descriptor: TypeDescriptor; registryKey: string } | undefined {
   const objectType = td.objectType;
-  const registryKey =
-    objectType.kind === "ref" && objectType.typeArguments?.length
-      ? typeDescriptorToString(objectType)
-      : objectType.kind === "ref"
-        ? objectType.name
-        : "";
   if (
-    !typeRegistry ||
-    registryResolutionDepth >= MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH ||
-    td.indexType.kind !== "literal" ||
-    typeof td.indexType.value !== "string" ||
     objectType.kind !== "ref" ||
-    visited.has(registryKey)
-  ) {
+    td.indexType.kind !== "literal" ||
+    typeof td.indexType.value !== "string"
+  )
     return undefined;
-  }
-
-  // A bare generic declaration such as `Box<T>` is not the meaning of
-  // `Box<string>`. Compat has no substitution authority, so a generic indexed
-  // access resolves only from an exact producer-supplied instantiated row
-  // (`Box<string>`), while non-generic refs keep their existing name lookup.
-  const object = typeRegistry.get(registryKey);
-  if (object?.kind !== "object") {
-    return undefined;
-  }
+  const object = joinRegistryRef(objectType, typeRegistry, visited, registryResolutionDepth);
+  if (object?.kind !== "object") return undefined;
+  const registryKey = objectType.name;
   const key = td.indexType.value;
   const property = object.properties.find((candidate) => candidate.name === key);
   if (!property) {
@@ -393,23 +386,18 @@ function schemaDescriptorToString(
         : intrinsicDisplayName(td.op);
 
     case "ref": {
-      if (
-        typeRegistry &&
-        registryResolutionDepth < MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH &&
-        !td.typeArguments?.length &&
-        !visited.has(td.name)
-      ) {
-        const resolved = typeRegistry.get(td.name);
-        if (resolved) {
-          visited.add(td.name);
-          const result = schemaDescriptorToString(
+      const resolved = joinRegistryRef(td, typeRegistry, visited, registryResolutionDepth);
+      if (resolved) {
+        visited.add(td.name);
+        try {
+          return schemaDescriptorToString(
             resolved,
             typeRegistry,
             visited,
             registryResolutionDepth + 1,
           );
+        } finally {
           visited.delete(td.name);
-          return result;
         }
       }
       return typeDescriptorToString(td);
