@@ -5,19 +5,68 @@
 //! unannotated parameters, and its body return is read under them.
 
 use super::{FlowDemandDriver, FlowEvaluator, Positional};
-use crate::semantic_query::{
-    IncompleteReason, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SignatureKind,
-};
+use crate::semantic_query::{IncompleteReason, SemanticNodeData, SemanticNodeId, SignatureKind};
 use verter_session_query::flow::slice::SliceExpr;
 
 impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanticDispatch<'_, C> {
-    /// Expand a contextual alias without erasing marker applications in its body.
-    /// The checker's error type `contextual` holds, if it holds one: a written
-    /// union or intersection with the error type among its arms IS the error
-    /// type (`getUnionType`, `getIntersectionType`), through every declaration
-    /// that names it. It gives its literal no members, no signatures and no
-    /// marker, and reads as `any` where a literal's `this` reads it.
-    pub(in crate::project_semantic_dispatch) fn contextual_error_type(
+    /// The instantiation a contextual type's view reads for `node`, computed
+    /// without reading it: an applied declaration expanded in `Skeleton`
+    /// mode, so the marker applications in its body survive (a contextual
+    /// alias expands without erasing them). `None` for any other node, whose
+    /// view is its reduction view.
+    pub(in crate::project_semantic_dispatch) fn contextual_carrier_key(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query::SemanticQueryKey> {
+        let data = self.graph().node_data(node);
+        let Some(SemanticNodeData::InstantiationRef { base, args }) = data.as_deref() else {
+            return None;
+        };
+        let context =
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Skeleton,
+            );
+        Some(crate::semantic_query::SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                self.type_slot_for(
+                    base.canonical_id.clone(),
+                    base.owner,
+                    base.decl_name.clone(),
+                ),
+                std::sync::Arc::clone(args.as_arc()),
+                self.instantiate_context_for(&base.canonical_id, context),
+            ),
+        ))
+    }
+}
+
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
+    /// A contextual type's view, requested on this evaluation's body and
+    /// answered at once: an applied declaration reads as its `Skeleton`
+    /// instantiation, keeping the marker applications in its body
+    /// ([`super::super::ProjectSemanticDispatch::contextual_carrier_key`]);
+    /// any other node reads through its identity carrier
+    /// ([`Self::reduction_view`]).
+    pub(super) fn contextual_view(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let Some(key) = self.dispatch.contextual_carrier_key(node) else {
+            return self.reduction_view(node);
+        };
+        let wait = self
+            .dispatch
+            .request(key, super::ReadShape::Node, super::ReadOrigin::Carrier);
+        self.dispatch
+            .read_in_place(wait, self.st.canonical)
+            .node()
+            .unwrap_or(node)
+    }
+
+    /// The checker's error type `contextual` holds, if it holds one: a
+    /// written union or intersection with the error type among its arms IS
+    /// the error type (`getUnionType`, `getIntersectionType`), through every
+    /// declaration that names it. It gives its literal no members, no
+    /// signatures and no marker, and reads as `any` where a literal's `this`
+    /// reads it.
+    pub(super) fn contextual_error_type(
         &self,
         contextual: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
@@ -25,19 +74,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
     }
 
     /// Each occurrence of the checker's TS2304 the error type `contextual`
-    /// holds reports, in the file `canonical`.
-    pub(in crate::project_semantic_dispatch) fn contextual_undeclared_names(
+    /// holds reports, in this evaluation's file.
+    pub(super) fn contextual_undeclared_names(
         &self,
         contextual: SemanticNodeId,
-        canonical: &str,
     ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        let canonical = self.st.canonical;
         self.contextual_error_arms(contextual)
             .into_iter()
-            .flat_map(|arm| self.undeclared_name_occurrences(arm, canonical))
+            .flat_map(|arm| self.dispatch.undeclared_name_occurrences(arm, canonical))
             .collect()
     }
 
-    /// The error types `contextual` holds, in the order its arms are read.
+    /// The error types `contextual` holds, in the order its arms are read,
+    /// each arm read through its contextual view ([`Self::contextual_view`]).
     fn contextual_error_arms(&self, contextual: SemanticNodeId) -> Vec<SemanticNodeId> {
         let mut arms_found = Vec::new();
         let mut pending = vec![contextual];
@@ -46,8 +96,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
             if !seen.insert(node) {
                 continue;
             }
-            let view = self.contextual_carrier_view(node);
-            match self.graph().node_data(view).as_deref() {
+            let view = self.contextual_view(node);
+            match self.dispatch.graph().node_data(view).as_deref() {
                 Some(SemanticNodeData::Opaque(error))
                     if crate::project_semantic_dispatch::build::is_certified_recovery(error) =>
                 {
@@ -61,45 +111,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
         arms_found
     }
 
-    pub(in crate::project_semantic_dispatch) fn contextual_carrier_view(
-        &self,
-        node: SemanticNodeId,
-    ) -> SemanticNodeId {
-        let data = self.graph().node_data(node);
-        let Some(SemanticNodeData::InstantiationRef { base, args }) = data.as_deref() else {
-            return self.resolved_reduction_view(node);
-        };
-        let context =
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                crate::semantic_query::ProjectionMode::Skeleton,
-            );
-        match self.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                self.type_slot_for(
-                    base.canonical_id.clone(),
-                    base.owner,
-                    base.decl_name.clone(),
-                ),
-                std::sync::Arc::clone(args.as_arc()),
-                self.instantiate_context_for(&base.canonical_id, context),
-            ),
-        )) {
-            crate::semantic_query::QueryResult::Value(output) => output.value,
-            _ => node,
-        }
-    }
-
     /// Find the global marker through contextual intersections and aliases,
-    /// before its empty interface is reduced to a structural object.
-    pub(in crate::project_semantic_dispatch) fn contextual_object_this_type(
+    /// before its empty interface is reduced to a structural object. Each
+    /// node that is neither is read through its contextual view
+    /// ([`Self::contextual_view`]).
+    pub(super) fn contextual_this_type(
         &self,
         contextual: SemanticNodeId,
-        canonical: &str,
     ) -> Option<SemanticNodeId> {
         enum Work {
             Visit(SemanticNodeId),
             Join(SemanticNodeId, Vec<SemanticNodeId>, bool),
         }
+        let canonical = self.st.canonical;
         let mut pending = vec![Work::Visit(contextual)];
         let mut seen = rustc_hash::FxHashSet::default();
         let mut receivers = rustc_hash::FxHashMap::default();
@@ -115,7 +139,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
                         receivers.insert(
                             node,
                             if union {
-                                self.intern_normalized_union_or_intersection(&found, true)
+                                self.dispatch
+                                    .intern_normalized_union_or_intersection(&found, true)
                             } else {
                                 first
                             },
@@ -127,10 +152,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
             if !seen.insert(node) {
                 continue;
             }
-            match self.graph().node_data(node).as_deref() {
+            match self.dispatch.graph().node_data(node).as_deref() {
                 Some(SemanticNodeData::InstantiationRef { base, args })
                     if args.len() == 1
-                        && self.names_contextual_this_marker(
+                        && self.dispatch.names_contextual_this_marker(
                             canonical,
                             &base.canonical_id,
                             base.owner,
@@ -148,7 +173,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
                     pending.extend(members.iter().rev().copied().map(Work::Visit));
                 }
                 _ => {
-                    let resolved = self.contextual_carrier_view(node);
+                    let resolved = self.contextual_view(node);
                     if resolved != node {
                         pending.push(Work::Join(node, vec![resolved], false));
                         pending.push(Work::Visit(resolved));

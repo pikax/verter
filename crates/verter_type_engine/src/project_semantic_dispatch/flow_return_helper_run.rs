@@ -41,6 +41,59 @@ pub(super) fn carrier_wait<C: crate::resolver_core::ResolverCapabilities>(
 
 static_assertions::const_assert!(std::mem::size_of::<CarrierStep>() <= 32);
 
+/// Settle an identity carrier where its caller cannot suspend. The walk is
+/// requested as every carrier read is ([`CarrierStep::begin`]): a concrete
+/// carrier settles without a read, and each read the walk stands at is
+/// answered at once, made inside the walk's stage and attributed to the
+/// carrier as an in-place answer.
+pub(super) fn carrier_in_place(
+    dispatch: &impl FlowDemandDriver,
+    canonical: &str,
+    node: SemanticNodeId,
+) -> IdentityCarrierUnwrap {
+    match dispatch.request_carrier(node) {
+        CarrierStep::Settled(done) => done,
+        CarrierStep::Wait(mut walk, wait) => {
+            let done = settle_now(
+                ReadStep::Wait(wait),
+                |wait| dispatch.read_in_place(wait, canonical),
+                |delivery| dispatch.deliver_carrier(&mut walk, delivery, canonical),
+            );
+            dispatch.release_carrier(walk);
+            done
+        }
+    }
+}
+
+/// A reduction operand's view read through its identity carrier where its
+/// caller cannot suspend ([`carrier_in_place`]): the structure an alias or
+/// declaration carrier names, the node itself when it names none or its
+/// carrier does not resolve, with an object-spread program regularized as
+/// [`ProjectSemanticDispatch::resolved_reduction_view`] regularizes it.
+pub(super) fn reduction_view_in_place(
+    dispatch: &impl FlowDemandDriver,
+    canonical: &str,
+    view: SemanticNodeId,
+) -> SemanticNodeId {
+    match dispatch.arena().node_data(view).as_deref() {
+        Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
+            return dispatch.regularized_empty_object_program(view);
+        }
+        Some(
+            SemanticNodeData::Alias(_)
+            | SemanticNodeData::DeclRef { .. }
+            | SemanticNodeData::InstantiationRef { .. },
+        ) => {}
+        _ => return view,
+    }
+    match carrier_in_place(dispatch, canonical, view) {
+        IdentityCarrierUnwrap::Concrete(resolved) => {
+            dispatch.regularized_empty_object_program(resolved)
+        }
+        IdentityCarrierUnwrap::Unresolvable => view,
+    }
+}
+
 /// A type lowering's node, or the lowering and the first read it waits on.
 /// A lowering always yields a node.
 pub(in crate::project_semantic_dispatch) enum LowerStart<'e> {

@@ -83,7 +83,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                     .global_object_declares(name, self.st.canonical);
             }
         }
-        let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(base) {
+        let concrete = match self.settle_carrier(base) {
             super::super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
             super::super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
         };
@@ -355,10 +355,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         entries: &[verter_session_query::flow::slice::SliceObjectEntry],
     ) {
         use verter_session_query::flow::slice::SliceObjectEntry;
-        for occurrence in self
-            .dispatch
-            .contextual_undeclared_names(contextual, self.st.canonical)
-        {
+        for occurrence in self.contextual_undeclared_names(contextual) {
             self.record_checker_diagnostic(occurrence);
         }
         if !self.st.no_implicit_any {

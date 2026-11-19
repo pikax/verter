@@ -92,8 +92,26 @@ walk through the direct `classify_truthiness_domain_read`. Native guard chains,
 including guards called between expression-stack arms, settle the same helper
 through `settle_now`, attributed as `read_in_place / carrier`. Their callers do
 not yet retain the guard chain at a request. Concrete carriers settle without
-requesting a read or allocating a standing-walk box. Other carrier wrappers
-continue to use their existing relation entry points.
+requesting a read or allocating a standing-walk box.
+
+Every other carrier wrapper the flow body reaches is requested the same way
+(`carrier_in_place` in `flow_return_helper_run.rs`): the evaluator's
+identity-carrier settles (`settle_carrier`), the per-evaluation memo arm
+enumeration reads through (`carrier_unwrap`, so `enumerated_union_arms_or_self`
+requests each arm's walk), and reduction views (`reduction_view`) each request
+the walk and answer it at once, attributed as `read_in_place / carrier`. The
+contextual wrappers (`contextual_view`, `contextual_this_type`,
+`contextual_error_type`, `contextual_undeclared_names` in
+`flow_return_contextual.rs`) walk on the evaluator: an applied declaration's
+`Skeleton` instantiation is requested from its key
+(`contextual_carrier_key`), any other node reads through its requested
+reduction view. The contextual call's object wrappers in
+`call_resolve_contextual.rs` (`contextual_object_order`,
+`contextual_object_member`) take that view from their flow caller. The flow
+driver exposes no direct relation unwrap, reduction view or contextual view,
+so a flow body cannot settle a carrier wrapper in place. Dispatcher algebra
+the body calls as one operation (intersection distribution, supertype
+reduction) still unwraps inside that operation.
 
 An unsettled composite is named in the current signature epoch. If that epoch
 retires while its result request waits, the producer refuses the retired handle
