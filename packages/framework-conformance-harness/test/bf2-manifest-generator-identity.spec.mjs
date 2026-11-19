@@ -16,7 +16,7 @@
 //
 // Both are proven here against LIVE content, not a hardcoded expectation of
 // "correct" -- test 1 is falsifiable right now because VUE_DOMAIN.commit on
-// this tree is already rc.5, and test 2 recomputes the generator's actual
+// this tree is no longer rc.3, and test 2 recomputes the generator's actual
 // git-blob hash and SHA-256 request digests from the files on disk.
 
 import { createHash } from "node:crypto";
