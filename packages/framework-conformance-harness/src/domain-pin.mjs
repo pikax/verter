@@ -12,35 +12,35 @@
 export const VUE_DOMAIN = Object.freeze({
   framework: "vue",
   upstream: "https://github.com/vuejs/core",
-  tag: "v3.6.0-rc.5",
-  commit: "f11c8f2639ce15559d64ea054e409081bd8a0ce1",
-  tree: "980693b602cff54d492a1d6ada18470596cbf978",
-  packageVersion: "3.6.0-rc.5",
+  tag: "v3.6.0-rc.15",
+  commit: "1595469ef66e4126351609f7df8ef334560aa3fa",
+  tree: "a417748239111b19c9f78380531fda9ef13f7c6c",
+  packageVersion: "3.6.0-rc.15",
   // Direct-package identities, exactly as recorded in version-domain.md.
   directPackages: Object.freeze({
-    vue: "sha512-yM+CHEWSTc9FjJGIeViI86VVheHvJ3YaZrrXqlD7wX3S+8tNPR/vDMviGOv4ULIMTkzWWKWVRvylsytXbHBbNA==",
+    vue: "sha512-A1XZEGZqt3xozb/LcWROmRc15CvjcWpPc0zie4eAXnYrEuZde2yeZINUA8U54LlvcUZOCZGR1OdLI1yoa0X6VA==",
     "@vue/compiler-core":
-      "sha512-OSOzR/4Mk8TMStNxFLFwcVjgFvvMGvlKEpboxv9W4ikQhsVLKEMTtzBVY5A11qwb6zGuwWJdCOeME5npmpURiQ==",
+      "sha512-VMgoQYzsmwxn6t9iPY3XpQYypOUkHdGIp1JaTah9WPrFY9jLXiYcYD7c2pK8MIOLeqlTpqpSnc1VZoXeWAmjew==",
     "@vue/compiler-dom":
-      "sha512-QBONzGYH7o448rwz+8FUWW4Gm4Zw0EtNhtRooOw/KDFF+/hWz1VlGIpvU9Hjv5MXDMMCu+UsLXEYFtXTSHgIwg==",
+      "sha512-TLIO+IR53l2vMNu/16jMLJ9JgjhCuxYE9gywiUr5UqoNYCQnqM0G0XLw+Rtu4vMXENeXDrHp/Np1r6TQ3YP6Sw==",
     "@vue/compiler-sfc":
-      "sha512-o/IH60kRS8C06ek3tullJhm4sK3T6aDXQa8Dgq7qLxRCa5gXrIZMDO9+mZYy0THxAiTZs2tc/XwnKu0JqmSKRw==",
+      "sha512-MfOVqyvO28j2AZCt51ccvEbrtJM/VWGic19gtMO9Zr6hGQ7bvCxx2U4WtYFWiNaq8DXtGTqGpUc72MjjxUm5aA==",
     "@vue/compiler-ssr":
-      "sha512-KBsxaO538LZeNARcaYeEwOE0Fl/gw2mEYB9+hK/Hrk7yUCq4WeS9V32HL84SiTY4S6WXrcKP0pXB6zW6zvjB6w==",
+      "sha512-+jVVmJb24EV+ad7KnO6bjX9iQW1vQ4LhZbIMHK5+NQ5dTn04SGuWEbQ7iGnAzFpRiKqpqPXuZg80BN/+cK5VOA==",
     "@vue/compiler-vapor":
-      "sha512-UXnYH+4NhPmEmlWcHuiR+KjfpZCuG1CBkWXTSH5720p2jRGzuEGiMUAx7CtMXyIJ0QZwdzDV09xFs35zsgJeYA==",
+      "sha512-VetAFW1F0LpMAt+JJMFMeAgaePyRRzQjElXwpl19/EfIlC8/OVScunKSlfpZs8jK+x3qLNNFvJHe47Ho4k2Ygw==",
     "@vue/runtime-core":
-      "sha512-NiT9xl/ndkTHASfQ9AjxDjTiClIZRmsIWb0orlKNnjHn6C09PNZX4V/c0Aewtlg8bouarpnV6JLbpg16gYMBJA==",
+      "sha512-Ub3yACqYogmG4oTiCGlw3syKHPanZM9USDc5DzzZrTfCRfzy3vYnyABvRS412RMivL9VDNED/FtMo5ZirXvHow==",
     "@vue/runtime-dom":
-      "sha512-E5A1z7UEoPvAmIpZopSJ5ji8A1wuP2cFHVc41ZN2w32FWV3CxFQVJG3VNSHwFs8lBQ8Ji5SDnkMCfJXHVzt0iQ==",
+      "sha512-ABXTEhclPU2IRw6T7U1c2vo2Z9l/1EaVA5OmqKyuxl8hiXPwpLyZxgDjOJNg28SGwukYRpUJBRSJxwvgTdJ7WQ==",
     "@vue/runtime-vapor":
-      "sha512-OmBf4R/SJ11h9ZXrpPThddh2SqTmyc9eCBLFSmH1rhfr/sVFMrrcxMXjFOX1Rn+Nlqiuf9pUx/hYwG2gY2uJHA==",
+      "sha512-J778jb0bvqvJTsLMUTMKqzX/3prgXqgrmmDBDf2jvodoRW7SfDhWCkKsbUhIPUpxnhAzDlRf6/fvGWPix8x8xQ==",
     "@vue/server-renderer":
-      "sha512-esb8yrZjymuMO7Wqjp62B2cFCGvL1AkmlIp8KBsKowG+BOqzemOJHz1yhK7Tf3KE0LIEatDP/Gb4FZo+S/LwyQ==",
+      "sha512-KAhQFtrwOW0V7MYaqS7eWBh7fCjD7IJybZ6Qigiws0XgirxEPG4Oo7NFZGcCji+j/2otlq1J9g1QryEjsHHQ7A==",
     "@vue/reactivity":
-      "sha512-FcTNjZwCU4VPAv7W/EJD/ckatgxFJ20jU6S2dGmJC9RS08HAvKB/IjtCQaE7HBuIC4oXQnnahkNuilrDFt0BWA==",
+      "sha512-qiDqzBA3ntWab6PYOS8MIWMdd276/rYB4zzeeh8iVUvgU/6L8VaEN5arCK0eGp7j0+Q3+mSIOQwdL9opQuvO9A==",
     "@vue/shared":
-      "sha512-2dQ2+xAv7USEKgM5ckB2PrNc4pBcqYNCmkk8/RQtbpxpNDK0RvH0c9vG4rgqsvFS4wy3RXyj2ZfoAhldkgZ2dw==",
+      "sha512-yvK8qzcF0RFAd/QTUcVzNhBpRsY9JJFwRy9AnSwQV5juyymCr4BewPSO3sd6OMqJepqwqS0Xk0yaebIEyDmftA==",
   }),
   // The EXACT oracle module specifiers production code loads from this
   // domain's realized install, with the loader each callsite uses — the
@@ -94,8 +94,8 @@ export const SVELTE_DOMAIN = Object.freeze({
 
 /** Committed evidence-lock digests this harness cross-checks itself against. */
 export const EVIDENCE_LOCK_DIGESTS = Object.freeze({
-  vuePackageLockSha256: "4c3cc2fb175c4cba390e319aeae04dce6252ac818a2045f8383a040b488430a2",
-  vueClosureSha256: "6af174230488ff2d6d054550d81f3a96218c137046abf37a9dc9d27639d9ea07",
+  vuePackageLockSha256: "418ffca6ed806b30f93c82b8358720a3b13618ab35f5703cac9b310f3a5ea44a",
+  vueClosureSha256: "db40b4813c2abd9e10a37595b0c5ada635a52c770079c3fd01ca360cda380da5",
   sveltePackageLockSha256: "110dbc95cb501f60177dec712df81a85e5fc8b3dda7a2592dfe5bd26b21d2053",
   svelteClosureSha256: "01e810a3c8ea5a286915071ebb04af86c1b735b1f9ef7b5db5f7605312c7a3e2",
 });
