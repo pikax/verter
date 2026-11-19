@@ -21,26 +21,11 @@
  *   per-symbol surface are preserved as-is.
  * - `acceptedProps` / `acceptedEvents` are filtered to keep only entries
  *   whose `provenance.kind === "declared"` (inherited entries are dropped).
- * - `fallthroughSurface` is reset to `{ kind: "none", reason: ... }` so
- *   downstream consumers see a no-fallthrough surface.
+ * - `fallthroughSurface` retains the component's real producer fact.
  */
 
 import { decodeComponentMetaPayload } from "../type-graph.js";
-import type {
-  NativeComponentMetaResult,
-  NativeFallthroughSurface,
-  NativeNoFallthroughReason,
-} from "../native-component-meta.js";
-
-function deriveDeclaredOnlyFallthroughReason(
-  surface: NativeFallthroughSurface | undefined,
-): NativeNoFallthroughReason | undefined {
-  if (surface === undefined) return undefined;
-  if (surface.kind === "none") {
-    return surface.reason;
-  }
-  return "noTemplate";
-}
+import type { NativeComponentMetaResult } from "../native-component-meta.js";
 
 /**
  * Decoded helper: projects a fully resolved native component-meta result
@@ -61,19 +46,11 @@ export function projectDeclaredOnlyNativeResult(
   const acceptedEvents = meta.acceptedEvents?.filter(
     (entry) => entry.provenance.kind === "declared",
   );
-  const fallthroughSurface: NativeFallthroughSurface | undefined =
-    meta.fallthroughSurface === undefined
-      ? undefined
-      : {
-          kind: "none",
-          reason: deriveDeclaredOnlyFallthroughReason(meta.fallthroughSurface)!,
-        };
 
   return {
     ...meta,
     ...(acceptedProps === undefined ? {} : { acceptedProps }),
     ...(acceptedEvents === undefined ? {} : { acceptedEvents }),
-    ...(fallthroughSurface === undefined ? {} : { fallthroughSurface }),
   };
 }
 

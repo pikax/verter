@@ -16,6 +16,7 @@ function resolvedTypeRow(display: string) {
       provenance: { kind: "resolved", value: "semanticEvaluator" },
     } as const,
     terminalDisplay: { text: display },
+    typeFact: { kind: "complete" as const, value: { kind: "primitive" as const, name: "string" } },
   };
 }
 

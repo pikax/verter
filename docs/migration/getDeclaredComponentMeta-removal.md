@@ -16,9 +16,14 @@ information is now produced by projecting the canonical
   `projectDeclaredOnlyNativeResult`.
 
 Both helpers return `NativeComponentMetaResult | null`. They never
-produce a Volar shape — Volar mapping stays at the caller via
-`nativeComponentMetaToComponentMeta` plus `mapComponentMeta(options,
-typeRegistry)` exactly as before.
+produce a Volar shape. They filter accepted props and events by declared
+provenance and preserve the component's real fallthrough fact, including a
+branches surface. They never invent a no-template reason or replace an
+unavailable fact.
+
+Use `projectNativeComponentMeta(meta, options)` from
+`@verter/component-meta/compat` to produce the Volar shape directly from
+one decoded native result.
 
 ## Why
 
@@ -72,39 +77,28 @@ If a caller previously fed `getDeclaredComponentMeta` into the Volar
 mappers, the post-migration shape is a straight composition:
 
 ```ts
-import {
-  nativeComponentMetaToComponentMeta,
-  nativeTypeRegistryToMap,
-} from '@verter/component-meta'
-import {
-  mapComponentMeta,
-  projectDeclaredOnlyFromNativePayload,
-} from '@verter/component-meta/compat'
+import { decodeComponentMetaPayload } from '@verter/component-meta'
+import { projectNativeComponentMeta } from '@verter/component-meta/compat'
 
 const session: ComponentMetaSession = host.openComponentMetaSession()
-const declared = projectDeclaredOnlyFromNativePayload(
-  session.getComponentMeta('/project/src/Button.vue'),
-)
-if (declared) {
-  const typeRegistry = nativeTypeRegistryToMap(declared)
-  const componentMeta = nativeComponentMetaToComponentMeta(declared)
-  const volar = mapComponentMeta(componentMeta, options, typeRegistry)
-}
+const payload = session.getComponentMeta('/project/src/Button.vue')
+const native = payload === null ? null : decodeComponentMetaPayload(payload)
+const volar = projectNativeComponentMeta(native, options)
 ```
 
-The Volar output is byte-for-byte equivalent to the pre-change
-`getDeclaredComponentMeta` output once it has been run through
-`mapComponentMeta`.
+Checker and public-session scalar and batch calls use this same projection.
+A null native answer produces empty Volar metadata; a native failure throws.
+A session without the batch capability throws instead of issuing scalar calls.
 
 ## What stays unchanged
 
 - `getComponentMeta(...)` — the canonical query.
 - `getComponentMetaWithAudit(...)` — synchronous audit bundle.
-- `getResolvedComponentMeta(...)` — resolved-surface query (now
-  formally typed in `packages/native/dist/index.d.ts`).
-- `mapComponentMeta`, `nativeComponentMetaToComponentMeta`, and the
-  Volar shape — these continue to be the recommended way to render
-  Volar-compatible metadata.
+- The raw `@verter/native` `getResolvedComponentMeta(...)` binding remains
+  available. The JavaScript runtime uses the canonical `getComponentMeta`
+  lane for both native and compat queries and exposes no separate resolved method.
+- `mapComponentMeta` and `nativeComponentMetaToComponentMeta` remain available
+  for callers that explicitly compose the lower-level conversions.
 
 ## Trade-offs
 

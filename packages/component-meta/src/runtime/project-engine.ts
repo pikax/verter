@@ -55,8 +55,6 @@ export interface NativeMetaSession {
    * across the batch.
    */
   getComponentMetaBatch(canonicalsOrAliases: string[]): Buffer[];
-  /** Full resolved native query with resolution sidecars. Returns a protobuf payload. */
-  getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
   /** Provenance counters for observability. Returns JSON. */
   getProvenance(): string;
 }

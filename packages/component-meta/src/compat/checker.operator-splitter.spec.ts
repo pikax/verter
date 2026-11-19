@@ -41,7 +41,7 @@ function makeProp(overrides: Partial<PropMeta> & { type: TypeDescriptor }): Prop
 
 describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
   describe("union arm extraction (replaces splitTopLevelTypeUnion / splitTopLevelTypeOperator '|')", () => {
-    it("buildCompatAnyPropMeta: detects 'any' arm from prop.type, not from prop.rawType text", () => {
+    it("preserves an any union schema independently of terminal display", () => {
       // Decoy: rawType text claims a non-`any` shape, descriptor says union including any.
       const prop = makeProp({
         type: union([primitive("any"), primitive("undefined")]),
@@ -49,8 +49,12 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
         required: false,
       });
       const result = mapPropMeta(prop);
-      // Descriptor wins → `any` projection.
-      expect(result.type).toBe("any");
+      expect(result.type).toBe("string | undefined");
+      expect(result.schema).toEqual({
+        kind: "enum",
+        type: "string | undefined",
+        schema: ["any", "undefined"],
+      });
     });
 
     it("buildCompatAnyPropMeta: multi-arm union with 'any' text but no descriptor 'any' arm declines projection", () => {
@@ -69,7 +73,7 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
       expect(result.type).not.toBe("any");
     });
 
-    it("buildCompatHtmlButtonTypePropMeta: extracts button-type union arms from prop.type, not from rawType text", () => {
+    it("does not invent a button role from a prop name and literal union", () => {
       // Descriptor: `"button" | "submit" | "reset" | undefined` (structurally).
       const prop = makeProp({
         name: "type",
@@ -84,8 +88,12 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
         required: false,
       });
       const result = mapPropMeta(prop);
-      // Descriptor structural match wins.
-      expect(result.type).toBe('"button" | "submit" | "reset" | undefined');
+      expect(result.type).toBe("bogus | shape | undefined");
+      expect(result.schema).toEqual({
+        kind: "enum",
+        type: "bogus | shape | undefined",
+        schema: ['"button"', '"submit"', '"reset"', "undefined"],
+      });
     });
 
     it("classifies structurally equivalent function and array arms without comparing rendered parameter names", () => {
