@@ -36,6 +36,7 @@
 //! same key and resumes the held route there instead of the executor: the
 //! callback types over the delivered reads into that same collector.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
@@ -329,6 +330,9 @@ pub(super) enum CallStep<'e> {
     Read(Box<CallListWait<'e>>),
     /// An indexed argument, with its enclosing call retained.
     Indexed(Box<CallInFlight<'e>>, Box<IndexedArgumentRead<'e>>),
+    /// An argument's literal provenance lowerings, with its enclosing call
+    /// retained.
+    Provenance(Box<CallInFlight<'e>>, Box<ProvenanceArgumentRead<'e>>),
     /// Nothing: the call's value.
     Done(Positional<SemanticNodeId>),
 }
@@ -518,8 +522,28 @@ pub(super) enum ResolveCallProgress<'e> {
     List(Box<RouteList<'e>>),
     /// The owner-scope value of an indexed argument.
     Indexed(Box<IndexedArgumentRead<'e>>),
+    /// The owner-scope types a typed argument's literal provenance lowers.
+    Provenance(Box<ProvenanceArgumentRead<'e>>),
     /// Nothing: the route's step.
     Done(Option<Positional<ResolveCallStep>>),
+}
+
+/// A typed argument whose literal provenance waits on a read one of its
+/// planned lowerings requested: the route stays open, the argument's
+/// binding and type held, until the provenance frame finishes.
+pub(super) struct ProvenanceArgumentRead<'e> {
+    route: ResolveCallFrame<'e>,
+    binding: FlowIndexedArgumentBinding,
+    typed: TypedArgument,
+    frame: Option<Box<helper_run::ProvenanceFrame>>,
+}
+
+impl ProvenanceArgumentRead<'_> {
+    pub(super) fn take_frame(&mut self) -> Box<helper_run::ProvenanceFrame> {
+        self.frame
+            .take()
+            .expect("the argument's driver takes its provenance frame once")
+    }
 }
 
 /// The argument's route and observation stay open while its indexed walk
@@ -896,6 +920,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             match progress {
                 ResolveCallProgress::Indexed(argument) => {
                     return Ok(CallStep::Indexed(flight, argument));
+                }
+                ResolveCallProgress::Provenance(argument) => {
+                    return Ok(CallStep::Provenance(flight, argument));
                 }
                 ResolveCallProgress::List(route) => {
                     if let Some(nodes) = flight.lists.settled(route.subject, route.kind) {
@@ -1359,102 +1386,168 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 }
             };
             // The regular literals the argument nests, whichever route typed
-            // it: its reads resolve in this frame's scope. Whole binding
-            // reads also carry their top-level mixed membership.
+            // it: its reads resolve in this frame's scope, and the owner-scope
+            // types its plan lowers are requested from this frame.
             if typed.node.is_some()
                 && !matches!(binding, FlowIndexedArgumentBinding::SourceTypeQuery(_))
             {
-                typed.literal_provenance =
-                    self.frame_argument_literal_provenance(argument.literal_provenance.as_deref());
-            }
-            let Some(ty) = typed.node else {
-                // An argument this substrate cannot type leaves
-                // applicability without its evidence: the executor refuses
-                // as surely, and degrading here is the same typed marker
-                // with one less hop.
-                self.adopt_argument_observations(&mut route.argument_observations);
-                return ResolveCallProgress::Done(None);
-            };
-            // Indexed provenance records nested positions only. For a whole
-            // mixed binding read, supply the equivalent root record from
-            // this frame's reaching membership and actual read type.
-            if let FlowIndexedArgumentBinding::ValueRead(binding) = &binding {
-                if let Some(WideningMembership::Partial(fresh)) = self.membership_of(binding) {
-                    let graph = self.dispatch.graph();
-                    let members = match graph.node_data(ty).as_deref() {
-                        Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
-                        _ => vec![ty],
-                    };
-                    let regular = members
-                        .into_iter()
-                        .filter(|literal| {
-                            let data = graph.node_data(*literal);
-                            !fresh.iter().any(|value| graph.node_data(*value) == data)
-                        })
-                        .collect::<Vec<_>>();
-                    typed.literal_provenance =
-                        Some(Arc::new(crate::semantic_query::ArgumentLiteralProvenance {
-                            positions: Arc::from([
-                                crate::semantic_query::ArgumentRegularPosition {
-                                    path: Arc::from([]),
-                                    literals: Some(Arc::from(regular)),
+                if let Some(plan) =
+                    self.frame_argument_provenance_plan(argument.literal_provenance.as_deref())
+                {
+                    match helper_run::ProvenanceFrame::begin(self.dispatch, plan) {
+                        ReadStep::Ready(provenance) => typed.literal_provenance = provenance,
+                        ReadStep::Wait(frame) => {
+                            return ResolveCallProgress::Provenance(Box::new(
+                                ProvenanceArgumentRead {
+                                    route,
+                                    binding,
+                                    typed,
+                                    frame: Some(frame),
                                 },
-                            ]),
-                            fresh_reads: Arc::from([Arc::from([])]),
-                        }));
+                            ));
+                        }
+                    }
                 }
             }
-            // A read of a WIDENING-literal `const` is a FRESH literal source
-            // exactly as a bare literal argument is (the checker widens
-            // `wrap(a)` for `const a = "x"` identically to `wrap("x")`); the
-            // indexed lowering classifies every reference as pinned because
-            // only this frame knows the binding's widening membership.
-            let reads_widening_local = match &binding {
-                FlowIndexedArgumentBinding::ValueRead(binding) => {
-                    self.membership_of(binding).is_some()
-                }
-                // A value declared outside the frame (`const c = 1` read as
-                // `c`) widens by its declared type.
-                FlowIndexedArgumentBinding::Free => match &argument.expression {
-                    verter_type_expr::IndexedValueExpression::Value(
-                        verter_type_expr::TypeExpr::TypeOf(value),
-                    ) => {
-                        value.type_args.is_empty()
-                            && !self.top_level_literal_nodes(ty).is_empty()
-                            && self.dispatch.value_read_widens(
-                                self.st.canonical,
-                                self.st.owner,
-                                &value.path,
-                            )
-                    }
-                    _ => false,
-                },
-                _ => false,
+            route = match self.argument_typed(route, binding, typed) {
+                ControlFlow::Continue(route) => route,
+                ControlFlow::Break(progress) => return progress,
             };
-            let first_pass = match route.function_arguments.get(ordinal).cloned().flatten() {
-                Some(SliceExpr::Object {
-                    ref entries,
-                    offset,
-                }) if argument.context_sensitive => {
-                    if route.contextual_parameters.is_none() {
-                        route.pending = Some(Box::new(ArgumentPending::FirstPass {
-                            typed,
-                            reads_widening_local,
-                        }));
-                        let subject = route.callee;
-                        return ResolveCallProgress::List(Box::new(RouteList {
-                            at: RouteListAt::FirstPassParameters(Box::new(route)),
-                            subject,
-                            kind: SignatureKind::Call,
-                        }));
-                    }
-                    self.first_pass_read(&mut route, ordinal, entries, offset)
-                }
-                _ => None,
-            };
-            self.finish_argument(&mut route, ordinal, typed, reads_widening_local, first_pass);
         }
         self.finish_resolve_call(route)
+    }
+
+    /// Finish the argument whose literal provenance's planned lowerings
+    /// answered, then type the route's next argument.
+    pub(super) fn deliver_argument_provenance<'e>(
+        &mut self,
+        argument: Box<ProvenanceArgumentRead<'e>>,
+        provenance: Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>,
+    ) -> ResolveCallProgress<'e> {
+        let ProvenanceArgumentRead {
+            route,
+            binding,
+            mut typed,
+            frame: _,
+        } = *argument;
+        typed.literal_provenance = provenance;
+        match self.argument_typed(route, binding, typed) {
+            ControlFlow::Continue(route) => self.advance_resolve_call(route, None),
+            ControlFlow::Break(progress) => progress,
+        }
+    }
+
+    /// Drive the argument's provenance lowerings where its call cannot
+    /// suspend: each read they request is answered at once.
+    pub(super) fn settle_argument_provenance<'e>(
+        &mut self,
+        mut argument: Box<ProvenanceArgumentRead<'e>>,
+    ) -> ResolveCallProgress<'e> {
+        let mut helper = helper_run::HelperRun::argument_provenance(argument.take_frame());
+        let first = self.run_helper(&mut helper, None);
+        let value = self.settle_now(first, |this, delivery| {
+            this.run_helper(&mut helper, Some(delivery))
+        });
+        self.deliver_argument_provenance(argument, value.provenance())
+    }
+
+    /// Record the argument at the route's next position, typed and with
+    /// its literal provenance read: a whole mixed binding read's root
+    /// record, whether it reads a widening literal, and a context-sensitive
+    /// object's first pass. `Continue` with the route once it is recorded;
+    /// otherwise what the route needs next.
+    fn argument_typed<'e>(
+        &mut self,
+        mut route: ResolveCallFrame<'e>,
+        binding: FlowIndexedArgumentBinding,
+        mut typed: TypedArgument,
+    ) -> ControlFlow<ResolveCallProgress<'e>, ResolveCallFrame<'e>> {
+        let ordinal = route.args.len();
+        let indexed = Arc::clone(&route.indexed);
+        let argument = &indexed.call.args[ordinal];
+        let Some(ty) = typed.node else {
+            // An argument this substrate cannot type leaves
+            // applicability without its evidence: the executor refuses
+            // as surely, and degrading here is the same typed marker
+            // with one less hop.
+            self.adopt_argument_observations(&mut route.argument_observations);
+            return ControlFlow::Break(ResolveCallProgress::Done(None));
+        };
+        // Indexed provenance records nested positions only. For a whole
+        // mixed binding read, supply the equivalent root record from
+        // this frame's reaching membership and actual read type.
+        if let FlowIndexedArgumentBinding::ValueRead(binding) = &binding {
+            if let Some(WideningMembership::Partial(fresh)) = self.membership_of(binding) {
+                let graph = self.dispatch.graph();
+                let members = match graph.node_data(ty).as_deref() {
+                    Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+                    _ => vec![ty],
+                };
+                let regular = members
+                    .into_iter()
+                    .filter(|literal| {
+                        let data = graph.node_data(*literal);
+                        !fresh.iter().any(|value| graph.node_data(*value) == data)
+                    })
+                    .collect::<Vec<_>>();
+                typed.literal_provenance =
+                    Some(Arc::new(crate::semantic_query::ArgumentLiteralProvenance {
+                        positions: Arc::from([crate::semantic_query::ArgumentRegularPosition {
+                            path: Arc::from([]),
+                            literals: Some(Arc::from(regular)),
+                        }]),
+                        fresh_reads: Arc::from([Arc::from([])]),
+                    }));
+            }
+        }
+        // A read of a WIDENING-literal `const` is a FRESH literal source
+        // exactly as a bare literal argument is (the checker widens
+        // `wrap(a)` for `const a = "x"` identically to `wrap("x")`); the
+        // indexed lowering classifies every reference as pinned because
+        // only this frame knows the binding's widening membership.
+        let reads_widening_local = match &binding {
+            FlowIndexedArgumentBinding::ValueRead(binding) => self.membership_of(binding).is_some(),
+            // A value declared outside the frame (`const c = 1` read as
+            // `c`) widens by its declared type.
+            FlowIndexedArgumentBinding::Free => match &argument.expression {
+                verter_type_expr::IndexedValueExpression::Value(
+                    verter_type_expr::TypeExpr::TypeOf(value),
+                ) => {
+                    value.type_args.is_empty()
+                        && !self.top_level_literal_nodes(ty).is_empty()
+                        && self.dispatch.value_read_widens(
+                            self.st.canonical,
+                            self.st.owner,
+                            &value.path,
+                        )
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        let first_pass = match route.function_arguments.get(ordinal).cloned().flatten() {
+            Some(SliceExpr::Object {
+                ref entries,
+                offset,
+            }) if argument.context_sensitive => {
+                if route.contextual_parameters.is_none() {
+                    route.pending = Some(Box::new(ArgumentPending::FirstPass {
+                        typed,
+                        reads_widening_local,
+                    }));
+                    let subject = route.callee;
+                    return ControlFlow::Break(ResolveCallProgress::List(Box::new(RouteList {
+                        at: RouteListAt::FirstPassParameters(Box::new(route)),
+                        subject,
+                        kind: SignatureKind::Call,
+                    })));
+                }
+                self.first_pass_read(&mut route, ordinal, entries, offset)
+            }
+            _ => None,
+        };
+        self.finish_argument(&mut route, ordinal, typed, reads_widening_local, first_pass);
+        ControlFlow::Continue(route)
     }
 
     /// Drive the retained argument where its call cannot suspend.

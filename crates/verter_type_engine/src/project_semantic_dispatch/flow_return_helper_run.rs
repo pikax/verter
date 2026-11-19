@@ -215,6 +215,117 @@ pub(super) enum HelperFrame<'e> {
         Option<ReadWait>,
     ),
     Indexed(Box<IndexedArgumentFrame>),
+    Provenance(Box<ProvenanceFrame>),
+}
+
+/// The lowering a provenance frame is parked at, borrowing the planned type
+/// it lowers from the frame's own plan.
+type ParkedLowering<'p> = Option<Box<FlowLowering<'p>>>;
+
+self_cell::self_cell!(
+    /// A call argument's provenance plan beside the lowering of its planned
+    /// type that waits on a read, which borrows that type: one allocation
+    /// the frame owns, never a borrow of another frame. Dropping it drops
+    /// the lowering before the plan it borrows.
+    pub(super) struct PlannedLowerings {
+        owner: super::super::call_resolve::ProvenancePlan,
+
+        #[not_covariant]
+        dependent: ParkedLowering,
+    }
+);
+
+/// A call argument's literal provenance between the lowerings its plan
+/// lists: each planned type is lowered in the plan's owner scope through
+/// the stepping lowerer, in order, and the plan is finished once every one
+/// has its node.
+pub(super) struct ProvenanceFrame {
+    plan: PlannedLowerings,
+    /// The nodes of the planned types lowered so far: the next lowering is
+    /// the plan's at this length.
+    lowered: Vec<SemanticNodeId>,
+    /// The read the frame's run requests first, before any delivery.
+    wait: Option<ReadWait>,
+}
+
+impl ProvenanceFrame {
+    /// Begin lowering `plan`'s types: the finished provenance when each
+    /// lowers without a read, otherwise the frame and the read it waits on.
+    pub(super) fn begin(
+        dispatch: &impl FlowDemandDriver,
+        plan: super::super::call_resolve::ProvenancePlan,
+    ) -> ReadStep<Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>, Box<Self>> {
+        let lowered = Vec::with_capacity(plan.lowerings().len());
+        let mut frame = Box::new(Self {
+            plan: PlannedLowerings::new(plan, |_| None),
+            lowered,
+            wait: None,
+        });
+        match frame.advance(dispatch, None) {
+            ReadStep::Ready(()) => ReadStep::Ready(frame.finish(dispatch)),
+            ReadStep::Wait(wait) => {
+                frame.wait = Some(wait);
+                ReadStep::Wait(frame)
+            }
+        }
+    }
+
+    /// Hand the parked lowering its `delivery`, then request each planned
+    /// type's lowering in turn: `Done` keeps its node, `Wait` parks the
+    /// lowering at the read it requests.
+    fn advance(
+        &mut self,
+        dispatch: &impl FlowDemandDriver,
+        delivery: Option<ReadDelivery>,
+    ) -> ReadStep<()> {
+        let lowered = &mut self.lowered;
+        self.plan.with_dependent_mut(|plan, parked| {
+            if let Some(delivery) = delivery {
+                let lowering = parked
+                    .as_mut()
+                    .expect("a delivered read answers the parked lowering");
+                match dispatch.deliver_lowering(lowering, delivery) {
+                    ReadStep::Wait(wait) => return ReadStep::Wait(provenance_wait(wait)),
+                    ReadStep::Ready(node) => {
+                        *parked = None;
+                        lowered.push(node);
+                    }
+                }
+            }
+            while let Some(ty) = plan.lowerings().get(lowered.len()) {
+                match dispatch.request_owner_lowering(plan.owner_scope(), ty, plan.context()) {
+                    LowerStart::Done(node) => lowered.push(node),
+                    LowerStart::Wait(lowering, wait) => {
+                        *parked = Some(lowering);
+                        return ReadStep::Wait(provenance_wait(wait));
+                    }
+                }
+            }
+            ReadStep::Ready(())
+        })
+    }
+
+    /// The provenance the plan describes over its lowered nodes.
+    fn finish(
+        self: Box<Self>,
+        dispatch: &impl FlowDemandDriver,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
+        let Self { plan, lowered, .. } = *self;
+        dispatch.provenance_from(plan.into_owner(), &lowered)
+    }
+}
+
+/// A provenance lowering's read, attributed in test builds to the frame
+/// that requested it.
+#[cfg(any(test, feature = "test-support"))]
+fn provenance_wait(mut wait: ReadWait) -> ReadWait {
+    wait.origin = ReadOrigin::ArgumentProvenance;
+    wait
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn provenance_wait(wait: ReadWait) -> ReadWait {
+    wait
 }
 
 pub(super) struct IndexedArgumentFrame {
@@ -289,13 +400,18 @@ pub(super) enum HelperValue {
     Carrier(IdentityCarrierUnwrap),
     Truthiness(Box<TruthinessArms>),
     Indexed(Option<IndexedValue>),
+    Provenance(Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>),
 }
 
 impl HelperValue {
     pub(super) fn node(self) -> Option<SemanticNodeId> {
         match self {
             Self::Node(node) => node,
-            Self::List(_) | Self::Carrier(_) | Self::Truthiness(_) | Self::Indexed(_) => {
+            Self::List(_)
+            | Self::Carrier(_)
+            | Self::Truthiness(_)
+            | Self::Indexed(_)
+            | Self::Provenance(_) => {
                 unreachable!("a member path answers a node")
             }
         }
@@ -304,7 +420,11 @@ impl HelperValue {
     fn list(self) -> Option<Vec<SemanticNodeId>> {
         match self {
             Self::List(nodes) => nodes.map(|nodes| nodes.into_vec()),
-            Self::Node(_) | Self::Carrier(_) | Self::Truthiness(_) | Self::Indexed(_) => {
+            Self::Node(_)
+            | Self::Carrier(_)
+            | Self::Truthiness(_)
+            | Self::Indexed(_)
+            | Self::Provenance(_) => {
                 unreachable!("a signature list answers signature nodes")
             }
         }
@@ -313,7 +433,11 @@ impl HelperValue {
     fn carrier(self) -> IdentityCarrierUnwrap {
         match self {
             Self::Carrier(done) => done,
-            Self::Node(_) | Self::List(_) | Self::Truthiness(_) | Self::Indexed(_) => {
+            Self::Node(_)
+            | Self::List(_)
+            | Self::Truthiness(_)
+            | Self::Indexed(_)
+            | Self::Provenance(_) => {
                 unreachable!("a carrier walk answers its settled node")
             }
         }
@@ -322,7 +446,11 @@ impl HelperValue {
     fn truthiness(self) -> Box<TruthinessArms> {
         match self {
             Self::Truthiness(arms) => arms,
-            Self::Node(_) | Self::List(_) | Self::Carrier(_) | Self::Indexed(_) => {
+            Self::Node(_)
+            | Self::List(_)
+            | Self::Carrier(_)
+            | Self::Indexed(_)
+            | Self::Provenance(_) => {
                 unreachable!("a truthiness loop answers its surviving arms")
             }
         }
@@ -331,8 +459,27 @@ impl HelperValue {
     pub(super) fn indexed(self) -> Option<IndexedValue> {
         match self {
             Self::Indexed(value) => value,
-            Self::Node(_) | Self::List(_) | Self::Carrier(_) | Self::Truthiness(_) => {
+            Self::Node(_)
+            | Self::List(_)
+            | Self::Carrier(_)
+            | Self::Truthiness(_)
+            | Self::Provenance(_) => {
                 unreachable!("an indexed read answers an indexed value")
+            }
+        }
+    }
+
+    pub(super) fn provenance(
+        self,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
+        match self {
+            Self::Provenance(provenance) => provenance,
+            Self::Node(_)
+            | Self::List(_)
+            | Self::Carrier(_)
+            | Self::Truthiness(_)
+            | Self::Indexed(_) => {
+                unreachable!("a provenance frame answers its argument's provenance")
             }
         }
     }
@@ -351,6 +498,12 @@ pub(super) enum AfterHelper<'e> {
     IndexedArgument(
         Box<CallInFlight<'e>>,
         Box<call_stack::IndexedArgumentRead<'e>>,
+    ),
+    /// An argument whose literal provenance's planned lowerings request
+    /// their reads, with its call's route retained.
+    ArgumentProvenance(
+        Box<CallInFlight<'e>>,
+        Box<call_stack::ProvenanceArgumentRead<'e>>,
     ),
     /// A type leaf whose lowering waits: the lowered carrier then takes the
     /// leaf's closed-utility read.
@@ -392,6 +545,12 @@ impl<'e> HelperRun<'e> {
         }
     }
 
+    pub(super) fn argument_provenance(frame: Box<ProvenanceFrame>) -> Self {
+        Self {
+            frames: vec![HelperFrame::Provenance(frame)],
+        }
+    }
+
     fn at(frame: MemberPathFrame<'e>) -> Self {
         Self {
             frames: vec![HelperFrame::MemberPath(frame)],
@@ -412,6 +571,18 @@ impl<'e> HelperWait<'e> {
         Self {
             run,
             then: AfterHelper::IndexedArgument(flight, argument),
+            wait: None,
+        }
+    }
+
+    pub(super) fn argument_provenance(
+        flight: Box<CallInFlight<'e>>,
+        mut argument: Box<call_stack::ProvenanceArgumentRead<'e>>,
+    ) -> Self {
+        let run = HelperRun::argument_provenance(argument.take_frame());
+        Self {
+            run,
+            then: AfterHelper::ArgumentProvenance(flight, argument),
             wait: None,
         }
     }
@@ -484,6 +655,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                     | HelperFrame::Carrier(_)
                     | HelperFrame::Indexed(_)
                     | HelperFrame::Lower(_)
+                    | HelperFrame::Provenance(_)
             )
         ) {
             None
@@ -583,6 +755,21 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                         ReadStep::Ready(value) => ReadStep::Ready(HelperValue::Indexed(value)),
                         ReadStep::Wait(wait) => {
                             run.frames.push(HelperFrame::Indexed(frame));
+                            ReadStep::Wait(wait)
+                        }
+                    };
+                }
+                HelperFrame::Provenance(mut frame) => {
+                    let step = match frame.wait.take() {
+                        Some(wait) => ReadStep::Wait(wait),
+                        None => frame.advance(self.dispatch, delivered.take()),
+                    };
+                    return match step {
+                        ReadStep::Ready(()) => {
+                            ReadStep::Ready(HelperValue::Provenance(frame.finish(self.dispatch)))
+                        }
+                        ReadStep::Wait(wait) => {
+                            run.frames.push(HelperFrame::Provenance(frame));
                             ReadStep::Wait(wait)
                         }
                     };
@@ -890,6 +1077,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         match then {
             AfterHelper::IndexedArgument(flight, argument) => {
                 let progress = self.deliver_indexed_call_argument(argument, value.indexed());
+                let step = self.continue_call_route(flight, progress);
+                self.call_step_on_run(run, step, suspend)
+            }
+            AfterHelper::ArgumentProvenance(flight, argument) => {
+                let progress = self.deliver_argument_provenance(argument, value.provenance());
                 let step = self.continue_call_route(flight, progress);
                 self.call_step_on_run(run, step, suspend)
             }
