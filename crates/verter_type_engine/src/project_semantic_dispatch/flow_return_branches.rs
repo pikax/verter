@@ -553,7 +553,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// comparing keys: lowered and projected leaves may use different arenas.
     /// Enum units and broad leaves retain the relation-based path.
     fn switch_unit_key(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+        let concrete = match self.settle_carrier(node) {
             IdentityCarrierUnwrap::Concrete(node) => node,
             IdentityCarrierUnwrap::Unresolvable => return None,
         };

@@ -519,7 +519,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         if self.is_any(parent) {
             return Some(parent);
         }
-        let parent = self.dispatch.resolved_reduction_view(parent);
+        let parent = self.reduction_view(parent);
         let arms = self
             .dispatch
             .union_arms_of(parent)
@@ -527,7 +527,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         let graph = self.dispatch.graph();
         let mut values = Vec::with_capacity(arms.len());
         for arm in arms {
-            let arm = self.dispatch.resolved_reduction_view(arm);
+            let arm = self.reduction_view(arm);
             let data = graph.node_data(arm);
             let value = match data.as_deref()? {
                 SemanticNodeData::Primitive(PrimitiveKind::String)
@@ -571,7 +571,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         if self.is_any(parent) {
             return Some(parent);
         }
-        let parent = self.dispatch.resolved_reduction_view(parent);
+        let parent = self.reduction_view(parent);
         if let Some(arms) = self.dispatch.union_arms_of(parent) {
             let arms = arms.to_vec();
             let mut rests = Vec::with_capacity(arms.len());
@@ -730,7 +730,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
             )],
         )?;
         let result = self.lone_call_return(next)?;
-        let result = self.dispatch.resolved_reduction_view(result);
+        let result = self.reduction_view(result);
         let arms = self
             .dispatch
             .union_arms_of(result)
@@ -739,7 +739,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         let false_node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(false)));
         let mut values = Vec::new();
         for arm in arms {
-            let arm = self.dispatch.resolved_reduction_view(arm);
+            let arm = self.reduction_view(arm);
             // A constituent with no `done` is a yield result (`done`
             // defaults to `false`).
             let yields = match self.present_member(

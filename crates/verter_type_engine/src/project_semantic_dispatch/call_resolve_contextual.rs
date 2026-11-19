@@ -237,12 +237,15 @@ const _: () =
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Type properties that produce a marker's receiver binders before the
-    /// properties consuming them. Source order breaks ties and cycles.
+    /// properties consuming them. Source order breaks ties and cycles. An
+    /// applied or named declaration a property's type reaches is read
+    /// through `view`, the contextual view its caller reads it as.
     pub(in crate::project_semantic_dispatch) fn contextual_object_order(
         &self,
         state: &ContextualCallState,
         names: &[Option<Arc<str>>],
         canonical: &str,
+        view: &dyn Fn(SemanticNodeId) -> SemanticNodeId,
     ) -> Vec<usize> {
         let source_order = || (0..names.len()).collect::<Vec<_>>();
         let Some(progress) = state.active.as_ref() else {
@@ -306,7 +309,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     &*data,
                     SemanticNodeData::InstantiationRef { .. } | SemanticNodeData::DeclRef { .. }
                 ) {
-                    let resolved = self.contextual_carrier_view(node);
+                    let resolved = view(node);
                     if resolved != node {
                         pending.push(resolved);
                         continue;
@@ -361,11 +364,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// A checked property advances the suspended call's own collector. The
     /// collector is installed only for inference, never while a body runs.
+    /// The deferred target is read through `view`, the reduction view its
+    /// caller reads it as, with the collector installed.
     pub(in crate::project_semantic_dispatch) fn contextual_object_member(
         &self,
         state: &mut ContextualCallState,
         name: &str,
         value: Option<SemanticNodeId>,
+        view: &dyn Fn(SemanticNodeId) -> SemanticNodeId,
     ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
         let Some(progress) = state.active.as_mut() else {
             return Ok(None);
@@ -380,7 +386,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.restore_collecting_session(&mut progress.session);
         let mut budget = CallResolutionBudget::new(&self.connected_demand);
         let result = (|| {
-            let target = self.resolved_reduction_view(target);
+            let target = view(target);
             let surface = self
                 .resolve_typeinfo_surface_view(
                     target,

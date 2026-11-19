@@ -560,7 +560,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         parent: SemanticNodeId,
         property: &Arc<str>,
     ) -> Option<bool> {
-        let view = self.dispatch.resolved_reduction_view(parent);
+        let view = self.reduction_view(parent);
         let Some(arms) = self.dispatch.union_arms_of(view) else {
             return Some(false);
         };
@@ -594,7 +594,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// Whether a destructuring parent is a union the checker correlates
     /// over (through a type parameter's constraint).
     fn parent_union_verdict(&mut self, parent: SemanticNodeId) -> ParentUnion {
-        let view = self.dispatch.resolved_reduction_view(parent);
+        let view = self.reduction_view(parent);
         if self
             .dispatch
             .union_arms_of(view)
