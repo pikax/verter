@@ -3061,12 +3061,10 @@ defineProps<AvatarProps>()
     const heightProp = avatarMeta.props.find((prop) => prop.name === "height");
 
     expect(asProp).toBeDefined();
-    expect(asProp!.type).toContain("any");
-    expect(asProp!.type).toContain("undefined");
-    expect(asProp!.schema).toMatchObject({ kind: "enum" });
-    const asEntries = (asProp!.schema as { schema: unknown[] }).schema;
-    expect(asEntries[0]).toBe("any");
-    expect(asEntries.at(-1)).toBe("undefined");
+    // `any | { root?: any, img?: any }` reaches compat as exactly `any`, and
+    // an optional `any` member stays `any` (`any | undefined` is `any`).
+    expect(asProp!.type).toBe("any");
+    expect(asProp!.schema).toBe("any");
 
     expect(chipProp).toBeDefined();
     expect(typeof chipProp!.schema).not.toBe("string");
