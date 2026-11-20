@@ -422,7 +422,7 @@ pub fn capture_binder_plan(
         binder_names: &binder_names,
     };
 
-    let slices = match (setup_program, setup) {
+    let mut slices = match (setup_program, setup) {
         (Some(program), Some(block)) => capture_slices(
             program,
             block,
@@ -442,7 +442,6 @@ pub fn capture_binder_plan(
         .enumerate()
         .map(|(position, entry)| (entry.index, position))
         .collect();
-    let mut slices = slices;
     let mut lifted = assign_binder_names(
         lifted,
         &declarations,
