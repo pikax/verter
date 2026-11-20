@@ -109,9 +109,19 @@ reduction view. The contextual call's object wrappers in
 `call_resolve_contextual.rs` (`contextual_object_order`,
 `contextual_object_member`) take that view from their flow caller. The flow
 driver exposes no direct relation unwrap, reduction view or contextual view,
-so a flow body cannot settle a carrier wrapper in place. Dispatcher algebra
-the body calls as one operation (intersection distribution, supertype
-reduction) still unwraps inside that operation.
+so a flow body cannot settle a carrier wrapper in place.
+
+Dispatcher algebra the body calls as one operation takes the walk it reads
+carriers through as a parameter (`CarrierSettle` in `relation.rs`) and reads
+through no other: intersection distribution (`distribute_intersection` →
+`intersection_parts`' object-type check), supertype reduction
+(`reduce_arms_to_supertypes`, `subtype_reduced_union`,
+`finalize_evolving_array`: the reduction views, `unit_typed_properties` and
+`may_be_below_a_primitive`). The flow evaluator passes its requested walk
+(`settle_carrier`, and the frame algebra's `DispatchFlowAlgebra::settle` for
+product joins), so those reads are attributed as `read_in_place / carrier`;
+a dispatcher caller outside a flow frame passes the dispatcher's own
+`unwrap_identity_carrier_for_relation`.
 
 An unsettled composite is named in the current signature epoch. If that epoch
 retires while its result request waits, the producer refuses the retired handle

@@ -15945,6 +15945,14 @@ pub enum IdentityCarrierUnwrap {
     Unresolvable,
 }
 
+/// How an algebra operation reads an identity carrier it looks through: a
+/// flow body passes the walk it requests, each read answered inside the
+/// walk's stage; a caller outside a flow frame passes the dispatcher's own
+/// walk ([`ProjectSemanticDispatch::unwrap_identity_carrier_for_relation`]).
+/// An operation that takes one reads every carrier through it and through
+/// no other walk.
+pub type CarrierSettle<'a> = &'a dyn Fn(SemanticNodeId) -> IdentityCarrierUnwrap;
+
 /// A point an identity-carrier walk reached: the node, and how many
 /// declaration instantiations, each nested in the one before, the walk took
 /// to reach it.

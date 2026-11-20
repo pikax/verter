@@ -5390,6 +5390,85 @@ fn a_guard_enumerating_carrier_arms_records_each_read_in_its_own_proof() {
     }
 }
 
+const CARRIER_KINDS_FILE: &str = "/semantic-task/carrier-kinds.ts";
+const CARRIER_KINDS: &str = "export interface KindA { kind: \"a\"; }\n\
+export interface KindB { kind: \"b\"; }\n\
+export type Either = KindA | KindB;\n";
+const CARRIER_ALGEBRA_FILE: &str = "/semantic-task/carrier-algebra.ts";
+const CARRIER_ALGEBRA_BODY: &str = r#"
+import type { Either, KindA, KindB } from "./carrier-kinds";
+function isKindA(value: unknown): value is KindA { return true as boolean as never; }
+export function distributed(value: null | undefined) {
+    if (isKindA(value)) return value;
+    return 0;
+}
+export function reduced(a: KindA, b: KindB) {
+    return [a, b];
+}
+export function primitive(either: Either, text: string) {
+    return [either, text];
+}
+"#;
+
+/// An algebra operation the flow body calls as one step reads every
+/// identity carrier it looks through as a request answered in place, never
+/// through the dispatcher's direct walk: the body's reads under the
+/// operation's own site are none, and the carriers' reads stand at the
+/// carrier walk. Each body reaches its operation with interface carriers
+/// declared in another file and only shortcuts that need no relation:
+///
+/// - `distributed`: a type predicate over `null | undefined` distributes
+///   its intersection with `KindA`, each pair collapsing because `KindA`,
+///   read through its carrier, is an object type;
+/// - `reduced`: the array literal's element union reduces `KindA` beside
+///   `KindB`, each view and its unit-typed `kind` read through its
+///   carrier, the different discriminants keeping both;
+/// - `primitive`: the reduction of `Either` beside `string` asks whether
+///   `Either` may be below a primitive, reading each member of the union it
+///   names through its carrier.
+#[test]
+fn an_algebra_operation_reads_its_carriers_as_requests_not_in_place() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
+    for (name, site) in [
+        ("distributed", "distribute_intersection"),
+        ("reduced", "reduce_arms_to_supertypes"),
+        ("primitive", "reduce_arms_to_supertypes"),
+    ] {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CARRIER_KINDS_FILE,
+            CARRIER_KINDS,
+            crate::FileLanguage::script_ts(),
+        );
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CARRIER_ALGEBRA_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(CARRIER_ALGEBRA_BODY),
+            crate::FileLanguage::script_ts(),
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let key = root_return_key(&dispatch, CARRIER_ALGEBRA_FILE, name);
+        let _ = body_reads::take();
+        let read = dispatch.execute_via_cold_build_helper(key);
+        let rows = body_reads::take();
+        assert!(
+            !read.result_is_partial() && read.partial_reasons().is_empty(),
+            "{name}: the body reads with complete evidence: {read:?}"
+        );
+        assert!(
+            rows.iter().any(|((stage, site, _), count)| {
+                *stage == Some("read_in_place") && *site == "carrier" && *count > 0
+            }),
+            "{name}: the operation's carriers were requested and read: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|((_, read_site, _), _)| *read_site != site),
+            "{name}: {site} reads no carrier through the dispatcher's direct walk: {rows:?}"
+        );
+    }
+}
+
 /// A module-level promise's awaited operand, read on a fresh host. The
 /// return expression keeps its `Awaited` slice form, so the expression run
 /// requests normalization after the operand's value reaches its waiting pop.

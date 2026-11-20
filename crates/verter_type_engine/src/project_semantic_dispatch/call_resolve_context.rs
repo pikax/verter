@@ -1224,13 +1224,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let is_any = |node: SemanticNodeId| {
             matches!(
                 graph
-                    .node_data(self.resolved_reduction_view(node))
+                    .node_data(self.resolved_reduction_view(node, &|node| {
+                        self.unwrap_identity_carrier_for_relation(node)
+                    }))
                     .as_deref(),
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
             )
         };
         let members = |node: SemanticNodeId| match graph
-            .node_data(self.resolved_reduction_view(node))
+            .node_data(self.resolved_reduction_view(node, &|node| {
+                self.unwrap_identity_carrier_for_relation(node)
+            }))
             .as_deref()
         {
             Some(SemanticNodeData::Object(surface)) => Some(
@@ -1258,7 +1262,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
                 continue;
             }
-            let resolved = self.resolved_reduction_view(target);
+            let resolved = self.resolved_reduction_view(target, &|node| {
+                self.unwrap_identity_carrier_for_relation(node)
+            });
             let data = graph.node_data(resolved);
             match data.as_deref() {
                 Some(
@@ -1323,7 +1329,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         visited: &mut FxHashSet<SemanticNodeId>,
     ) -> Vec<SemanticNodeId> {
         let graph = self.graph();
-        let contextual = self.resolved_reduction_view(contextual);
+        let contextual = self.resolved_reduction_view(contextual, &|node| {
+            self.unwrap_identity_carrier_for_relation(node)
+        });
         let data = graph.node_data(contextual);
         let surface = match data.as_deref() {
             Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
@@ -1491,7 +1499,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         sources: &mut Vec<ElementContextSource>,
     ) {
         let graph = self.graph();
-        let contextual = self.resolved_reduction_view(contextual);
+        let contextual = self.resolved_reduction_view(contextual, &|node| {
+            self.unwrap_identity_carrier_for_relation(node)
+        });
         let Some(data) = graph.node_data(contextual) else {
             return;
         };
@@ -1597,7 +1607,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> LiteralContext {
         let graph = self.graph();
         let authored = contextual;
-        let contextual = self.resolved_reduction_view(contextual);
+        let contextual = self.resolved_reduction_view(contextual, &|node| {
+            self.unwrap_identity_carrier_for_relation(node)
+        });
         if !visited.insert(contextual) {
             return LiteralContext::Widen;
         }
@@ -1686,7 +1698,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let mut pending = vec![constraint];
         let mut seen = FxHashSet::default();
         while let Some(node) = pending.pop() {
-            let node = self.resolved_reduction_view(node);
+            let node = self.resolved_reduction_view(node, &|node| {
+                self.unwrap_identity_carrier_for_relation(node)
+            });
             if !seen.insert(node) {
                 continue;
             }
@@ -1723,7 +1737,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     drop(data);
                     if matches!(
                         graph
-                            .node_data(self.resolved_reduction_view(base))
+                            .node_data(self.resolved_reduction_view(base, &|node| {
+                                self.unwrap_identity_carrier_for_relation(node)
+                            }))
                             .as_deref(),
                         Some(SemanticNodeData::TypeParam { .. })
                     ) {
