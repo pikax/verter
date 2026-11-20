@@ -5,7 +5,6 @@ use oxc_allocator::Allocator;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_audit::observe::Uncaptured;
 use verter_language::ScriptRegionKind;
-use verter_parser::diagnostics::DiagnosticSeverity;
 use verter_parser::types::BindingType;
 use verter_span::{GeneratedByteLen, SourceByteOffset, SourceByteRange, Span};
 
@@ -759,7 +758,7 @@ fn compose_template_scope(
     let error_spans: Vec<Span> = parsed
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+        .filter(|diagnostic| diagnostic.breaks_template_structure())
         .map(|diagnostic| diagnostic.span)
         .collect();
     let topology = build_template_topology(
