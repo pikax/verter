@@ -1279,12 +1279,16 @@ mod declaration_output {
         let dist = f.dir.path().join("dist/src");
         let carrier = std::fs::read_to_string(dist.join("A.vue.d.ts"))
             .unwrap_or_else(|_| panic!("{:?}", files_under(&f.dir.path().join("dist"))));
+        // The engine prints the declaration; its line layout is not the
+        // contract, the exported and local declarations are.
+        let printed = carrier.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            carrier.contains("export interface Row { id: string; cell: Cell }"),
+            printed.contains("export interface Row { id: string; cell: Cell; }"),
             "{carrier}"
         );
         assert!(
-            carrier.contains("interface Cell { text: string }"),
+            printed.contains("interface Cell { text: string; }")
+                && !printed.contains("export interface Cell"),
             "{carrier}"
         );
         let root = std::fs::read_to_string(dist.join("c.d.ts"))
