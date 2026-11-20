@@ -191,8 +191,9 @@ extends pattern declared, and the false branch's out-of-scope environment.
   `ReadShape::Staged`: the root read or the in-place answerer hands it back
   unread, and `FlowReadDriver::deliver_lowering` makes it inside the
   delivery closure (`read_staged`), as `deliver_carrier` does for a carrier
-  walk. So its partiality and reuse evidence land in the decision
-  operation's observation, never in the flow evaluation around it — an
+  walk. So its dependency facts are observed while the decision
+  operation's observation is on top, and its partiality and reuse evidence
+  land in that observation, never in the flow evaluation around it — an
   operand preparation left incomplete by an unreadable arm then reaches
   the written-arm proof, and the unused operand contributes only its reuse
   evidence. A node or whole lowering read keeps its take-once answer.
