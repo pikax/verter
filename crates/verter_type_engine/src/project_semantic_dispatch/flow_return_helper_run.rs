@@ -205,7 +205,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// that suspends at each read the lowering waits on, its root read
     /// answering the request, or as one that answers each at once. The
     /// flow drivers keep the connected demand open for the lowering's
-    /// extent, as a suspending holder does.
+    /// extent, as a suspending holder does. The `*Ahead` flow drivers
+    /// request each read a held conditional decision makes as a whole
+    /// answer, answered ahead of the decision and taken once.
     pub fn observed_owner_lowering_for_tests(
         &self,
         canonical: &str,
@@ -214,6 +216,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         driver: super::super::lower::OwnerLoweringDriverForTests,
     ) -> super::super::lower::ObservedOwnerLoweringForTests {
         use super::super::lower::OwnerLoweringDriverForTests as Driver;
+        let (in_place, ahead) = match driver {
+            Driver::Native | Driver::FlowRequested => (false, false),
+            Driver::FlowInPlace => (true, false),
+            Driver::FlowRequestedAhead => (false, true),
+            Driver::FlowInPlaceAhead => (true, true),
+        };
         let ((node, completeness), decision_reads) =
             super::super::lower::record_decision_reads_for_tests(|| {
                 let enclosing = ProjectSemanticDispatch::observe_read(self, || {
@@ -223,33 +231,35 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             .expect("an owner-scope lowering yields a node");
                     }
                     let _demand = self.enter_connected_demand(false).0;
-                    let start = FlowReadDriver::request_owner_lowering(
-                        self,
-                        (
-                            canonical,
-                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        ),
-                        expr,
-                        context,
-                    );
-                    if driver == Driver::FlowInPlace {
-                        return lowering_in_place(self, canonical, start);
-                    }
-                    match start {
-                        LowerStart::Done(node) => node,
-                        LowerStart::Wait(mut lowering, wait) => settle_now(
-                            ReadStep::Wait(wait),
-                            |wait| FlowReadDriver::answer_read(self, wait, canonical),
-                            |delivery| {
-                                FlowReadDriver::deliver_lowering(
-                                    self,
-                                    &mut lowering,
-                                    delivery,
-                                    canonical,
-                                )
-                            },
-                        ),
-                    }
+                    super::super::lower::answer_decision_reads_ahead_for_tests(ahead, || {
+                        let start = FlowReadDriver::request_owner_lowering(
+                            self,
+                            (
+                                canonical,
+                                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            ),
+                            expr,
+                            context,
+                        );
+                        if in_place {
+                            return lowering_in_place(self, canonical, start);
+                        }
+                        match start {
+                            LowerStart::Done(node) => node,
+                            LowerStart::Wait(mut lowering, wait) => settle_now(
+                                ReadStep::Wait(wait),
+                                |wait| FlowReadDriver::answer_read(self, wait, canonical),
+                                |delivery| {
+                                    FlowReadDriver::deliver_lowering(
+                                        self,
+                                        &mut lowering,
+                                        delivery,
+                                        canonical,
+                                    )
+                                },
+                            ),
+                        }
+                    })
                 });
                 let completeness = enclosing.result_completeness();
                 let node = enclosing

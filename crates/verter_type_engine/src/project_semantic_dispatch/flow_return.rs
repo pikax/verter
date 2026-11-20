@@ -3059,7 +3059,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// ([`FlowReadDriver::deliver_lowering`]).
     fn lowering_wait(&self, request: super::lower::LowerRead) -> ReadWait {
         let shape = match request.shape {
-            super::lower::LowerReadShape::Whole if request.made_in_operation => ReadShape::Staged,
+            super::lower::LowerReadShape::Whole if request.staged_in_operation() => {
+                ReadShape::Staged
+            }
             super::lower::LowerReadShape::Node => {
                 verter_debug_assert!(
                     !request.made_in_operation,
