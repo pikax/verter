@@ -194,6 +194,11 @@ pub fn guard2_allowlist() -> BTreeSet<String> {
         // and must not be cached by NativeFs. D14 carries the full
         // per-callsite rationale.
         "crates/verter_tsgo_api/src/process.rs",
+        // Process-tree CPU accounting — `/proc` listing plus each
+        // `/proc/<pid>/stat` on Linux, volatile kernel process metadata
+        // summed into a child tree's CPU time. Not workspace/semantic input
+        // and must not be cached by NativeFs. D14 carries the full rationale.
+        "crates/verter_tsgo_api/src/process/tree_cpu.rs",
         // Relay-shim rendezvous advertisement — the IPC file a shim
         // writes on startup so a `verter_lsp` control client can DISCOVER
         // it (create_dir_all / write / read / read_dir / remove). An IPC
@@ -1292,6 +1297,10 @@ pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
         (
             "crates/verter_tsgo_api/src/process.rs",
             "Linux process-liveness probe — reads the kernel-synthesised `/proc/<pid>/stat` state so an exited zombie is not mistaken for a live engine/client merely because `kill(pid, 0)` still finds its unreaped pid. Process lifecycle metadata, not workspace, semantic, overlay, or VFS state; routing it through NativeFs would incorrectly cache a per-process state transition.",
+        ),
+        (
+            "crates/verter_tsgo_api/src/process/tree_cpu.rs",
+            "Linux process-tree CPU accounting — lists `/proc` and reads each kernel-synthesised `/proc/<pid>/stat` to sum the user+system CPU time of a spawned child's process tree (parentage, group and reaped-children counters). Process accounting metadata that changes every scheduler tick, not workspace, semantic, overlay, or VFS state; routing it through NativeFs would cache a value that is stale by the next read.",
         ),
         (
             "crates/verter_type_runtime/src/discovery.rs",
