@@ -611,14 +611,16 @@ enum Contract {
     /// slot templates beside default content leave it its own roots, and the
     /// slots, dynamic slot order and refs are Vue's.
     SlotRoots,
-    /// Dynamic attribute, class and style setters pass Vue's arguments,
-    /// including the trailing SVG flag.
+    /// Dynamic attribute, property, class, style, content and spread setters
+    /// are the ones Vue calls, with its arguments, including the trailing
+    /// SVG flag.
     Setters,
-    /// Each static template is parsed in the namespace Vue declares for it.
+    /// Each static template is parsed in the namespace Vue declares for it,
+    /// and its elements' setters are the ones Vue calls for that namespace.
     TemplateNamespaces,
 }
 
-const CASES: [(&str, Contract); 21] = [
+const CASES: [(&str, Contract); 23] = [
     ("generated-local-container", Contract::GeneratedLocals),
     ("setup-read-loop-key", Contract::LoopKeys),
     ("component-asset-repeat", Contract::ComponentAssets),
@@ -636,7 +638,9 @@ const CASES: [(&str, Contract); 21] = [
     ("text-runs-beside-elements", Contract::Templates),
     ("multi-root-slot-body", Contract::Templates),
     ("svg-attributes", Contract::Setters),
+    ("svg-dynamic-props", Contract::Setters),
     ("template-namespace", Contract::TemplateNamespaces),
+    ("svg-fragment-namespace", Contract::TemplateNamespaces),
     ("insertion-anchor-whitespace", Contract::Templates),
     ("forced-multi-root", Contract::Templates),
     ("conditional-slot-template", Contract::ComponentSlots),
@@ -666,13 +670,16 @@ fn component_slots_difference(ours: &ModuleFacts, vue: &ModuleFacts) -> Option<S
 
 /// Setter calls with every argument after the node, in a stable order.
 fn setters(facts: &ModuleFacts) -> Vec<(String, Vec<String>)> {
-    const SETTERS: [&str; 6] = [
+    const SETTERS: [&str; 9] = [
         "setAttr",
         "setProp",
         "setClass",
         "setStyle",
         "setDOMProp",
         "setValue",
+        "setHtml",
+        "setElementText",
+        "setDynamicProps",
     ];
     let mut calls: Vec<_> = facts
         .calls
@@ -838,13 +845,21 @@ fn contract_difference(
                     .any(|(_, namespace)| !namespace.is_empty()),
                 "oracle namespace inventory"
             );
-            (template_namespaces(ours) != template_namespaces(vue)).then(|| {
-                format!(
+            if template_namespaces(ours) != template_namespaces(vue) {
+                Some(format!(
                     "template namespaces {:?} against {:?}",
                     template_namespaces(ours),
                     template_namespaces(vue)
-                )
-            })
+                ))
+            } else if setters(ours) != setters(vue) {
+                Some(format!(
+                    "setters {:?} against {:?}",
+                    setters(ours),
+                    setters(vue)
+                ))
+            } else {
+                None
+            }
         }
     }
 }

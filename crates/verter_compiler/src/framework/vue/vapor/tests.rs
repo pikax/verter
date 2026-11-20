@@ -356,3 +356,28 @@ fn function_scoped_source_vars_stay_local_across_blocks() {
     let output = super::test_support::render(source);
     assert!(output.code.contains("return values"), "{}", output.code);
 }
+
+#[test]
+fn a_root_v_once_or_v_memo_covers_text_runs_beside_elements() {
+    // Vue 3.6.0-rc.15: a text run beside an element is its own node, and its
+    // text effect is still one of the block's, frozen by `v-once`.
+    let once =
+        super::test_support::render("<template><div v-once>{{ a }}<p/>{{ b }}</div></template>");
+    for expected in [
+        "_setText(n0, _toDisplayString(_ctx.a))",
+        "_setText(n1, _toDisplayString(_ctx.b))",
+    ] {
+        assert!(once.code.contains(expected), "{expected}\n{}", once.code);
+    }
+    assert!(!once.code.contains("_renderEffect("), "{}", once.code);
+    let memo = super::test_support::render(
+        "<template><div v-memo=\"[x]\">{{ a }}<p/>{{ b }}</div></template>",
+    );
+    assert!(memo.code.contains("_withMemo([x]"), "{}", memo.code);
+    assert_eq!(
+        memo.code.matches("_renderEffect(").count(),
+        1,
+        "{}",
+        memo.code
+    );
+}

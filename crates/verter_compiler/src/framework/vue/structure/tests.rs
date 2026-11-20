@@ -347,6 +347,27 @@ fn a_namespace_reaches_every_descendant_until_an_integration_point() {
     assert!(flags("<mi").has(VueNodeFlags::MATHML_NAMESPACE));
 }
 
+#[test]
+fn an_svg_or_mathml_tag_starts_its_namespace_without_an_ancestor() {
+    // Slot content for an icon component, or a component whose root is an
+    // SVG fragment, has no `<svg>` in the file; Vue still parses it as SVG.
+    let f = Fixture::new(
+        "<Icon><path/></Icon><g class=\"axis\"><line/><foreignObject><p/><title/></foreignObject></g><mo/><a/>",
+    );
+    let (t, s) = f.build();
+    let flags = |text: &str| s.facts(at(&f, &t, &s, text)).flags;
+    assert!(!flags("<Icon").has(VueNodeFlags::SVG_NAMESPACE));
+    assert!(flags("<path").has(VueNodeFlags::SVG_NAMESPACE));
+    assert!(flags("<g").has(VueNodeFlags::SVG_NAMESPACE));
+    assert!(flags("<line").has(VueNodeFlags::SVG_NAMESPACE));
+    assert!(!flags("<p/>").has(VueNodeFlags::SVG_NAMESPACE));
+    // An SVG tag below an integration point starts SVG again.
+    assert!(flags("<title").has(VueNodeFlags::SVG_NAMESPACE));
+    assert!(flags("<mo").has(VueNodeFlags::MATHML_NAMESPACE));
+    // `a` is an HTML tag first: only an SVG ancestor makes it SVG.
+    assert!(!flags("<a/>").has(VueNodeFlags::SVG_NAMESPACE));
+}
+
 // ── walk ────────────────────────────────────────────────────────
 
 struct Recorder {
