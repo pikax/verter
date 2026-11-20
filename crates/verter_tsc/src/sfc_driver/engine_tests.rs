@@ -1929,9 +1929,11 @@ defineProps<{ flag?: boolean }>();
         "Parent.vue",
         r#"<script setup lang="ts">
 import Child from './Child.vue';
+const attrs = { flag: false };
 </script>
 <template>
   <Child flag />
+  <Child v-bind="attrs" flag />
   <Child flag="x" />
   <input required>
 </template>
@@ -1940,7 +1942,8 @@ import Child from './Child.vue';
     let outcome = f.run();
     assert_eq!(outcome.carriers_checked, 2);
     // As in vue-tsc, a bare attribute is `true`, which a boolean prop and a
-    // boolean native attribute accept; a written value stays a string.
+    // boolean native attribute accept, also beside an object spread; a
+    // written value stays a string.
     let diagnostics = outcome_diagnostics(&outcome);
     let rows: Vec<(String, u32, u32)> = diagnostics
         .iter()
@@ -1955,7 +1958,7 @@ import Child from './Child.vue';
         .collect();
     assert_eq!(
         rows,
-        vec![("Parent.vue".to_owned(), 2322, 6)],
+        vec![("Parent.vue".to_owned(), 2322, 8)],
         "{diagnostics:?}"
     );
 }

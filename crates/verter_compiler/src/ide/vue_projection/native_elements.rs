@@ -282,10 +282,7 @@ fn attribute_statement(
                     },
                 );
             } else {
-                // A bare attribute (`<input required>`) checks as `true`, as
-                // vue-tsc writes it; a written value, even `required=""`,
-                // stays its string.
-                fragment.push_synth("true");
+                fragment.push_synth("\"\"");
             }
         }
         AttributeOpKind::Bound | AttributeOpKind::VOn => {
