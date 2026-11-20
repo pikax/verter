@@ -4453,6 +4453,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> FlowReturnResult {
         use verter_session_query::flow::skeleton::FunctionBodyKind;
         if kind == FunctionBodyKind::Plain {
@@ -4460,7 +4461,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let (yield_join, undecided) = match kind {
             FunctionBodyKind::Generator | FunctionBodyKind::AsyncGenerator => {
-                self.join_yield_contributions(yield_contributions, nullability)
+                self.join_yield_contributions(yield_contributions, nullability, settle)
             }
             FunctionBodyKind::Async | FunctionBodyKind::Plain => (None, false),
         };
@@ -4514,6 +4515,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         contributions: &[YieldContribution],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> (Option<SemanticNodeId>, bool) {
         if contributions.is_empty() {
             return (None, false);
@@ -4549,9 +4551,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // join's is (`getUnionType(yieldTypes, UnionReduction.Subtype)`).
         let mut undecided = false;
         if arms.len() >= 2 {
-            match self.reduce_arms_to_supertypes(&arms, nullability, &|node| {
-                self.unwrap_identity_carrier_for_relation(node)
-            }) {
+            match self.reduce_arms_to_supertypes(&arms, nullability, settle) {
                 ReunionReduction::Reduced(reduced) => arms = reduced,
                 ReunionReduction::Undecided => undecided = true,
             }
@@ -7873,6 +7873,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             degradation,
             ir.empty_completion,
             key.context.policy.nullability,
+            &|node| carrier_in_place(self, canonical, node),
         ) {
             Ok(joined) => {
                 // Attach the function-kind wrap to the BODY join — deferred
@@ -7902,6 +7903,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         &yield_contributions,
                         &binder_env,
                         key.context.policy.nullability,
+                        &|node| carrier_in_place(self, canonical, node),
                     )
                 } else {
                     result
@@ -8869,6 +8871,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         empty_completion: verter_session_query::flow::slice::EmptyCompletion,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         let graph = self.graph();
         // `strictNullChecks` off: a nullable contribution adds nothing to
@@ -9129,9 +9132,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .map_or(ReductionArm::plain(*arm), |contribution| contribution.arm)
                 })
                 .collect();
-            match self.reduce_arms_to_supertypes(&reduction_arms, nullability, &|node| {
-                self.unwrap_identity_carrier_for_relation(node)
-            }) {
+            match self.reduce_arms_to_supertypes(&reduction_arms, nullability, settle) {
                 ReunionReduction::Reduced(reduced) => {
                     arms = reduced.iter().map(|arm| arm.node).collect();
                 }
@@ -11377,6 +11378,7 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> FlowReturnResult;
     fn attach_inferred_predicate(
         &self,
@@ -11521,6 +11523,7 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         empty_completion: verter_session_query::flow::slice::EmptyCompletion,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure>;
     fn lower_lib_global(
         &self,
@@ -12321,6 +12324,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> FlowReturnResult {
         body_read_site!("attach_function_kind_wrap");
         ProjectSemanticDispatch::attach_function_kind_wrap(
@@ -12330,6 +12334,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             yield_contributions,
             binder_env,
             nullability,
+            settle,
         )
     }
     fn attach_inferred_predicate(
@@ -12584,6 +12589,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         empty_completion: verter_session_query::flow::slice::EmptyCompletion,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         body_read_site!("join_flow_return_contributors");
         ProjectSemanticDispatch::join_flow_return_contributors(
@@ -12595,6 +12601,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             degradation,
             empty_completion,
             nullability,
+            settle,
         )
     }
     fn lower_lib_global(
@@ -13421,6 +13428,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> FlowReturnResult {
         self.driver.attach_function_kind_wrap(
             result,
@@ -13428,6 +13436,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
             yield_contributions,
             binder_env,
             nullability,
+            settle,
         )
     }
     fn attach_inferred_predicate(
@@ -13639,6 +13648,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         empty_completion: verter_session_query::flow::slice::EmptyCompletion,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         self.driver.join_flow_return_contributors(
             contributors,
@@ -13648,6 +13658,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
             degradation,
             empty_completion,
             nullability,
+            settle,
         )
     }
     fn lower_lib_global(

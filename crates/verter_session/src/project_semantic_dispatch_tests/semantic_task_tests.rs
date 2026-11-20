@@ -5301,6 +5301,18 @@ export function reduced(a: KindA, b: KindB) {
 export function primitive(either: Either, text: string) {
     return [either, text];
 }
+export function nestedReturn(a: KindA, b: KindB, c: boolean) {
+    return () => {
+        if (c) return a;
+        return b;
+    };
+}
+export function nestedYield(a: KindA, b: KindB) {
+    return function* () {
+        yield a;
+        yield b;
+    };
+}
 "#;
 
 /// An algebra operation the flow body calls as one step reads every
@@ -5318,7 +5330,11 @@ export function primitive(either: Either, text: string) {
 ///   carrier, the different discriminants keeping both;
 /// - `primitive`: the reduction of `Either` beside `string` asks whether
 ///   `Either` may be below a primitive, reading each member of the union it
-///   names through its carrier.
+///   names through its carrier;
+/// - `nestedReturn`: a nested function's return join reduces `KindA` beside
+///   `KindB`, its two return sites, reading each view through its carrier;
+/// - `nestedYield`: a nested generator's yield join reduces `KindA` beside
+///   `KindB`, its two yields, reading each view through its carrier.
 #[test]
 fn an_algebra_operation_reads_its_carriers_as_requests_not_in_place() {
     use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
@@ -5326,6 +5342,8 @@ fn an_algebra_operation_reads_its_carriers_as_requests_not_in_place() {
         ("distributed", "distribute_intersection"),
         ("reduced", "reduce_arms_to_supertypes"),
         ("primitive", "reduce_arms_to_supertypes"),
+        ("nestedReturn", "join_flow_return_contributors"),
+        ("nestedYield", "attach_function_kind_wrap"),
     ] {
         let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
         crate::u6_flow_shape_corpus_tests::upsert(
