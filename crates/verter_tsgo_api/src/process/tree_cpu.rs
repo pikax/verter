@@ -268,7 +268,6 @@ fn hundred_ns(value: i64) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader};
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -324,21 +323,46 @@ mod tests {
         }
     }
 
-    /// A process that prints `ready` and then blocks reading a stdin nobody
-    /// writes, using no CPU from then on.
-    fn blocked_reader() -> Command {
+    /// A tree that cannot run, known to be in that state before this returns,
+    /// so nothing it still had to execute can land inside a measured interval.
+    ///
+    /// Unix: a shell that stops itself; the kernel's stop report, collected by
+    /// `waitpid(WUNTRACED)`, is the readiness signal — once it arrives the
+    /// shell executes nothing until it is killed. Windows: a process created
+    /// suspended, whose first thread never runs at all.
+    fn suspended_tree() -> Tree {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            let mut command = Command::new("cmd");
-            command.arg("/C").raw_arg("echo ready& set /p x=");
-            command
+            use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+            let mut command = spinner();
+            command.creation_flags(CREATE_SUSPENDED);
+            spawn_tree(command)
         }
         #[cfg(not(windows))]
         {
             let mut command = Command::new("sh");
-            command.args(["-c", "echo ready; read x"]);
-            command
+            command.args(["-c", "kill -STOP $$"]);
+            let tree = spawn_tree(command);
+            let pid = tree.child.id() as libc::pid_t;
+            let mut status: libc::c_int = 0;
+            let reported = loop {
+                // SAFETY: `pid` is this test's own unreaped child and
+                // `status` is a writable int.
+                let rc = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
+                if rc == -1
+                    && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                {
+                    continue;
+                }
+                break rc;
+            };
+            assert!(
+                reported == pid && libc::WIFSTOPPED(status),
+                "the suspended fixture must report itself stopped (waitpid {reported}, status \
+                 {status:#x})"
+            );
+            tree
         }
     }
 
@@ -367,7 +391,8 @@ mod tests {
     }
 
     /// DISCRIMINATING: CPU time advances for a tree that computes and stays
-    /// flat for one that is blocked, side by side and over the same interval.
+    /// flat for one that is blocked from running, side by side and over the
+    /// same interval.
     ///
     /// An implementation that returns a constant fails the spinning half; one
     /// that measures the wrong processes (the caller, the whole machine, or
@@ -375,20 +400,13 @@ mod tests {
     #[test]
     fn tree_cpu_time_grows_while_computing_and_stays_flat_while_blocked() {
         let spinning = spawn_tree(spinner());
-        let mut blocked = spawn_tree(blocked_reader());
-
-        let mut line = String::new();
-        BufReader::new(blocked.child.stdout.take().expect("stdout was piped"))
-            .read_line(&mut line)
-            .expect("read the blocked fixture's readiness line");
-        assert_eq!(line.trim(), "ready", "the blocked fixture must start");
+        // `suspended_tree` returns only once its tree can no longer run, so the
+        // whole measured interval lies after that point.
+        let blocked = suspended_tree();
 
         let spin_start = cpu(&spinning);
-        // The first interval lets the blocked shell finish entering its read;
-        // the second is the one measured.
-        let spin_mid = wait_for_growth(&spinning, spin_start, "first interval");
         let blocked_before = cpu(&blocked);
-        wait_for_growth(&spinning, spin_mid, "second interval");
+        wait_for_growth(&spinning, spin_start, "spinning tree");
         let blocked_after = cpu(&blocked);
 
         assert_eq!(
@@ -405,6 +423,29 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tree_cpu_time_counts_a_descendant_in_its_own_process_group() {
+        use std::io::{BufRead, BufReader};
+
+        /// SIGKILLs the grandchild's own process group when dropped. The
+        /// root's tree kill signals only the root's group, which by
+        /// construction does not hold the grandchild, so without this every
+        /// run — and every failing assertion's unwind — would leave a process
+        /// spinning a core after the test.
+        struct OwnGroupKill(libc::pid_t);
+
+        impl Drop for OwnGroupKill {
+            fn drop(&mut self) {
+                // SAFETY: kill has no memory preconditions; the id is a
+                // positive pid other than init (checked at construction), so
+                // neither call can address the caller's own group or every
+                // process. The group kill reaches the grandchild once it leads
+                // its group; the direct kill covers a grandchild that does not.
+                unsafe {
+                    libc::kill(-self.0, libc::SIGKILL);
+                    libc::kill(self.0, libc::SIGKILL);
+                }
+            }
+        }
+
         // The root shell only waits; the grandchild computes in a new group.
         // Linux shells refuse job control without a terminal, so `setsid` makes
         // the group there; macOS has no `setsid` but its `sh` honours `set -m`.
@@ -424,6 +465,8 @@ mod tests {
             .read_line(&mut line)
             .expect("read the grandchild's pid");
         let grandchild: libc::pid_t = line.trim().parse().expect("a numeric grandchild pid");
+        assert!(grandchild > 1, "the grandchild reported pid {grandchild}");
+        let spinner_group = OwnGroupKill(grandchild);
 
         // Precondition: the shape under test really holds.
         // SAFETY: getpgid has no memory preconditions.
@@ -439,6 +482,7 @@ mod tests {
         // The fixture leaves nothing behind: the spinning grandchild is
         // outside the root's group, so the root's tree kill alone cannot
         // reach it.
+        drop(spinner_group);
         drop(tree);
         let gone_by = Instant::now() + HANG_GUARD;
         while super::super::process_alive(grandchild as u32) {
