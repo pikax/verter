@@ -112,7 +112,11 @@ oracle-lift = ["dep:syn", "dep:quote", "dep:proc-macro2", "dep:blake3"]
 # need a live third-party clone (e.g., property-based corpus parity vs.
 # the upstream nuxt-ui submodule) must gate themselves behind
 # `#[cfg(feature = "external-corpus")]`.
-external-corpus = []
+#
+# It turns on `semantic-observe` because the corpus gates read audit records
+# (`audited_request`, `VerterHost::host_audit_runtime`), which exist only in
+# the observation build; without it the feature does not compile.
+external-corpus = ["semantic-observe"]
 # Opt-in: Vue seed-matrix driver
 # (`src/compile/map_equality_tests/bf2_seed_matrix.rs`) plus the harness
 # authored-source oracle. Needs Node and a gitignored oracle install;
