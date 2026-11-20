@@ -2124,11 +2124,6 @@ construction_ordinal_seam! {
         graph: crate::semantic_query_memo::GraphIn<'_, M>,
         contributors: &[SemanticNodeId],
     ) -> SemanticNodeId {
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::record_merged_decl_reduction(
-            graph.store().operand_store_identity(),
-            contributors,
-        );
         let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
         let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
         for contributor in contributors {
