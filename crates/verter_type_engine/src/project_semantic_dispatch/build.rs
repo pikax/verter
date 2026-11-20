@@ -7545,6 +7545,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         loop {
             match self.advance_augmentation_fold(&mut fold, delivered.take()) {
                 FoldProgress::Read(ContributorShapeRead { read, finish }) => {
+                    // The in-place read is traced as `execute_read` traces it.
+                    #[cfg(any(test, feature = "test-support"))]
+                    super::raise::DISPATCH_TRACE.with(|t| {
+                        t.borrow_mut()
+                            .push(super::raise::query_key_discriminant(&read.key))
+                    });
                     delivered = Some((finish, self.answer_lower_read(read)));
                 }
                 FoldProgress::Folded => return self.finish_augmentation_fold(*fold, refusals),

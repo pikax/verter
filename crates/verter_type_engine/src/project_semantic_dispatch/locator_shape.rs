@@ -2931,7 +2931,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         /// args-substitution and the post-substitution view projection.
         fn lower_locator(&self, locator: AuthoredBodyLocator) -> QueryResult<SemanticNodeId> {
             match self.locator_shape_key(locator) {
-                Ok(key) => self.finish_locator_shape_read(self.execute_via_cold_build_helper(key)),
+                Ok(key) => {
+                    // The in-place read is traced as `execute_read` traces it.
+                    #[cfg(any(test, feature = "test-support"))]
+                    super::raise::DISPATCH_TRACE.with(|t| {
+                        t.borrow_mut()
+                            .push(super::raise::query_key_discriminant(&key))
+                    });
+                    self.finish_locator_shape_read(self.execute_via_cold_build_helper(key))
+                }
                 Err(error) => QueryResult::Error(error),
             }
         }
