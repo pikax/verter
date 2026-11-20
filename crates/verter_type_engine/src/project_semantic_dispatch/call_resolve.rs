@@ -6091,7 +6091,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
                             self.relation_strict_config().strict_null_checks,
                         );
-                    let reduced = self.subtype_reduced_union(&transformed, nullability);
+                    let reduced = self.subtype_reduced_union(&transformed, nullability, &|node| {
+                        self.unwrap_identity_carrier_for_relation(node)
+                    });
                     if reduced.incomplete {
                         crate::request_context::mark_request_result_partial();
                     }

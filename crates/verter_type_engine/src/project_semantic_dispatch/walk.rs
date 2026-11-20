@@ -9653,7 +9653,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 self.dispatch.relation_strict_config().strict_null_checks,
             );
         self.dispatch
-            .distribute_intersection(&factors, contributors, nullability, ordered)
+            .distribute_intersection(&factors, contributors, nullability, ordered, &|node| {
+                self.dispatch.unwrap_identity_carrier_for_relation(node)
+            })
             .map(|distributed| distributed.node)
     }
 

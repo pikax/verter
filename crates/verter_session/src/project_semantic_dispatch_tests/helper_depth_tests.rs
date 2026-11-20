@@ -254,9 +254,10 @@ fn primitive_part_proofs_read_unions_at_any_depth() {
             readonly: false,
         });
         let string = primitive(dispatch, PrimitiveKind::String);
+        let settle = |node: SemanticNodeId| dispatch.unwrap_identity_carrier_for_relation(node);
         (
-            dispatch.may_be_below_a_primitive(nest(dispatch, string)),
-            dispatch.may_be_below_a_primitive(nest(dispatch, array)),
+            dispatch.may_be_below_a_primitive(nest(dispatch, string), &settle),
+            dispatch.may_be_below_a_primitive(nest(dispatch, array), &settle),
         )
     });
     assert_eq!(verdicts, (true, false));
