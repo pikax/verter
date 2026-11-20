@@ -418,7 +418,7 @@ pub struct BindingOrigin {
 /// complete-plan cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Incompleteness {
-    /// Parser recorded syntax errors.
+    /// Parser recorded errors that leave the template untrustworthy.
     ParseErrors,
     /// Template language the Vue HTML plan does not admit.
     UnknownTemplateLang(String),
@@ -666,7 +666,9 @@ pub fn build_projection_plan(input: PlanInput<'_>) -> ProjectionPlan {
     let input_basis = InputBasisId::from_canonical(&SnapshotBasis(&snapshot));
 
     let mut reasons = Vec::new();
-    if input.parsed.has_errors() {
+    // An error the template is still checkable through (a key repeated in a
+    // `v-if` chain) leaves the plan complete.
+    if input.parsed.has_structural_errors() {
         reasons.push(Incompleteness::ParseErrors);
     }
     let Some(ast) = input.parsed.template_ast() else {
