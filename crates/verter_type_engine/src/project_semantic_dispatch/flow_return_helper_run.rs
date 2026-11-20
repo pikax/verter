@@ -266,7 +266,7 @@ impl ProvenanceFrame {
             wait: None,
         });
         match frame.advance(dispatch, None) {
-            ReadStep::Ready(()) => ReadStep::Ready(frame.finish(dispatch)),
+            ReadStep::Ready(()) => ReadStep::Ready((*frame).finish(dispatch)),
             ReadStep::Wait(wait) => {
                 frame.wait = Some(wait);
                 ReadStep::Wait(frame)
@@ -311,10 +311,10 @@ impl ProvenanceFrame {
 
     /// The provenance the plan describes over its lowered nodes.
     fn finish(
-        self: Box<Self>,
+        self,
         dispatch: &impl FlowDemandDriver,
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
-        let Self { plan, lowered, .. } = *self;
+        let Self { plan, lowered, .. } = self;
         dispatch.provenance_from(plan.into_owner(), &lowered)
     }
 }
@@ -770,7 +770,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                     };
                     return match step {
                         ReadStep::Ready(()) => {
-                            ReadStep::Ready(HelperValue::Provenance(frame.finish(self.dispatch)))
+                            ReadStep::Ready(HelperValue::Provenance((*frame).finish(self.dispatch)))
                         }
                         ReadStep::Wait(wait) => {
                             run.frames.push(HelperFrame::Provenance(frame));
