@@ -253,6 +253,19 @@ mod harness {
         GatedCommand(command)
     }
 
+    /// The same check as [`verter_tsc_command`], routed through the SFC
+    /// projection driver.
+    #[cfg(feature = "projection-route-qualification")]
+    pub fn verter_tsc_projection_command(
+        project: &Path,
+        engine: &GatedEngine,
+        tsconfig: &str,
+    ) -> GatedCommand {
+        let mut command = verter_tsc_command(project, engine, tsconfig);
+        command.0.arg("--projection-route");
+        command
+    }
+
     /// The EMITTING `verter-tsc` invocation: `--declaration` into
     /// `declaration_dir`, listing every artifact it writes.
     ///
@@ -1066,6 +1079,57 @@ fn js_sfcs_are_checked_as_javascript_and_ts_sfcs_as_typescript() {
         "a refused SFC generates nothing under `checkJs: true` either: {:?}",
         codes(&mixed_checkjs)
     );
+
+    drop(temp_dir);
+}
+
+/// Through the projection driver, every carrier of this fixture is checked in
+/// full under BOTH tsconfigs — including `TsParent.vue` and
+/// `TsParentArity.vue`, whose template root is the component `<JsExpose />`.
+/// A component root's fallthrough surface comes from the child instance the
+/// template constructs; were it withheld, the driver would report those
+/// parents with `VTER1009` ("only partly checked").
+///
+/// The engine is REQUIRED here: an absent engine fails this test rather than
+/// skipping it, because a completeness claim from a run that never happened
+/// proves nothing.
+#[cfg(feature = "projection-route-qualification")]
+#[test]
+fn projection_route_checks_component_root_parents_in_full_under_both_tsconfigs() {
+    let engine = harness::resolve_gated_engine(harness::gated_engine_resolution())
+        .expect("the projection-route completeness check requires the real tsgo engine");
+    let (temp_dir, project) = setup_temp_project();
+
+    for tsconfig in ["tsconfig.json", "tsconfig.checkjs.json"] {
+        let run = harness::run_verter_tsc(
+            harness::verter_tsc_projection_command(&project, &engine, tsconfig),
+            tsconfig,
+            RUN_DEADLINE,
+        );
+        let diags = run.diags();
+        let stdout = run.stdout();
+
+        // INSTRUMENT CHECK: the engine really checked this program. Without a
+        // real error from the broken TypeScript SFC, "no VTER1009" below would
+        // hold for a run that checked nothing.
+        assert!(
+            for_file(diags, "/src/TsBroken.vue")
+                .iter()
+                .any(|d| d.ts_code() == 2322),
+            "{tsconfig}: the TypeScript SFC's real error must be reported, or this \
+             run proves nothing:\n{stdout}"
+        );
+
+        let partial: Vec<&str> = stdout
+            .lines()
+            .filter(|line| line.contains("VTER1009"))
+            .collect();
+        assert!(
+            partial.is_empty(),
+            "{tsconfig}: every carrier must be fully checked through the projection \
+             route, component-root parents included: {partial:#?}\n{stdout}"
+        );
+    }
 
     drop(temp_dir);
 }
