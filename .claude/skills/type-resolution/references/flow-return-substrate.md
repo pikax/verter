@@ -117,11 +117,15 @@ through no other: intersection distribution (`distribute_intersection` →
 `intersection_parts`' object-type check), supertype reduction
 (`reduce_arms_to_supertypes`, `subtype_reduced_union`,
 `finalize_evolving_array`: the reduction views, `unit_typed_properties` and
-`may_be_below_a_primitive`). The flow evaluator passes its requested walk
+`may_be_below_a_primitive`), and the function joins that reduce through
+them (`join_flow_return_contributors`, and `attach_function_kind_wrap`'s
+yield join). The flow evaluator passes its requested walk
 (`settle_carrier`, and the frame algebra's `DispatchFlowAlgebra::settle` for
-product joins), so those reads are attributed as `read_in_place / carrier`;
-a dispatcher caller outside a flow frame passes the dispatcher's own
-`unwrap_identity_carrier_for_relation`.
+product joins), and the root read's own joins, made after its evaluator
+returns but inside its frame, pass the same requested walk
+(`carrier_in_place`), so those reads are attributed as
+`read_in_place / carrier`; a dispatcher caller outside a flow frame passes
+the dispatcher's own `unwrap_identity_carrier_for_relation`.
 
 An unsettled composite is named in the current signature epoch. If that epoch
 retires while its result request waits, the producer refuses the retired handle
