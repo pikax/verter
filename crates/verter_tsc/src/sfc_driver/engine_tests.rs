@@ -229,6 +229,68 @@ fn a_carrier_imported_from_outside_the_membership_is_checked_with_the_importers_
     assert_eq!(exit_status(&outcome), ExitStatus::Diagnostics);
 }
 
+/// An emitting project with no carrier is built by the engine, which cannot
+/// compile a carrier. When it imports a sibling's carrier it is refused once,
+/// naming the carrier: never reported with a missing-module error for the
+/// import and never clean. A missing module that is no carrier keeps the
+/// engine's own error.
+#[test]
+fn an_emitting_project_that_imports_a_siblings_carrier_is_refused_naming_the_carrier() {
+    let f = Fixture::new();
+    sibling_projects(&f);
+    let emitting = r#"{"extends":"../base.json","compilerOptions":{"noEmit":false,"outDir":"dist"},"include":["*.ts"]}"#;
+    f.write(
+        "tsconfig.json",
+        r#"{"files":[],"references":[{"path":"./a"},{"path":"./b"},{"path":"./c"}]}"#,
+    );
+    f.write("b/tsconfig.json", emitting);
+    f.write("c/tsconfig.json", emitting);
+    f.write(
+        "c/y.ts",
+        "import { value } from \"./absent\";\n\nexport const copy = value;\n",
+    );
+    f.write(
+        "a/C.vue",
+        r#"<script setup lang="ts">const label: string = "text";</script><template>{{ label }}</template>"#,
+    );
+    let outcome = run(&f.request(), None).unwrap();
+    assert!(
+        outcome.graph_problems.is_empty(),
+        "{:?}",
+        outcome.graph_problems
+    );
+    let b = project_named(&outcome, "b/tsconfig.json");
+    let refusal = b
+        .engine_failure
+        .as_deref()
+        .expect("the project importing a carrier is refused");
+    assert!(
+        refusal.contains("b/tsconfig.json") && refusal.contains("a/C.vue"),
+        "{refusal}"
+    );
+    assert!(b.raw.is_empty() && b.attributed.is_empty(), "{:?}", b.raw);
+    let c = project_named(&outcome, "c/tsconfig.json");
+    assert!(c.engine_failure.is_none(), "{:?}", c.engine_failure);
+    assert_eq!(
+        c.raw.iter().map(|d| d.code).collect::<Vec<_>>(),
+        vec![2307],
+        "{:?}",
+        c.raw
+    );
+    let printed = outcome_diagnostics(&outcome);
+    assert!(
+        !printed.iter().any(|d| d.file.ends_with("b/x.ts")),
+        "{printed:?}"
+    );
+    let failures = printed
+        .iter()
+        .filter(|d| d.verter_code == Some(crate::reporter::VerterCode::ProjectCheckFailed))
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].file, &*b.config);
+    assert_eq!(exit_status(&outcome), ExitStatus::Failed);
+}
+
 #[test]
 fn generated_solution_projects_keep_ambient_alias_component_and_server_options() {
     let f = Fixture::new();
