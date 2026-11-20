@@ -74,8 +74,14 @@ native output's. Each then compares the one construct it isolates:
   gives each root its own template and returns them all.
 - `svg-attributes`: the arguments of every attribute, class and style setter,
   including the trailing SVG flag on SVG attributes and classes.
+- `svg-dynamic-props`: on SVG elements, an object spread and a dynamic
+  argument pass the SVG flag to `setDynamicProps`, while `innerHTML`,
+  `textContent`, `value` and camelCase `aria*` keep their own setters.
 - `template-namespace`: the namespace argument of each static template whose
-  root is an SVG element.
+  root is an SVG element, and the setters of its elements.
+- `svg-fragment-namespace`: an SVG or MathML element with no `<svg>` or
+  `<math>` ancestor in the file (slot content, a fragment root) starts its
+  namespace, with the matching template namespace and setters.
 - `conditional-slot-template`: a `v-if`/`v-else` slot template pair is one
   conditional entry of the dynamic slot list.
 

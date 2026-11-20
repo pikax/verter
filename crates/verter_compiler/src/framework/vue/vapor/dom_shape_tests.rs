@@ -184,3 +184,77 @@ fn a_conditional_inside_a_template_loop_is_multi_root_on_both_sides() {
         ],
     );
 }
+
+#[test]
+fn an_svg_element_without_an_svg_ancestor_is_parsed_and_set_as_svg() {
+    // A fragment root or slot content with no `<svg>` in the file is still
+    // SVG: Vue starts the namespace at any SVG tag.
+    assert_contains_all(
+        "<template><g><line :x1=\"x\"/></g></template>",
+        &[
+            "_template(\"<g><line>\", 1, 1)",
+            "_setAttr(n0, \"x1\", _ctx.x, true)",
+        ],
+    );
+    assert_contains_all(
+        "<template><Comp><path :d=\"d\"/></Comp></template>",
+        &[
+            "_template(\"<path>\", 0, 1)",
+            "_setAttr(n0, \"d\", _ctx.d, true)",
+        ],
+    );
+    assert_contains_all(
+        "<template><mi :x=\"y\"/></template>",
+        &["_template(\"<mi>\", 1, 2)", "_setProp(n0, \"x\", _ctx.y)"],
+    );
+}
+
+#[test]
+fn an_svg_element_passes_the_svg_flag_to_spread_and_dynamic_argument_props() {
+    // Without the flag runtime-vapor sets `width`, `cx` or `viewBox` as the
+    // element's read-only `SVGAnimated*` property and the write is lost.
+    assert_contains_all(
+        "<template><svg v-bind=\"attrs\"/><svg :[name]=\"value\"/></template>",
+        &[
+            ", [_ctx.attrs], null, true)",
+            ", [{ [_ctx.name || \"\"]: _ctx.value }], null, true)",
+        ],
+    );
+}
+
+#[test]
+fn keys_with_their_own_setter_keep_it_on_svg_elements() {
+    // Vue checks `innerHTML`, `textContent`, `value` and camelCase `aria*`
+    // before writing an SVG element's attributes: an attribute named
+    // `innerHTML` would render nothing.
+    let output = render(
+        "<template><svg :innerHTML=\"h\" :value=\"v\"><text :textContent=\"t\" :ariaLabel=\"l\"/></svg></template>",
+    );
+    for expected in [
+        "_setHtml(n1, _ctx.h)",
+        "_setValue(n1, _ctx.v)",
+        "_setElementText(n0, _ctx.t)",
+        "_setDOMProp(n0, \"ariaLabel\", _ctx.l)",
+    ] {
+        assert!(
+            output.code.contains(expected),
+            "{expected}\n{}",
+            output.code
+        );
+    }
+    assert!(!output.code.contains("_setAttr("), "{}", output.code);
+}
+
+#[test]
+fn html_keys_take_the_setter_vue_chooses_for_their_element() {
+    assert_contains_all(
+        "<template><div><input :value=\"v\" :spellcheck=\"s\"/><progress :value=\"p\"/></div></template>",
+        &[
+            "_setValue(n0, _ctx.v)",
+            "_setAttr(n0, \"spellcheck\", _ctx.s)",
+            // `<progress>` keeps the property setter (its local name differs
+            // from Vue's numbering, which no operation observes).
+            "\"value\", _ctx.p)",
+        ],
+    );
+}

@@ -304,6 +304,22 @@
       "outputSha256": "f0d16bbcf5ac5875219cd929e8f06c0be7e3a818e0237f76f957bdc8e2bd593a"
     },
     {
+      "file": "svg-dynamic-props.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "a71cb72ef33526afec88763ec10a7abb29c06ea0b445aef549cc94f52629e2b5",
+      "outputSha256": "1e581b91f84ca8f6074a43cd13be8b488edee03d0624e1430a40247865e29ccd"
+    },
+    {
+      "file": "svg-fragment-namespace.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "47a8ff079c14cbc0bd292b84fbfd1eec1a6cbe32b3fb09759781e5e6a0c15c80",
+      "outputSha256": "5d8434d99278e07b173980145f86e1ccb65a9be84ddcb0af1ce1eef86fd516c4"
+    },
+    {
       "file": "template-namespace.vue",
       "version": "3.6.0-rc.15",
       "bindings": {},

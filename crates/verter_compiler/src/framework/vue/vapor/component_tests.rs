@@ -302,3 +302,19 @@ fn a_component_model_with_a_dynamic_argument_is_refused() {
         },
     );
 }
+
+#[test]
+fn a_slot_root_template_holding_only_a_comment_is_not_stable() {
+    // Vue 3.6.0-rc.15 `isStableTemplateSlotRoot`: a comment renders nothing
+    // a slot fallback could replace, so the slot beside a conditional is
+    // NON_STABLE; an element root keeps it stable.
+    let code = super::test_support::render(
+        "<template><Panel><!-- c --><Foo v-if=\"ok\"/></Panel></template>",
+    )
+    .code;
+    assert!(code.contains("}, { _: 1 /* NON_STABLE */ })"), "{code}");
+    let code =
+        super::test_support::render("<template><Panel><p/><Foo v-if=\"ok\"/></Panel></template>")
+            .code;
+    assert!(!code.contains("NON_STABLE"), "{code}");
+}
