@@ -1008,13 +1008,7 @@ impl PreparedTypeDeclCache {
         }) else {
             return PreparedDeclOutcome::Ready(None);
         };
-        if let Some(cached) = slot.committed() {
-            return PreparedDeclOutcome::Ready(cached);
-        }
         let _gate = slot.build_gate.lock();
-        if let Some(cached) = slot.committed() {
-            return PreparedDeclOutcome::Ready(cached);
-        }
         match prepare_augmentation_type_decl_outcome_in(
             &self.canonical_id,
             self.state.as_ref(),
