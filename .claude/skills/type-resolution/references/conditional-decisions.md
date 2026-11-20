@@ -179,7 +179,7 @@ extends pattern declared, and the false branch's out-of-scope environment.
 `advance_decision_lowering` steps it:
 
 - `DecisionStep::Read(key)` is the lowering's own `LowerRead { key, shape:
-  Whole }`; the frame waits as `LowerReadResume::Decision`. The cursor's
+Whole }`; the frame waits as `LowerReadResume::Decision`. The cursor's
   delivery is a closure (`Option<&mut dyn FnMut() -> LowerDelivery>`), and
   `resume_lower_read` hands it to `advance_conditional_decision` narrowed to
   a node read, so the read is made inside the operation that named it, under
