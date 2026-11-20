@@ -206,9 +206,18 @@ impl<'c> VaporCompiler<'c> {
                         parts,
                         generated: false,
                     });
-                    let group = self.state.add_effect_group(vec![effect], "  ", true)?;
-                    let run = self.state.runs.commit(&mut vec![Part::Effects(group)]);
-                    scope.child_statements[stmt_slot] = Stmt::Run(run);
+                    match stmt_slot {
+                        Some(slot) => {
+                            let group = self.state.add_effect_group(
+                                vec![effect],
+                                "  ",
+                                super::graph::EffectWrapper::Render,
+                            )?;
+                            let run = self.state.runs.commit(&mut vec![Part::Effects(group)]);
+                            scope.child_statements[slot] = Stmt::Run(run);
+                        }
+                        None => scope.own_effects.push(effect),
+                    }
                 }
             }
         }

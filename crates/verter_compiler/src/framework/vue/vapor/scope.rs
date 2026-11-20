@@ -41,11 +41,14 @@ pub(super) enum PendingNavRequest<'c> {
     },
     /// One text run beside other nodes, reached as its own node: the parts
     /// its text effect writes are the run's own, taken when the run ends.
+    /// With a statement slot the effect runs there, in the run's place among
+    /// the block's operations; without one it is one of the scope's own
+    /// effects, which a root `v-once` or `v-memo` wraps.
     TextRef {
         own_ref: u32,
         dom_child_index: u32,
         nav_slot: usize,
-        stmt_slot: usize,
+        stmt_slot: Option<usize>,
         parts: Vec<TextPart<'c>>,
     },
 }
