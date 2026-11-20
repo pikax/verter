@@ -1296,6 +1296,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     nested_degradation,
                     empty_completion,
                     self.st.nullability,
+                    &|node| self.settle_carrier(node),
                 )
             }) {
                 // The nested signature's return IS the function-kind-wrapped
@@ -1316,6 +1317,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                             &nested_yield_contributions,
                             binder_env,
                             self.st.nullability,
+                            &|node| self.settle_carrier(node),
                         ),
                     );
                     wrapped.return_type()
