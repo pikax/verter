@@ -35,7 +35,7 @@
 //! run the binary lives inside [`harness`] behind types with private fields:
 //! the only `GatedEngine` in existence comes out of the skip-vs-fail gate, the
 //! only `GatedCommand` comes from that engine, the only `GatedRun` comes out of
-//! the deadline-bounded runner, and the only `Diag` comes out of a `GatedRun`.
+//! the bounded runner, and the only `Diag` comes out of a `GatedRun`.
 //! `Result::ok()` yields a `Resolution`, and `Command::output()` yields an
 //! `Output`; neither is any of those types, so neither revert COMPILES. The
 //! module's own `#[test]`s cover what the types cannot — that the gate
@@ -45,9 +45,9 @@
 
 use std::path::{Path, PathBuf};
 
-use harness::{Diag, GatedRun, RUN_DEADLINE};
+use harness::{Diag, GatedRun, NO_PROGRESS_WINDOW};
 
-/// The closed seam: engine prerequisite gate + deadline-bounded runner.
+/// The closed seam: engine prerequisite gate + bounded runner.
 ///
 /// Nothing here is reachable except through the entry points, and the types
 /// they produce cannot be built any other way — see the module docs above.
@@ -57,23 +57,48 @@ mod harness {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    /// Hard kill-deadline for one `verter-tsc` invocation.
+    /// How long one `verter-tsc` invocation's process tree may go without
+    /// using any CPU, while its direct child is still alive, before the run is
+    /// treated as wedged and killed.
     ///
-    /// This is a DEADLINE, not a performance assertion: nothing here asserts the
-    /// run finished in under N milliseconds (that assertion family is a
-    /// load-flake generator). It exists so a wedged child is killed and reported
-    /// HERE, with its reason, instead of riding until the outer gate kills the
-    /// whole job.
+    /// The runner bounds a run by the WORK its tree does, never by wall-clock
+    /// time. On a loaded machine a healthy run spends most of its wall time
+    /// queued for a core, and a wall deadline turned that queueing into
+    /// failures of runs that were making progress the whole time. A tree that
+    /// is waiting for a core still accrues CPU within this window; a tree
+    /// blocked on a lock, a pipe or a dead peer accrues none. This is a
+    /// liveness bound, not a performance assertion.
     ///
     /// It must be STRICTLY BELOW its parent killer or it never applies: the
     /// canonical gate runs under `cargo nextest`, whose profile
     /// (`.config/nextest.toml`) terminates a test after
-    /// `slow-timeout.period x terminate-after`. The oracle makes TWO
-    /// invocations, so the budget is `2 x 8s` worst case (one run takes under
-    /// 3s on CI, and the speed gate fails a test at 20s), and
-    /// `the_run_deadline_is_strictly_below_the_nextest_termination_deadline`
-    /// checks both against the profile that will actually run.
-    pub const RUN_DEADLINE: Duration = Duration::from_secs(8);
+    /// `slow-timeout.period x terminate-after`. A wedge can begin only once a
+    /// run has started, and the oracle makes TWO invocations, so
+    /// `the_no_progress_window_is_strictly_below_the_nextest_termination_deadline`
+    /// checks one window and two against the profile that will actually run.
+    pub const NO_PROGRESS_WINDOW: Duration = Duration::from_secs(4);
+
+    /// The most CPU time one `verter-tsc` invocation's process tree may use
+    /// before it is treated as a runaway and killed.
+    ///
+    /// CPU time does not advance while the tree waits for a core, so load
+    /// cannot exhaust this budget; only the run's own work can. It stops a run
+    /// that keeps computing without finishing — which the no-progress window
+    /// cannot see — well before nextest's own killer would report it as an
+    /// anonymous timeout.
+    ///
+    /// Sized at about four times the most CPU one invocation was measured to
+    /// use: on a Linux x86_64 build host, debug build, the three invocations
+    /// used 8.09s (`tsconfig.json`), 5.55s (`tsconfig.checkjs.json`) and 7.14s
+    /// (declaration emit) of CPU in 5.49s, 4.00s and 5.12s of wall time. The
+    /// tree uses roughly 1.4 cores while it runs, so it does not crowd out the
+    /// rest of a parallel test pass.
+    pub const CPU_BUDGET: Duration = Duration::from_secs(32);
+
+    /// How often the runner samples the tree's CPU time at most. Each sample
+    /// walks the platform's process table, so it is kept coarse; a window
+    /// shorter than four samples is sampled faster so it still resolves.
+    const CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 
     /// The marker a skip line carries so a skipped run is distinguishable from a
     /// run that executed. Only ONE condition may emit it: no tsgo candidate
@@ -118,10 +143,11 @@ mod harness {
     #[derive(Debug)]
     pub struct GatedCommand(Command);
 
-    /// The result of a run that COMPLETED inside its deadline.
+    /// The result of a run that COMPLETED inside its bounds.
     ///
-    /// A run that blew its deadline panics instead of producing one of these,
-    /// so a `GatedRun` in hand is proof the bound held.
+    /// A run that went without progress for [`NO_PROGRESS_WINDOW`] or used up
+    /// its [`CPU_BUDGET`] panics instead of producing one of these, so a
+    /// `GatedRun` in hand is proof the bounds held.
     #[derive(Debug)]
     pub struct GatedRun {
         diags: Vec<Diag>,
@@ -278,29 +304,74 @@ mod harness {
         GatedCommand(command)
     }
 
-    /// Run `command` to completion under a hard kill-deadline and return the
+    /// Run `command` to completion under the work bounds and return the
     /// parsed diagnostics plus the raw stdout.
     ///
-    /// A child that has not exited by `deadline` has its whole PROCESS TREE
-    /// killed and the call PANICS naming the deadline. `Command::output()`
-    /// cannot do this: it blocks forever, so a wedged child rides until the
-    /// outer gate kills the job and the failure is reported as a timeout of
-    /// everything rather than of this. That revert cannot be made at the call
-    /// site either: `Command::output()` produces an `Output`, and every
-    /// assertion downstream consumes a [`GatedRun`], which only this function
-    /// mints. Nothing here asserts how long a healthy run takes.
-    pub fn run_verter_tsc(command: GatedCommand, label: &str, deadline: Duration) -> GatedRun {
-        run_verter_tsc_after_start(command, label, deadline, || true)
+    /// A child whose tree uses no CPU for [`NO_PROGRESS_WINDOW`] while it is
+    /// still alive, or uses more than [`CPU_BUDGET`] in total, has its whole
+    /// PROCESS TREE killed and the call PANICS naming the bound it blew.
+    /// `Command::output()` cannot do this: it blocks forever, so a wedged child
+    /// rides until the outer gate kills the job and the failure is reported as
+    /// a timeout of everything rather than of this. That revert cannot be made
+    /// at the call site either: `Command::output()` produces an `Output`, and
+    /// every assertion downstream consumes a [`GatedRun`], which only this
+    /// function mints. Nothing here asserts how long a healthy run takes.
+    pub fn run_verter_tsc(command: GatedCommand, label: &str) -> GatedRun {
+        run_bounded(
+            command,
+            label,
+            RunBounds {
+                no_progress: NO_PROGRESS_WINDOW,
+                cpu_budget: CPU_BUDGET,
+            },
+            || true,
+        )
     }
 
     /// How long a still-living child may take to record readiness. A child that
     /// has already exited fails at once; this bound is not slept out for it.
     const STARTUP_BACKSTOP: Duration = Duration::from_secs(5);
 
+    /// The two bounds a run is held to, both measured in the tree's own work.
+    #[derive(Debug, Clone, Copy)]
+    struct RunBounds {
+        /// The longest the tree may go without using CPU while its direct
+        /// child is alive.
+        no_progress: Duration,
+        /// The most CPU time the tree may use in total.
+        cpu_budget: Duration,
+    }
+
+    /// Which bound a killed run blew.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum BlownBound {
+        NoProgress,
+        CpuBudget,
+    }
+
+    /// The runner with the production CPU budget and a caller-chosen
+    /// no-progress window, after `started` reports the fixture ready.
     fn run_verter_tsc_after_start(
         command: GatedCommand,
         label: &str,
-        deadline: Duration,
+        no_progress_window: Duration,
+        started: impl FnMut() -> bool,
+    ) -> GatedRun {
+        run_bounded(
+            command,
+            label,
+            RunBounds {
+                no_progress: no_progress_window,
+                cpu_budget: CPU_BUDGET,
+            },
+            started,
+        )
+    }
+
+    fn run_bounded(
+        command: GatedCommand,
+        label: &str,
+        bounds: RunBounds,
         mut started: impl FnMut() -> bool,
     ) -> GatedRun {
         let mut command = command.0;
@@ -310,6 +381,7 @@ mod harness {
             .stderr(Stdio::piped());
         verter_tsgo_api::process::configure_tree_spawn_std(&mut command);
 
+        let run_started = Instant::now();
         let mut child = command
             .spawn()
             .unwrap_or_else(|e| panic!("failed to execute {label}: {e}"));
@@ -358,17 +430,51 @@ mod harness {
             }
         }
 
-        let hard_stop = Instant::now() + deadline;
-        let mut blew_deadline = false;
+        // The work bounds. Progress is a change in the tree's CPU time — any
+        // change, since a member exiting can also lower the live sum — and the
+        // no-progress clock restarts at every change. Wall time is only the
+        // clock of that window, never a limit on the run as a whole.
+        let sample_every = (bounds.no_progress / 4).min(CPU_SAMPLE_INTERVAL);
+        let mut cpu = if startup.is_ok() {
+            tree.cpu_time().unwrap_or_else(|| {
+                tree.kill_tree();
+                let _ = child.wait();
+                panic!(
+                    "{label}: this platform cannot measure the child tree's CPU time, so \
+                     the runner's work bounds cannot hold; refusing to run unbounded"
+                )
+            })
+        } else {
+            Duration::ZERO
+        };
+        let mut last_progress = Instant::now();
+        let mut next_sample = last_progress + sample_every;
+        let mut blown: Option<BlownBound> = None;
         while startup.is_ok() {
             match child.try_wait() {
                 Ok(Some(_status)) => break,
                 Ok(None) => {
-                    if Instant::now() >= hard_stop {
-                        blew_deadline = true;
-                        break;
+                    let now = Instant::now();
+                    if now >= next_sample {
+                        next_sample = now + sample_every;
+                        // `None` mid-run means the direct child vanished
+                        // between the two reads; the next `try_wait` sees it.
+                        if let Some(sample) = tree.cpu_time() {
+                            if sample != cpu {
+                                cpu = sample;
+                                last_progress = now;
+                            }
+                        }
+                        if cpu > bounds.cpu_budget {
+                            blown = Some(BlownBound::CpuBudget);
+                            break;
+                        }
+                        if now.duration_since(last_progress) >= bounds.no_progress {
+                            blown = Some(BlownBound::NoProgress);
+                            break;
+                        }
                     }
-                    std::thread::sleep(Duration::from_millis(25));
+                    std::thread::sleep(Duration::from_millis(25).min(sample_every));
                 }
                 Err(e) => {
                     tree.kill_tree();
@@ -377,6 +483,7 @@ mod harness {
                 }
             }
         }
+        let wall = run_started.elapsed();
 
         // Kill the tree BEFORE joining, on BOTH exits. The direct child exiting
         // is not the same as the pipes closing: a grandchild that inherited them
@@ -396,12 +503,29 @@ mod harness {
             startup.is_ok(),
             "{label} fixture startup failed: {startup:?}"
         );
-        assert!(
-            !blew_deadline,
-            "{label} did not finish within {deadline:?}; its process tree was killed. \
-             A wedged run is a failure, not a slow pass.\nstderr:\n{stderr}"
-        );
+        let budget = bounds.cpu_budget;
+        match blown {
+            Some(BlownBound::NoProgress) => panic!(
+                "{label} did not finish within its no-progress window: its process tree used \
+                 no CPU for {window:?} while the child was still alive (wall {wall:?}, CPU \
+                 {cpu:?}, CPU budget {budget:?}); its process tree was killed. A wedged run \
+                 is a failure, not a slow pass.\nstderr:\n{stderr}",
+                window = bounds.no_progress,
+            ),
+            Some(BlownBound::CpuBudget) => panic!(
+                "{label} did not finish within its CPU budget: its process tree used {cpu:?} \
+                 of CPU against a budget of {budget:?} (wall {wall:?}); its process tree was \
+                 killed. A runaway run is a failure, not a slow pass.\nstderr:\n{stderr}"
+            ),
+            None => {}
+        }
 
+        // The tree's last CPU sample is at most one sample interval old.
+        eprintln!(
+            "=== {label} finished: wall {wall:?}, CPU {cpu:?} (CPU budget {budget:?}, \
+             no-progress window {window:?}) ===",
+            window = bounds.no_progress,
+        );
         eprintln!("=== {label} STDERR ===\n{stderr}");
         eprintln!("=== {label} STDOUT ===\n{stdout}");
         GatedRun {
@@ -413,9 +537,10 @@ mod harness {
     // ── Harness integrity ───────────────────────────────────────────────
     //
     // The type-state above binds the oracle to this seam — the reverts it
-    // exists to prevent no longer compile. These two cover what types cannot:
-    // that the gate's two failure arms really are different, and that the
-    // runner really does kill a wedged tree. They live INSIDE the module
+    // exists to prevent no longer compile. These cover what types cannot:
+    // that the gate's two failure arms really are different, that the runner
+    // really does kill a wedged tree, and that it stops a runaway by its CPU
+    // budget rather than by the clock. They live INSIDE the module
     // because building `GatedCommand` by hand is exactly the escape the oracle
     // must not have.
 
@@ -638,6 +763,62 @@ mod harness {
              killed the direct child only and leaked the process holding the pipes"
         );
     }
+
+    /// DISCRIMINATING: a child that keeps computing is stopped by its CPU
+    /// budget, and is NOT reported as wedged however much wall time passes —
+    /// progress is the tree's CPU time, not the clock.
+    ///
+    /// The no-progress window here is shorter than the CPU budget, and a
+    /// single-threaded spinner can use at most one window of CPU in one window
+    /// of wall time. So a runner that still treated wall time as the limit
+    /// would stop the spinner at the window and report it wedged before the
+    /// budget could fire; only a runner that measures the tree's own work
+    /// reaches the budget. The outer bound is liveness only, so a runner that
+    /// never stops a runaway fails here instead of hanging the gate.
+    #[test]
+    fn the_runner_stops_a_computing_child_at_its_cpu_budget_not_at_the_clock() {
+        #[cfg(windows)]
+        let spinner = {
+            use std::os::windows::process::CommandExt;
+            let mut command = Command::new("cmd");
+            command.arg("/C").raw_arg("for /L %i in (0,0,1) do @rem");
+            command
+        };
+        #[cfg(not(windows))]
+        let spinner = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "while :; do :; done"]);
+            command
+        };
+        let bounds = RunBounds {
+            no_progress: Duration::from_millis(500),
+            cpu_budget: Duration::from_millis(600),
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            // A unix `Command` holds its pre-exec hooks as plain closures, which
+            // are not `UnwindSafe`; nothing observes it after an unwind.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_bounded(GatedCommand(spinner), "runaway-fixture", bounds, || true)
+            }));
+            let _ = tx.send(panic_text(outcome));
+        });
+
+        let panic_message = rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect(
+                "the runner never returned: a child that keeps computing must be stopped by \
+                 its CPU budget, not left to run until the outer gate kills the job",
+            )
+            .expect("a runaway child must FAIL the run, never return a clean output");
+        runner.join().expect("the runner thread completed");
+        assert!(
+            panic_message.contains("did not finish within its CPU budget"),
+            "a child that computed the whole time must be stopped by the CPU budget, never \
+             reported as making no progress: {panic_message}"
+        );
+    }
 }
 
 // ── Diagnostic filters ──────────────────────────────────────────────────
@@ -766,7 +947,6 @@ fn js_sfcs_are_checked_as_javascript_and_ts_sfcs_as_typescript() {
     let default_run: GatedRun = harness::run_verter_tsc(
         harness::verter_tsc_command(&project, &engine, "tsconfig.json"),
         "tsconfig.json",
-        RUN_DEADLINE,
     );
     let default_diags = default_run.diags();
     let default_stdout = default_run.stdout();
@@ -993,7 +1173,6 @@ fn js_sfcs_are_checked_as_javascript_and_ts_sfcs_as_typescript() {
     let checkjs_run = harness::run_verter_tsc(
         harness::verter_tsc_command(&project, &engine, "tsconfig.checkjs.json"),
         "tsconfig.checkjs.json",
-        RUN_DEADLINE,
     );
     let checkjs_diags = checkjs_run.diags();
 
@@ -1070,7 +1249,7 @@ fn js_sfcs_are_checked_as_javascript_and_ts_sfcs_as_typescript() {
     drop(temp_dir);
 }
 
-// ── The deadline's own precondition ─────────────────────────────────────
+// ── The no-progress window's own precondition ───────────────────────────
 
 /// The active nextest profile — the one that will govern THIS run.
 ///
@@ -1129,20 +1308,21 @@ fn slow_timeout_for(config: &str, profile: &str) -> Option<String> {
         })
 }
 
-/// DISCRIMINATING: the runner's kill-deadline is strictly below the killer that
-/// would otherwise reach it first, in the profile that will actually run.
+/// DISCRIMINATING: the runner's no-progress window is strictly below the killer
+/// that would otherwise reach a wedged run first, in the profile that will
+/// actually run.
 ///
-/// A deadline above its parent's never applies: the parent kills the test
-/// before the child bound can fire, and the wedged run is reported as a timeout
-/// of the whole job rather than of this run, with no reason attached. The
+/// A window above its parent's never applies: the parent kills the test before
+/// the runner's bound can fire, and the wedged run is reported as a timeout of
+/// the whole job rather than of this run, with no reason attached. The
 /// canonical gate runs this suite under `cargo nextest`, whose selected profile
 /// terminates a test at `slow-timeout.period x terminate-after`.
 ///
-/// Fails against the pre-change harness, whose deadline was 300s against a 180s
-/// nextest killer — and against a reader that scans past its section's end, or
-/// that checks `default` while `NEXTEST_PROFILE` selects another profile.
+/// Fails against a window at or above the killer — and against a reader that
+/// scans past its section's end, or that checks `default` while
+/// `NEXTEST_PROFILE` selects another profile.
 #[test]
-fn the_run_deadline_is_strictly_below_the_nextest_termination_deadline() {
+fn the_no_progress_window_is_strictly_below_the_nextest_termination_deadline() {
     let config = std::fs::read_to_string(workspace_root().join(".config").join("nextest.toml"))
         .expect("the gate's nextest profile must be readable");
 
@@ -1170,16 +1350,17 @@ fn the_run_deadline_is_strictly_below_the_nextest_termination_deadline() {
     let killer = std::time::Duration::from_secs(field("period") * field("terminate-after"));
 
     assert!(
-        RUN_DEADLINE < killer,
-        "the runner's deadline ({RUN_DEADLINE:?}) must fire BEFORE nextest's \
-         termination deadline ({killer:?}) under profile `{active}`, or it never applies"
+        NO_PROGRESS_WINDOW < killer,
+        "the runner's no-progress window ({NO_PROGRESS_WINDOW:?}) must fire BEFORE \
+         nextest's termination deadline ({killer:?}) under profile `{active}`, or it \
+         never applies"
     );
-    // The oracle makes TWO invocations back to back, so the budget it can spend
-    // under its own deadlines must also fit.
+    // The oracle makes TWO invocations back to back, so a wedge in either must
+    // still be reported by the runner: two windows must also fit.
     assert!(
-        RUN_DEADLINE * 2 < killer,
-        "both of the oracle's runs must fit inside nextest's termination deadline \
-         under profile `{active}`: 2 x {RUN_DEADLINE:?} vs {killer:?}"
+        NO_PROGRESS_WINDOW * 2 < killer,
+        "a wedge in either of the oracle's runs must fire inside nextest's termination \
+         deadline under profile `{active}`: 2 x {NO_PROGRESS_WINDOW:?} vs {killer:?}"
     );
 }
 
@@ -1280,8 +1461,8 @@ slow-timeout = { period = \"9s\", terminate-after = 9 }
 /// observable in two independent ways — what the CLI says it wrote, and what is
 /// on disk.
 ///
-/// Being its own `#[test]` also keeps the deadline budget honest: the oracle's
-/// two runs and this one run each sit inside their own nextest process.
+/// Being its own `#[test]` also keeps the time budget honest: the oracle's two
+/// runs and this one run each sit inside their own nextest process.
 #[test]
 fn a_refused_sfc_emits_no_artifact_and_its_importer_falls_back_to_the_ambient_shim() {
     let Some(engine) = harness::resolve_gated_engine(harness::gated_engine_resolution()) else {
@@ -1293,7 +1474,6 @@ fn a_refused_sfc_emits_no_artifact_and_its_importer_falls_back_to_the_ambient_sh
     let run = harness::run_verter_tsc(
         harness::verter_tsc_emit_command(&project, &engine, "tsconfig.json", &out_dir),
         "declaration emit",
-        RUN_DEADLINE,
     );
     let stdout = run.stdout();
 
