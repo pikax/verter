@@ -77,6 +77,9 @@ const unionArms = (t: TypeDescriptor): TypeDescriptor[] => (t.kind === "union" ?
 const isUndefinedPrimitive = (t: TypeDescriptor): boolean =>
   t.kind === "primitive" && t.name === "undefined";
 
+/** Structural predicate matching `primitive("any")`. */
+const isAnyPrimitive = (t: TypeDescriptor): boolean => t.kind === "primitive" && t.name === "any";
+
 /**
  * Returns `t` with any top-level union arm of `primitive("undefined")` removed.
  * Non-union descriptors and unions that do not include `undefined` pass through
@@ -208,7 +211,12 @@ export function mapPropMeta(
       `component-meta compat cannot project ${prop.name} without a required fact or type`,
     );
   }
-  const functionArray = classifyFunctionArrayDescriptor(prop.type);
+  // A member whose descriptor is exactly `any` (an unannotated member is
+  // transcribed to it above) renders `any`: TypeScript reduces `any | undefined`
+  // to `any`, so an optional member never gains an `undefined` arm. Decided on
+  // the descriptor kind alone — display text never takes part.
+  if (isAnyPrimitive(prop.type)) return buildCompatPropertyMeta(prop, "any", "any");
+  const functionArray = classifyFunctionArrayDescriptor(prop.type, typeRegistry);
   if (functionArray)
     return renderCompatFunctionArrayUnionPropMeta(
       prop,
@@ -1694,19 +1702,26 @@ export function projectNativeComponentMeta(
   );
 }
 
+/**
+ * Classifies a `F | F[]` prop whose function arms are structurally equal. A
+ * symbolic arm (`Fn | Array<Fn>`) is read through its producer registry row,
+ * joined at depth one by {@link joinRegistryRef} — the same single lookup the
+ * display and schema renderers use.
+ */
 function classifyFunctionArrayDescriptor(
   type: TypeDescriptor,
+  typeRegistry?: Map<string, TypeDescriptor>,
 ): { functionArm: FunctionDescriptor; arrayElement: FunctionDescriptor } | undefined {
+  const joined = (arm: TypeDescriptor): TypeDescriptor =>
+    joinRegistryRef(arm, typeRegistry, new Set(), 0) ?? arm;
   const stripped = stripUndefinedArm(type);
   if (stripped.kind !== "union" || stripped.types.length !== 2) return undefined;
-  const fn = stripped.types.find((arm) => arm.kind === "function");
-  const arr = stripped.types.find((arm) => arm.kind === "array");
-  if (
-    fn?.kind !== "function" ||
-    arr?.kind !== "array" ||
-    arr.element.kind !== "function" ||
-    !descriptorsStructurallyEquivalent(fn, arr.element)
-  )
+  const arms = stripped.types.map(joined);
+  const fn = arms.find((arm) => arm.kind === "function");
+  const arr = arms.find((arm) => arm.kind === "array");
+  if (fn?.kind !== "function" || arr?.kind !== "array") return undefined;
+  const element = joined(arr.element);
+  if (element.kind !== "function" || !descriptorsStructurallyEquivalent(fn, element))
     return undefined;
-  return { functionArm: fn, arrayElement: arr.element };
+  return { functionArm: fn, arrayElement: element };
 }
