@@ -312,7 +312,14 @@ fn missing_reference_suppression_uses_the_attribution_key() {
     };
     let mut another = raw.clone();
     another.message = "File '/project/another.json' not found.".into();
-    let engine = attribute_diagnostics(&[raw, another], &ProjectTransforms(&[], None));
+    let engine = attribute_diagnostics(
+        &[raw, another],
+        &ProjectTransforms {
+            carriers: &[],
+            imported: &[],
+            workspace: None,
+        },
+    );
     assert_eq!(engine[0].dedup, graph[0].dedup);
     assert_ne!(engine[1].dedup, graph[0].dedup);
 }

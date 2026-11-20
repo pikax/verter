@@ -37,6 +37,14 @@ pub struct EngineBuild {
 }
 
 impl EngineBuild {
+    /// Splits the graph's emitting projects into those the engine builds and
+    /// those it refuses.
+    ///
+    /// The split reads project membership only: before a build there is no
+    /// import data, so a carrier-less emitting project that imports a
+    /// sibling's carrier from outside its membership is handed to the engine
+    /// here. Its build then reports the carrier as a missing module, and
+    /// `refuse_carrier_imports` refuses the project, naming the carrier.
     #[must_use]
     pub fn partition(graph: &ProjectGraph) -> Self {
         let incomplete: std::collections::BTreeSet<_> = graph
@@ -252,7 +260,7 @@ fn string_literal_at(text: &str, start: usize) -> Option<&str> {
     let rest = text.get(start..)?;
     let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
     let body = &rest[quote.len_utf8()..];
-    let end = body.find(|c: char| c == quote || matches!(c, '\\' | '\n' | '\r'))?;
+    let end = body.find([quote, '\\', '\n', '\r'])?;
     body[end..].starts_with(quote).then_some(&body[..end])
 }
 
