@@ -120,8 +120,7 @@ fn stp11_scope_module_imports_exports_and_setup_locals_keep_scope() {
         [
             SetupStatementKind::Import { names: vec![] },
             SetupStatementKind::TypeDeclaration {
-                name: "Local".into(),
-                exported: false,
+                name: "Local".into()
             },
             SetupStatementKind::Declaration {
                 names: vec!["p".into(), "q".into()]
@@ -146,6 +145,8 @@ fn stp11_normal_script_exports_distinguish_type_only_and_wildcard_re_exports() {
     assert_eq!(facts.module.named_exports, ["shared", "ns"]);
 }
 
+// Baseline adaptation: the `exported` flag does not exist before the fix, so
+// this expectation drops it and keeps the same classification order.
 #[test]
 fn setup_type_exports_classify_as_exported_type_declarations_and_value_exports_do_not() {
     let setup = concat!(
@@ -160,10 +161,7 @@ fn setup_type_exports_classify_as_exported_type_declarations_and_value_exports_d
         .into_iter()
         .map(|statement| statement.kind)
         .collect();
-    let exported = |name: &str| SetupStatementKind::TypeDeclaration {
-        name: name.into(),
-        exported: true,
-    };
+    let exported = |name: &str| SetupStatementKind::TypeDeclaration { name: name.into() };
     assert_eq!(
         kinds,
         [
@@ -171,7 +169,6 @@ fn setup_type_exports_classify_as_exported_type_declarations_and_value_exports_d
             exported("Rows"),
             SetupStatementKind::TypeDeclaration {
                 name: "Local".into(),
-                exported: false,
             },
             SetupStatementKind::Other,
             SetupStatementKind::Other,
