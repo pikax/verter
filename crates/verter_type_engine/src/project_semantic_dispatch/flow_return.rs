@@ -11651,10 +11651,7 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         owner: verter_type_expr::TopLevelOwnerId,
         path: &[String],
     ) -> bool;
-    /// A call argument's literal provenance up to the lowering of its
-    /// authored types ([`ProjectSemanticDispatch::provenance_plan`]), its
-    /// reads resolved by `reads` in the call's own scope.
-    fn provenance_plan(
+    fn resolve_scoped_argument_literal_provenance(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -11663,13 +11660,6 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
             &verter_type_expr::ValueRef,
             verter_span::Span,
         ) -> super::call_resolve::ArgumentReadLiterals,
-    ) -> Option<super::call_resolve::ProvenancePlan>;
-    /// The provenance `plan` describes once each of its authored types is
-    /// lowered to `lowered` ([`ProjectSemanticDispatch::provenance_from`]).
-    fn provenance_from(
-        &self,
-        plan: super::call_resolve::ProvenancePlan,
-        lowered: &[SemanticNodeId],
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>;
     fn arena(
         &self,
@@ -12840,7 +12830,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         body_read_site!("value_read_widens");
         ProjectSemanticDispatch::value_read_widens(self, canonical, owner, path)
     }
-    fn provenance_plan(
+    fn resolve_scoped_argument_literal_provenance(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -12849,17 +12839,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             &verter_type_expr::ValueRef,
             verter_span::Span,
         ) -> super::call_resolve::ArgumentReadLiterals,
-    ) -> Option<super::call_resolve::ProvenancePlan> {
-        body_read_site!("provenance_plan");
-        ProjectSemanticDispatch::provenance_plan(self, canonical, owner, authored, reads)
-    }
-    fn provenance_from(
-        &self,
-        plan: super::call_resolve::ProvenancePlan,
-        lowered: &[SemanticNodeId],
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
-        body_read_site!("provenance_from");
-        ProjectSemanticDispatch::provenance_from(self, plan, lowered)
+        body_read_site!("resolve_scoped_argument_literal_provenance");
+        ProjectSemanticDispatch::resolve_scoped_argument_literal_provenance(
+            self, canonical, owner, authored, reads,
+        )
     }
     fn arena(&self) -> super::arena_ops::ArenaOps<'_, C::Observe> {
         body_read_site!("arena");
@@ -13847,7 +13831,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> bool {
         self.driver.value_read_widens(canonical, owner, path)
     }
-    fn provenance_plan(
+    fn resolve_scoped_argument_literal_provenance(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -13856,16 +13840,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
             &verter_type_expr::ValueRef,
             verter_span::Span,
         ) -> super::call_resolve::ArgumentReadLiterals,
-    ) -> Option<super::call_resolve::ProvenancePlan> {
-        self.driver
-            .provenance_plan(canonical, owner, authored, reads)
-    }
-    fn provenance_from(
-        &self,
-        plan: super::call_resolve::ProvenancePlan,
-        lowered: &[SemanticNodeId],
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
-        self.driver.provenance_from(plan, lowered)
+        self.driver
+            .resolve_scoped_argument_literal_provenance(canonical, owner, authored, reads)
     }
     fn arena(
         &self,
@@ -21607,18 +21584,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         }
     }
 
-    /// The literal provenance a call argument of this frame nests, up to
-    /// the lowering of its authored types, its reads of value bindings
-    /// resolved in THIS frame's scope: a read of a parameter or local is
-    /// regular unless the binding keeps a widening literal, a read of a
-    /// binding outside the frame is the owner scope's, and a read the frame
-    /// does not model leaves its literals fresh. A parameter that shadows a
-    /// top-level binding is read as itself. The plan's lowerings are
-    /// requested by the call's route ([`helper_run::ProvenanceFrame`]).
-    fn frame_argument_provenance_plan(
+    /// The literal provenance a call argument of this frame nests, its
+    /// reads of value bindings resolved in THIS frame's scope: a read of a
+    /// parameter or local is regular unless the binding keeps a widening
+    /// literal, a read of a binding outside the frame is the owner scope's,
+    /// and a read the frame does not model leaves its literals fresh. A
+    /// parameter that shadows a top-level binding is read as itself.
+    fn frame_argument_literal_provenance(
         &mut self,
         authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
-    ) -> Option<super::call_resolve::ProvenancePlan> {
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
         use super::call_resolve::ArgumentReadLiterals;
         let authored = authored?;
         let mut reads: Vec<(verter_span::Span, ArgumentReadLiterals)> = Vec::new();
@@ -21637,7 +21612,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             let read = self.frame_argument_read(value, *root);
             reads.push((*root, read));
         }
-        self.dispatch.provenance_plan(
+        self.dispatch.resolve_scoped_argument_literal_provenance(
             self.st.canonical,
             self.st.owner,
             Some(authored),
@@ -30934,18 +30909,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     let progress = self.settle_indexed_call_argument(argument);
                     step = self.continue_call_route(flight, progress);
                 }
-                CallStep::Provenance(flight, argument) => {
-                    if suspend && body_requests_reads() {
-                        return self.helper_step_on_run(
-                            run,
-                            Box::new(HelperWait::argument_provenance(flight, argument)),
-                            None,
-                            suspend,
-                        );
-                    }
-                    let progress = self.settle_argument_provenance(argument);
-                    step = self.continue_call_route(flight, progress);
-                }
                 CallStep::Operand(flight, operand) => {
                     run.waiting.push(Waiting::CallOperand(flight));
                     run.waiting.push(Waiting::Erase);
@@ -32170,9 +32133,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             match progress {
                 call_stack::ResolveCallProgress::Indexed(argument) => {
                     progress = self.settle_indexed_call_argument(argument);
-                }
-                call_stack::ResolveCallProgress::Provenance(argument) => {
-                    progress = self.settle_argument_provenance(argument);
                 }
                 call_stack::ResolveCallProgress::List(list) => {
                     let (mut read, wait) = self

@@ -34,7 +34,7 @@ use crate::semantic_query::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use context::provenance_plan_tests;
-pub(super) use context::{ArgumentReadLiterals, ArrayLiteralShape, ProvenancePlan};
+pub(super) use context::{ArgumentReadLiterals, ArrayLiteralShape};
 pub(super) use contextual::ContextualCallState;
 pub(super) use elaboration::is_object_type;
 

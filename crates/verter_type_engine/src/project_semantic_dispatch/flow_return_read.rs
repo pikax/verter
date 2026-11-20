@@ -108,11 +108,6 @@ pub(in crate::project_semantic_dispatch) enum ReadOrigin {
     Carrier,
     IndexedValue,
     Lowering,
-    /// A lowering a call argument's literal provenance plans. Its reads are
-    /// [`Self::Lowering`]'s; only the body-read attribution of test builds
-    /// names them apart.
-    #[cfg(any(test, feature = "test-support"))]
-    ArgumentProvenance,
 }
 
 impl ReadOrigin {
@@ -126,7 +121,6 @@ impl ReadOrigin {
             Self::Carrier => "carrier",
             Self::IndexedValue => "indexed_value",
             Self::Lowering => "lowering",
-            Self::ArgumentProvenance => "argument_provenance",
         }
     }
 }
