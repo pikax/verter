@@ -82,10 +82,21 @@ mod harness {
     /// before it is treated as a runaway and killed.
     ///
     /// CPU time does not advance while the tree waits for a core, so load
-    /// cannot exhaust this budget; only the run's own work can. It stops a run
-    /// that keeps computing without finishing — which the no-progress window
-    /// cannot see — well before nextest's own killer would report it as an
-    /// anonymous timeout.
+    /// cannot exhaust this budget; only the run's own work can. It names a run
+    /// that keeps computing without finishing, which the no-progress window
+    /// cannot see.
+    ///
+    /// It is NOT ordered against nextest's termination deadline, and no test
+    /// checks it against one: that deadline is wall time, this budget is CPU
+    /// time, and how much CPU a tree gets per wall second depends on the load
+    /// and on how many threads it runs. Under the default profile's 60s
+    /// deadline an unloaded runaway reaches the budget first and fails with
+    /// this runner's message. Under the `ci` profile's 20s deadline nextest
+    /// usually kills a runaway first, as a plain timeout of the test. Either
+    /// way the runaway is stopped; only the message differs. The budget is
+    /// not lowered to fit under 20s because that would leave too little
+    /// headroom above a healthy run's measured CPU (below) to stay
+    /// load-proof, which is the failure this runner exists to remove.
     ///
     /// Sized at about four times the most CPU one invocation was measured to
     /// use: on a Linux x86_64 build host, debug build, the three invocations
@@ -1317,6 +1328,10 @@ fn slow_timeout_for(config: &str, profile: &str) -> Option<String> {
 /// the whole job rather than of this run, with no reason attached. The
 /// canonical gate runs this suite under `cargo nextest`, whose selected profile
 /// terminates a test at `slow-timeout.period x terminate-after`.
+///
+/// Only the window is checked: it is measured in wall time, like the killer.
+/// The CPU budget is measured in CPU time and cannot be ordered against a wall
+/// deadline; its documentation says what that means under each profile.
 ///
 /// Fails against a window at or above the killer — and against a reader that
 /// scans past its section's end, or that checks `default` while
