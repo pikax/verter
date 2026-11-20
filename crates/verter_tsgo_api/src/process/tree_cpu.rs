@@ -435,6 +435,19 @@ mod tests {
 
         let start = cpu(&tree);
         wait_for_growth(&tree, start, "descendant in its own group");
+
+        // The fixture leaves nothing behind: the spinning grandchild is
+        // outside the root's group, so the root's tree kill alone cannot
+        // reach it.
+        drop(tree);
+        let gone_by = Instant::now() + HANG_GUARD;
+        while super::super::process_alive(grandchild as u32) {
+            assert!(
+                Instant::now() < gone_by,
+                "the fixture's spinning grandchild {grandchild} outlived the test"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// The tree membership walk: parentage, group, and nothing else.
