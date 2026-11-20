@@ -7,6 +7,8 @@ use std::sync::Arc;
 use verter_session::sfc_projection_diagnostics::{
     attribute_diagnostics, DiagnosticCategory, EngineDiagnostic, TransformLookup,
 };
+use verter_session_query::resolution::path_utils::path_is_carrier;
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 use verter_span::path::{canonicalize_path, simplify_verbatim_path, CanonicalPath};
 use verter_span::DiagnosticSourceCache;
 use verter_workspace::workspace_snapshot::ProjectPayload;
@@ -16,7 +18,7 @@ use crate::checker::{checker_base_command, invoke_command_bounded};
 use crate::position::{ColumnEncoding, LineTable};
 use crate::reporter::{parse_tsc_build_output, Severity, TscBuildEvent};
 
-use super::project_graph::{ProjectGraph, ProjectGraphError};
+use super::project_graph::{GraphLoad, ProjectGraph, ProjectGraphError};
 use super::project_program::ProjectCheck;
 
 #[cfg(test)]
@@ -166,6 +168,92 @@ pub(super) fn refused_check(project: &Path, carrier_project: &Path) -> ProjectCh
         carrier_project.display()
     ));
     check
+}
+
+/// The engine's code for a module specifier it cannot resolve.
+const CANNOT_FIND_MODULE: u32 = 2307;
+
+/// The built `checks`, with each project that imports a carrier refused.
+///
+/// The engine's build cannot compile carriers, so a module it could not find
+/// may be a carrier the project imports from outside its own membership. Such
+/// a project is refused, naming the carrier, as one that references a carrier
+/// project is: never reported with a false missing-module error, never clean.
+/// A missing module that is no carrier keeps the engine's diagnostic.
+pub(super) fn refuse_carrier_imports(
+    checks: Vec<ProjectCheck>,
+    load: &GraphLoad,
+    ws: &dyn WorkspaceAccess,
+) -> Vec<ProjectCheck> {
+    checks
+        .into_iter()
+        .map(|check| {
+            let Some(carrier) = imported_carrier(&check, load, ws) else {
+                return check;
+            };
+            let mut refused = unchecked(Path::new(&*check.config));
+            let refusal = format!(
+                "Cannot build project '{}': it emits, and it imports '{carrier}', a component file only the projection driver can check.",
+                check.config
+            );
+            refused.engine_failure = Some(match check.engine_failure {
+                Some(failure) => format!("{failure}\n{refusal}"),
+                None => refusal,
+            });
+            refused
+        })
+        .collect()
+}
+
+/// The first carrier a missing-module error of `check` names: the specifier
+/// read from the source at the error's position, resolved under the
+/// project's configuration to a carrier file that exists.
+fn imported_carrier(
+    check: &ProjectCheck,
+    load: &GraphLoad,
+    ws: &dyn WorkspaceAccess,
+) -> Option<String> {
+    let owner = load.ownership(Path::new(&*check.config))?;
+    let context = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    check
+        .raw
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code == CANNOT_FIND_MODULE
+                && diagnostic.category == DiagnosticCategory::Error
+                && !diagnostic.file.is_empty()
+        })
+        .find_map(|diagnostic| {
+            let source = ws.read_file(&diagnostic.file)?;
+            let specifier = string_literal_at(&source, diagnostic.start as usize)?;
+            let resolved = ws
+                .resolve_import_from_project_outcome(
+                    &owner,
+                    None,
+                    &diagnostic.file,
+                    specifier,
+                    context,
+                )
+                .result()?
+                .source_id
+                .clone();
+            (path_is_carrier(&resolved) && ws.file_exists(&resolved)).then_some(resolved)
+        })
+}
+
+/// The contents of the string literal that starts at byte `start` of `text`.
+/// `None` when no quote opens there, or when the literal holds an escape or
+/// does not close on its line: a specifier that cannot be read verbatim is
+/// not guessed at.
+fn string_literal_at(text: &str, start: usize) -> Option<&str> {
+    let rest = text.get(start..)?;
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let body = &rest[quote.len_utf8()..];
+    let end = body.find(|c: char| c == quote || matches!(c, '\\' | '\n' | '\r'))?;
+    body[end..].starts_with(quote).then_some(&body[..end])
 }
 
 /// A project with no program yet: no carriers and no diagnostics.

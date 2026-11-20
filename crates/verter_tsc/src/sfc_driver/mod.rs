@@ -125,10 +125,11 @@ impl SfcTypeScriptDriverAdapter {
     /// The engine's share of a check of `load`, before any driver program
     /// opens: in build mode, the projects the engine builds on its own (see
     /// [`EngineBuild`]) go through one engine build, and the projects that
-    /// emit but reference a carrier project are refused. Returns their checks
-    /// by config, and what the outcome needs of the route. `force` is passed
-    /// to the engine build. The engine is resolved here only when a build
-    /// runs and none was resolved before.
+    /// emit but reference a carrier project are refused, as is a built
+    /// project that imports a carrier the build could not compile. Returns
+    /// their checks by config, and what the outcome needs of the route.
+    /// `force` is passed to the engine build. The engine is resolved here
+    /// only when a build runs and none was resolved before.
     pub(crate) fn engine_route(
         &self,
         request: &DriverRequest,
@@ -173,10 +174,13 @@ impl SfcTypeScriptDriverAdapter {
             );
             engine_route.emitted_files = std::mem::take(&mut outcome.emitted_files);
             routed.extend(
-                outcome
-                    .into_checks()
-                    .into_iter()
-                    .map(|check| (PathBuf::from(&*check.config), check)),
+                engine_build::refuse_carrier_imports(
+                    outcome.into_checks(),
+                    load,
+                    self.workspace.as_ref(),
+                )
+                .into_iter()
+                .map(|check| (PathBuf::from(&*check.config), check)),
             );
         }
         for (config, carrier_project) in &build.unsupported {
