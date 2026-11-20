@@ -198,7 +198,13 @@ extends pattern declared, and the false branch's out-of-scope environment.
   the written-arm proof, and the unused operand contributes only its reuse
   evidence. A node or whole lowering read keeps its take-once answer.
   Guarded by
-  `a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decision`.
+  `a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decision`;
+  its sibling
+  `an_eagerly_delivered_decision_read_leaves_its_evidence_outside_the_decision`
+  arms the per-host `TestKnobs::eager_lowering_decision_reads_for_tests`
+  knob (its only reader is the gated injection in `lowering_wait`, which then
+  requests the decision's read as `ReadShape::Whole`) and asserts the same
+  evidence check fails, so the guard rejects an eager delivery.
 - `DecisionStep::Branch(b)` is answered from `lowered` when that branch is
   already lowered, and otherwise descends into it as the frame's child,
   through the ordinary frame-owned environments (`LowerStep::Scoped`): the

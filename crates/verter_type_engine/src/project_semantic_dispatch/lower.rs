@@ -109,15 +109,6 @@ pub enum OwnerLoweringDriverForTests {
     FlowRequested,
     /// A flow body that cannot suspend: each read is answered at once.
     FlowInPlace,
-    /// [`Self::FlowRequested`], with each read a held conditional decision
-    /// makes requested as a whole answer and answered ahead of the
-    /// decision, taken once as delivered: the delivery a decision's read
-    /// must not get.
-    FlowRequestedAhead,
-    /// [`Self::FlowInPlace`], with each read a held conditional decision
-    /// makes answered at once ahead of the decision, taken once as
-    /// delivered.
-    FlowInPlaceAhead,
 }
 
 /// An owner-scope lowering run inside an enclosing observation.
@@ -139,27 +130,6 @@ std::thread_local! {
     /// armed ([`record_decision_reads_for_tests`]).
     static DECISION_READS: std::cell::RefCell<Option<Vec<DecisionReadEvidence>>> =
         const { std::cell::RefCell::new(None) };
-    /// Whether a flow holder on this thread answers the reads a held
-    /// conditional decision makes ahead of the decision
-    /// ([`answer_decision_reads_ahead_for_tests`]).
-    static DECISION_READS_AHEAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Run `body` with each read a held conditional decision makes requested,
-/// when `ahead`, as a whole answer a flow holder answers ahead of the
-/// decision and the lowering takes once as delivered, instead of a staged
-/// read made inside the decision. The previous choice is restored on exit,
-/// unwinding included.
-#[cfg(any(test, feature = "test-support"))]
-pub(super) fn answer_decision_reads_ahead_for_tests<R>(ahead: bool, body: impl FnOnce() -> R) -> R {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            DECISION_READS_AHEAD.with(|armed| armed.set(self.0));
-        }
-    }
-    let _restore = Restore(DECISION_READS_AHEAD.with(|armed| armed.replace(ahead)));
-    body()
 }
 
 /// Run `body`, recording what each read a lowering's held conditional
@@ -620,20 +590,6 @@ pub(super) struct LowerRead {
     /// and its reuse evidence) lands in that operation's observation.
     /// Every other read's answer is taken once, as delivered.
     pub(super) made_in_operation: bool,
-}
-
-impl LowerRead {
-    /// Whether a holder that answers the lowering's reads hands this read
-    /// back unread, to be made inside the held operation that named it. A
-    /// test that arms `answer_decision_reads_ahead_for_tests` has every
-    /// read answered ahead, as a whole answer taken once.
-    pub(super) fn staged_in_operation(&self) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
-        if DECISION_READS_AHEAD.with(std::cell::Cell::get) {
-            return false;
-        }
-        self.made_in_operation
-    }
 }
 
 /// An answer to the last yielded read, retaining its original envelope.

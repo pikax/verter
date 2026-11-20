@@ -3058,10 +3058,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// what it observes lands in the operation's observation
     /// ([`FlowReadDriver::deliver_lowering`]).
     fn lowering_wait(&self, request: super::lower::LowerRead) -> ReadWait {
+        let staged = request.made_in_operation;
+        #[cfg(any(test, feature = "test-support"))]
+        let staged = staged
+            && !self
+                .binding
+                .observers
+                .forcing
+                .eager_lowering_decision_reads_for_tests
+                .load(std::sync::atomic::Ordering::Relaxed);
         let shape = match request.shape {
-            super::lower::LowerReadShape::Whole if request.staged_in_operation() => {
-                ReadShape::Staged
-            }
+            super::lower::LowerReadShape::Whole if staged => ReadShape::Staged,
             super::lower::LowerReadShape::Node => {
                 verter_debug_assert!(
                     !request.made_in_operation,
