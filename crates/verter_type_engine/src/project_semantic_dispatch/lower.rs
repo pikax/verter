@@ -62,17 +62,38 @@ pub struct TypeLoweringTrace {
 /// observation of the decision operation that named it: whether the answer
 /// is partial and whether it may be reused, and whether that observation
 /// held each of those just before the read was made (`[0]`) and just after
-/// it (`[1]`). A read made inside the operation carries its own partiality
-/// and reuse evidence into the observation; one answered ahead of the
-/// operation brings none.
+/// it (`[1]`), and the dependency facts the read observed while that
+/// observation was on top. A read made inside the operation carries its own
+/// partiality, reuse and dependency evidence into the observation; one
+/// answered ahead of the operation brings none.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecisionReadEvidence {
     pub partial: bool,
     pub suppressed: bool,
     pub observed_partial: [bool; 2],
     pub observed_suppressed: [bool; 2],
+    /// The distinct dependency facts observed while the read was made, in
+    /// canonical order.
+    pub dependencies: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+}
+
+/// One decision read being recorded: the decision observation's state
+/// before the read, and a passive fact recorder installed for the read's
+/// extent. A recorder changes nothing the tracers observe; dropping the
+/// recording removes it, unwinding included.
+#[cfg(any(test, feature = "test-support"))]
+pub(super) struct DecisionReadRecording {
+    before: (bool, bool),
+    recorder: Box<crate::fact_tracing::tracing::FactReadRecorder>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for DecisionReadRecording {
+    fn drop(&mut self) {
+        crate::fact_tracing::tracing::forget_recorder(&*self.recorder);
+    }
 }
 
 /// Who drives an observed owner-scope lowering
@@ -1747,25 +1768,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             })
     }
 
-    /// Record, while a recording is armed, what the decision read `read`
-    /// left in the observation that was `before` when it was made.
+    /// Begin recording, while a recording is armed, the decision read about
+    /// to be made: the decision observation's state now, and a fact
+    /// recorder for the read's extent.
+    #[cfg(any(test, feature = "test-support"))]
+    fn begin_decision_read_for_tests(&self) -> Option<DecisionReadRecording> {
+        if DECISION_READS.with(|reads| reads.borrow().is_none()) {
+            return None;
+        }
+        let before = self.decision_observation_for_tests();
+        let recorder = Box::<crate::fact_tracing::tracing::FactReadRecorder>::default();
+        crate::fact_tracing::tracing::attach_recorder(&recorder);
+        Some(DecisionReadRecording { before, recorder })
+    }
+
+    /// Record what the decision read `read` left in the observation
+    /// `recording` began at, with the dependency facts observed meanwhile.
     #[cfg(any(test, feature = "test-support"))]
     fn record_decision_read_for_tests(
         &self,
-        before: (bool, bool),
+        recording: Option<DecisionReadRecording>,
         read: &crate::semantic_query::CacheRead<
             QueryResult<crate::semantic_query::SemanticQueryValue>,
         >,
     ) {
-        if DECISION_READS.with(|reads| reads.borrow().is_none()) {
+        let Some(mut recording) = recording else {
             return;
-        }
+        };
+        crate::fact_tracing::tracing::forget_recorder(&*recording.recorder);
+        let (dependencies, _) = std::mem::take(&mut *recording.recorder).into_parts();
+        let before = recording.before;
         let after = self.decision_observation_for_tests();
         let evidence = DecisionReadEvidence {
             partial: read.result_is_partial(),
             suppressed: read.cache_suppress,
             observed_partial: [before.0, after.0],
             observed_suppressed: [before.1, after.1],
+            dependencies,
         };
         DECISION_READS.with(|reads| {
             if let Some(reads) = reads.borrow_mut().as_mut() {
@@ -2101,13 +2140,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             LowerReadResume::Decision(state) => {
                 let mut answer = || {
                     #[cfg(any(test, feature = "test-support"))]
-                    let before = self.decision_observation_for_tests();
+                    let recording = self.begin_decision_read_for_tests();
                     let read = match deliver() {
                         LowerDelivery::Whole(read) => read,
                         LowerDelivery::Node(_) => panic!("a decision reads a whole answer"),
                     };
                     #[cfg(any(test, feature = "test-support"))]
-                    self.record_decision_read_for_tests(before, &read);
+                    self.record_decision_read_for_tests(recording, &read);
                     super::narrow_value_cache_read(read)
                 };
                 return self.advance_decision_lowering(
