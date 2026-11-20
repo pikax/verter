@@ -127,6 +127,9 @@ struct VaporCompiler<'c> {
     construct_refs: Vec<control_flow::ConstructRefs>,
     slot_frames: Vec<bool>,
     template_single_root: bool,
+    /// Whether the open template root is an element whose `v-once` or
+    /// `v-memo` wraps every effect that reaches its block.
+    frozen_root: bool,
     child_info: Vec<nav::ChildInfo>,
     refusal: Option<VueTargetRefusal>,
 }
@@ -162,6 +165,7 @@ impl<'c> VaporCompiler<'c> {
             construct_refs: Vec::new(),
             slot_frames: Vec::new(),
             template_single_root: false,
+            frozen_root: false,
             child_info: nav::child_info(inputs),
             refusal: None,
         }
@@ -384,6 +388,17 @@ impl<'c> VueTemplateVisitor for VaporCompiler<'c> {
             )
             && element.v_slot.is_none();
         let structural = element.v_condition.is_some() || element.v_for.is_some();
+        if self.depth == 0 {
+            // The root element's own block is the one its `v-once` or
+            // `v-memo` wraps when it closes.
+            self.frozen_root = builds_open_tag
+                && !structural
+                && (element.v_once.is_some()
+                    || self.inputs.structure.attrs(node).iter().any(|attr| {
+                        attr.kind == VueAttrKind::Builtin(VueBuiltinDirective::Memo)
+                            && attr.value_span.is_some()
+                    }));
+        }
         if self.depth == 0 || structural || !builds_open_tag || block_root {
             self.html_scope_stack.push(std::mem::replace(
                 &mut self.html,
@@ -785,6 +800,7 @@ impl<'c> VueTemplateVisitor for VaporCompiler<'c> {
         if let Err(error) = self.begin_child(node, true) {
             self.refusal.get_or_insert(error);
         }
+        let frozen = self.frozen_root && self.block_depth == 0;
         let Some(parent) = self.element_stack.last_mut() else {
             return;
         };
@@ -806,8 +822,12 @@ impl<'c> VueTemplateVisitor for VaporCompiler<'c> {
             let own_ref = parent.reserve_nav_text_ref(&mut self.state.counters);
             let nav_slot = parent.child_nav.len();
             parent.child_nav.push(Nav::Reserved);
-            let stmt_slot = parent.child_statements.len();
-            parent.child_statements.push(Stmt::Reserved);
+            // Under a root `v-once` or `v-memo`, with no block between, the
+            // root's wrapper covers the effect; otherwise it runs in place.
+            let stmt_slot = (!frozen).then(|| {
+                parent.child_statements.push(Stmt::Reserved);
+                parent.child_statements.len() - 1
+            });
             parent.open_text_request = Some(parent.pending_nav_requests.len());
             parent
                 .pending_nav_requests

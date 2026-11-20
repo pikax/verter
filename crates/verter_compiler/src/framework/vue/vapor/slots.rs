@@ -175,12 +175,13 @@ impl<'c> VaporCompiler<'c> {
     ) -> Result<SlotBody, VueTargetRefusal> {
         if scope.is_transparent_wrapper {
             // Several roots: each closed its own template as a root of the
-            // slot block. An element, a text run, a comment or a component
-            // is a stable root.
-            let non_stable = !scope
-                .roots
-                .iter()
-                .any(|root| matches!(root.kind, BlockKind::Node | BlockKind::Component));
+            // slot block. A component, or a template with content other than
+            // comments (an element or a text run), is a stable root.
+            let non_stable = !scope.roots.iter().any(|root| match root.kind {
+                BlockKind::Component => true,
+                BlockKind::Node => self.state.is_stable_template_root(root.template_idx),
+                BlockKind::Fragment | BlockKind::Roots => false,
+            });
             let body = self.close_roots(scope, self.span_of(node))?;
             return Ok(SlotBody {
                 run: body.run,

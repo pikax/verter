@@ -52,8 +52,21 @@ pub(super) enum VaporEffect<'c> {
         node_ref: u32,
         expr: RunId,
     },
+    /// `setValue`: an element's `value`, kept beside the DOM property.
+    Value {
+        node_ref: u32,
+        expr: RunId,
+    },
+    /// `setElementText`: a bound `textContent`.
+    ElementText {
+        node_ref: u32,
+        expr: RunId,
+    },
+    /// `svg` passes runtime-vapor's SVG flag, so each key is set as an SVG
+    /// element's attribute rather than as its (read-only) DOM property.
     DynamicProps {
         node_ref: u32,
         expr: RunId,
+        svg: bool,
     },
 }

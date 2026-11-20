@@ -186,6 +186,27 @@ impl<'c> VaporState<'c> {
         index
     }
 
+    /// Vue 3.6.0-rc.15 `isStableTemplateSlotRoot`: a slot root's template is
+    /// stable unless it is empty or holds only comments, which render nothing
+    /// a fallback could replace.
+    pub(super) fn is_stable_template_root(&self, template: Option<u32>) -> bool {
+        let Some(template) = template else {
+            return false;
+        };
+        self.templates
+            .iter()
+            .find(|declaration| declaration.index == template)
+            .is_some_and(|declaration| {
+                // Vue tests the trimmed content against
+                // `/^(?:<!--[\s\S]*?-->)+$/`, which any content between a
+                // leading `<!--` and a trailing `-->` matches.
+                let trimmed = declaration.html.trim();
+                let comment_only =
+                    trimmed.len() >= 7 && trimmed.starts_with("<!--") && trimmed.ends_with("-->");
+                !declaration.html.is_empty() && !comment_only
+            })
+    }
+
     pub(super) fn add_effect(&mut self, effect: VaporEffect<'c>) -> EffectId {
         // A text effect writes `_setText` wherever its node is declared.
         if matches!(effect, VaporEffect::Text { .. }) {
@@ -200,26 +221,11 @@ impl<'c> VaporState<'c> {
         &mut self,
         effects: Vec<EffectId>,
         indent: &'c str,
-        interleaved: bool,
-    ) -> Result<EffectGroupId, VueTargetRefusal> {
-        self.add_effect_group_with(
-            effects,
-            indent,
-            interleaved,
-            super::graph::EffectWrapper::Render,
-        )
-    }
-    pub(super) fn add_effect_group_with(
-        &mut self,
-        effects: Vec<EffectId>,
-        indent: &'c str,
-        interleaved: bool,
         wrapper: super::graph::EffectWrapper,
     ) -> Result<EffectGroupId, VueTargetRefusal> {
         let group = self.effect_graph.add_group(
             effects,
             indent,
-            interleaved,
             wrapper,
             &self.effects,
             &self.runs,

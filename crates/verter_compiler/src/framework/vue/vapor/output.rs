@@ -299,7 +299,7 @@ impl<'c> VaporState<'c> {
             } else {
                 super::graph::EffectWrapper::Render
             };
-            let group = self.add_effect_group_with(scope.own_effects, indent, false, wrapper)?;
+            let group = self.add_effect_group(scope.own_effects, indent, wrapper)?;
             parts.push(Part::Text(indent));
             parts.push(Part::Effects(group));
             parts.push(Part::Text("\n"));
@@ -535,23 +535,15 @@ pub(super) fn record_effect<'c>(effect: &VaporEffect<'c>, parts: &mut RunBuf<'c>
             node_ref,
             expr,
             svg,
-        } => record_setter(parts, "_setClass(", *node_ref, None, *expr, false, *svg),
+        } => record_setter(parts, "_setClass(", *node_ref, None, *expr, svg_tail(*svg)),
         VaporEffect::Style { node_ref, expr } => {
-            record_setter(parts, "_setStyle(", *node_ref, None, *expr, false, false)
+            record_setter(parts, "_setStyle(", *node_ref, None, *expr, ")")
         }
         VaporEffect::Prop {
             node_ref,
             attr,
             expr,
-        } => record_setter(
-            parts,
-            "_setProp(",
-            *node_ref,
-            Some(attr),
-            *expr,
-            false,
-            false,
-        ),
+        } => record_setter(parts, "_setProp(", *node_ref, Some(attr), *expr, ")"),
         VaporEffect::Attr {
             node_ref,
             attr,
@@ -563,46 +555,55 @@ pub(super) fn record_effect<'c>(effect: &VaporEffect<'c>, parts: &mut RunBuf<'c>
             *node_ref,
             Some(attr),
             *expr,
-            false,
-            *svg,
+            svg_tail(*svg),
         ),
         VaporEffect::DomProp {
             node_ref,
             attr,
             expr,
-        } => record_setter(
-            parts,
-            "_setDOMProp(",
-            *node_ref,
-            Some(attr),
-            *expr,
-            false,
-            false,
-        ),
+        } => record_setter(parts, "_setDOMProp(", *node_ref, Some(attr), *expr, ")"),
         VaporEffect::Html { node_ref, expr } => {
-            record_setter(parts, "_setHtml(", *node_ref, None, *expr, false, false)
+            record_setter(parts, "_setHtml(", *node_ref, None, *expr, ")")
         }
-        VaporEffect::DynamicProps { node_ref, expr } => record_setter(
-            parts,
-            "_setDynamicProps(",
-            *node_ref,
-            None,
-            *expr,
-            true,
-            false,
-        ),
+        VaporEffect::Value { node_ref, expr } => {
+            record_setter(parts, "_setValue(", *node_ref, None, *expr, ")")
+        }
+        VaporEffect::ElementText { node_ref, expr } => {
+            record_setter(parts, "_setElementText(", *node_ref, None, *expr, ")")
+        }
+        // Vue 3.6.0-rc.15 `genDynamicProps`: the SVG flag follows the
+        // static-key list, which is `null` when no key is static.
+        VaporEffect::DynamicProps {
+            node_ref,
+            expr,
+            svg,
+        } => parts.extend([
+            Part::Text("_setDynamicProps("),
+            Part::Name(NameKind::Node, *node_ref),
+            Part::Text(", ["),
+            Part::Run(*expr),
+            Part::Text(if *svg { "], null, true)" } else { "])" }),
+        ]),
     }
 }
 
-/// One setter call; `svg` appends runtime-vapor's trailing SVG flag.
+/// The end of a setter call: runtime-vapor's trailing SVG flag, if set.
+fn svg_tail(svg: bool) -> &'static str {
+    if svg {
+        ", true)"
+    } else {
+        ")"
+    }
+}
+
+/// One setter call, closed by `tail`.
 fn record_setter<'c>(
     parts: &mut RunBuf<'c>,
     helper: &'static str,
     node: u32,
     attr: Option<&'c str>,
     expr: RunId,
-    array: bool,
-    svg: bool,
+    tail: &'static str,
 ) {
     parts.extend([
         Part::Text(helper),
@@ -612,14 +613,7 @@ fn record_setter<'c>(
     if let Some(attr) = attr {
         parts.extend([Part::Text("\""), Part::Text(attr), Part::Text("\", ")]);
     }
-    if array {
-        parts.push(Part::Text("["));
-    }
-    parts.push(Part::Run(expr));
-    if array {
-        parts.push(Part::Text("]"));
-    }
-    parts.push(Part::Text(if svg { ", true)" } else { ")" }));
+    parts.extend([Part::Run(expr), Part::Text(tail)]);
 }
 
 fn write_effect_group<'c>(
@@ -629,18 +623,13 @@ fn write_effect_group<'c>(
 ) -> Result<RunBuf<'c>, VueTargetRefusal> {
     use super::graph::{EffectWrapper, VaporEffectNode};
     let relations = graph.relations()?;
-    let Some(VaporEffectNode::Group {
-        indent,
-        interleaved,
-        wrapper,
-    }) = relations.node(group)
-    else {
+    let Some(VaporEffectNode::Group { indent, wrapper }) = relations.node(group) else {
         return Err(VueTargetRefusal::Unsupported {
             code: "invalid-effect-group",
             span: Span::new(0, 0),
         });
     };
-    let indent = if *interleaved { "  " } else { *indent };
+    let indent = *indent;
     let mut parts = Vec::new();
     match wrapper {
         EffectWrapper::Once => {

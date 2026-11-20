@@ -62,6 +62,8 @@ pub const SET_PROP: &str = "_setProp";
 pub const SET_ATTR: &str = "_setAttr";
 pub const SET_DOM_PROP: &str = "_setDOMProp";
 pub const SET_HTML: &str = "_setHtml";
+pub const SET_VALUE: &str = "_setValue";
+pub const SET_ELEMENT_TEXT: &str = "_setElementText";
 pub const SET_DYNAMIC_PROPS: &str = "_setDynamicProps";
 pub const CHILD: &str = "_child";
 pub const NEXT: &str = "_next";
@@ -364,6 +366,8 @@ pub enum VaporHelper {
     NthChild = 1 << 39,
     SetStaticTemplateRef = 1 << 40,
     CreateForSlots = 1 << 41,
+    SetValue = 1 << 42,
+    SetElementText = 1 << 43,
 }
 
 impl VaporHelper {
@@ -413,12 +417,14 @@ impl VaporHelper {
             Self::NthChild => NTH_CHILD,
             Self::SetStaticTemplateRef => SET_STATIC_TEMPLATE_REF,
             Self::CreateForSlots => CREATE_FOR_SLOTS,
+            Self::SetValue => SET_VALUE,
+            Self::SetElementText => SET_ELEMENT_TEXT,
         }
     }
 }
 
 /// Ordered lookup table for `VaporHelperFlags::to_imports()`.
-const ALL_VAPOR: [VaporHelper; 42] = [
+const ALL_VAPOR: [VaporHelper; 44] = [
     VaporHelper::Template,
     VaporHelper::Txt,
     VaporHelper::SetText,
@@ -461,6 +467,8 @@ const ALL_VAPOR: [VaporHelper; 42] = [
     VaporHelper::NthChild,
     VaporHelper::SetStaticTemplateRef,
     VaporHelper::CreateForSlots,
+    VaporHelper::SetValue,
+    VaporHelper::SetElementText,
 ];
 
 /// Bitflag set of Vapor runtime helpers. Wraps a `u64` with O(1) add/has.

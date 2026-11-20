@@ -25,6 +25,15 @@ impl<'c> VaporCompiler<'c> {
         let inputs = self.inputs;
         let source = inputs.source.text;
         self.process_template_ref(node, scope);
+        // Vue 3.6.0-rc.15 `getRuntimeHelper`: an SVG element's
+        // attributes are written as attributes, flagged as SVG, because
+        // its geometry IDL properties (`width`, `cx`, `viewBox`, ...)
+        // are read-only `SVGAnimated*` objects a property write misses.
+        // The keys with their own setter, and camelCase `aria*` DOM
+        // properties, keep those setters on SVG elements too.
+        let facts = inputs.structure.facts(node);
+        let svg = facts.flags.has(VueNodeFlags::SVG_NAMESPACE);
+        let tag = facts.tag.map_or("", |tag| inputs.structure.text(tag));
         for attr in inputs.structure.attrs(node) {
             if matches!(attr.prop_index, VueAttr::CACHED_PROP) {
                 continue;
@@ -126,7 +135,11 @@ impl<'c> VaporCompiler<'c> {
                     let node_ref = scope.ensure_node_ref(&mut self.state.counters);
                     self.add_prop_effect(
                         scope,
-                        VaporEffect::DynamicProps { node_ref, expr },
+                        VaporEffect::DynamicProps {
+                            node_ref,
+                            expr,
+                            svg,
+                        },
                         VaporHelper::SetDynamicProps,
                         false,
                     );
@@ -141,7 +154,11 @@ impl<'c> VaporCompiler<'c> {
                 let expr = self.record_expression(value, start, parsed);
                 self.add_prop_effect(
                     scope,
-                    VaporEffect::DynamicProps { node_ref, expr },
+                    VaporEffect::DynamicProps {
+                        node_ref,
+                        expr,
+                        svg,
+                    },
                     VaporHelper::SetDynamicProps,
                     false,
                 );
@@ -185,56 +202,70 @@ impl<'c> VaporCompiler<'c> {
                     _ => {}
                 }
             }
-            // Vue 3.6.0-rc.15 `getRuntimeHelper`: an SVG element's
-            // attributes are written as attributes, flagged as SVG, because
-            // its geometry IDL properties (`width`, `cx`, `viewBox`, ...)
-            // are read-only `SVGAnimated*` objects a property write misses.
-            let svg = inputs
-                .structure
-                .facts(node)
-                .flags
-                .has(VueNodeFlags::SVG_NAMESPACE);
-            let (effect, helper) =
-                if arg == "class" && element.prop_flag.has(PropFlags::HasDynamicClass) {
-                    (
-                        VaporEffect::Class {
-                            node_ref,
-                            expr,
-                            svg,
-                        },
-                        VaporHelper::SetClass,
-                    )
-                } else if arg == "style" && element.prop_flag.has(PropFlags::HasDynamicStyle) {
-                    (VaporEffect::Style { node_ref, expr }, VaporHelper::SetStyle)
-                } else if force_prop {
-                    (
-                        VaporEffect::DomProp {
-                            node_ref,
-                            attr: arg,
-                            expr,
-                        },
-                        VaporHelper::SetDomProp,
-                    )
-                } else if force_attr || svg || is_attr_not_prop(arg) {
-                    (
-                        VaporEffect::Attr {
-                            node_ref,
-                            attr: arg,
-                            expr,
-                            svg,
-                        },
-                        VaporHelper::SetAttr,
-                    )
-                } else {
-                    (
-                        VaporEffect::Prop {
-                            node_ref,
-                            attr: arg,
-                            expr,
-                        },
-                        VaporHelper::SetProp,
-                    )
-                };
+            let special = if arg == "class" && element.prop_flag.has(PropFlags::HasDynamicClass) {
+                Some((
+                    VaporEffect::Class {
+                        node_ref,
+                        expr,
+                        svg,
+                    },
+                    VaporHelper::SetClass,
+                ))
+            } else if arg == "style" && element.prop_flag.has(PropFlags::HasDynamicStyle) {
+                Some((VaporEffect::Style { node_ref, expr }, VaporHelper::SetStyle))
+            } else if arg == "value" && can_set_value_directly(tag) {
+                Some((VaporEffect::Value { node_ref, expr }, VaporHelper::SetValue))
+            } else if arg == "innerHTML" {
+                Some((VaporEffect::Html { node_ref, expr }, VaporHelper::SetHtml))
+            } else if arg == "textContent" {
+                Some((
+                    VaporEffect::ElementText { node_ref, expr },
+                    VaporHelper::SetElementText,
+                ))
+            } else {
+                None
+            };
+            let dom_prop = || {
+                (
+                    VaporEffect::DomProp {
+                        node_ref,
+                        attr: arg,
+                        expr,
+                    },
+                    VaporHelper::SetDomProp,
+                )
+            };
+            let attr = || {
+                (
+                    VaporEffect::Attr {
+                        node_ref,
+                        attr: arg,
+                        expr,
+                        svg,
+                    },
+                    VaporHelper::SetAttr,
+                )
+            };
+            let (effect, helper) = if force_prop {
+                special.unwrap_or_else(dom_prop)
+            } else if force_attr {
+                attr()
+            } else if let Some(special) = special {
+                special
+            } else if is_camel_aria(arg) {
+                dom_prop()
+            } else if svg || should_set_as_attr(tag, arg) || arg.contains('-') {
+                attr()
+            } else {
+                (
+                    VaporEffect::Prop {
+                        node_ref,
+                        attr: arg,
+                        expr,
+                    },
+                    VaporHelper::SetProp,
+                )
+            };
             self.add_prop_effect(scope, effect, helper, is_const);
         }
     }
@@ -259,7 +290,29 @@ impl<'c> VaporCompiler<'c> {
     }
 }
 
-/// Attributes with hyphenated names use the attribute setter.
-fn is_attr_not_prop(name: &str) -> bool {
-    name.starts_with("data-") || name.starts_with("aria-") || name.contains('-')
+/// Vue 3.6.0-rc.15 `canSetValueDirectly`: every element but `<progress>`
+/// and custom elements takes `value` through `setValue`.
+fn can_set_value_directly(tag: &str) -> bool {
+    !tag.eq_ignore_ascii_case("progress") && !tag.contains('-')
+}
+
+/// A camelCase ARIA reflection (`ariaLabel`) is a DOM property.
+fn is_camel_aria(key: &str) -> bool {
+    key.as_bytes()
+        .windows(5)
+        .any(|window| window.starts_with(b"aria") && window[4].is_ascii_uppercase())
+}
+
+/// Vue 3.6.0-rc.15 `shouldSetAsAttr`: DOM properties that are read-only or
+/// differ from their attribute on some elements are written as attributes.
+fn should_set_as_attr(tag: &str, key: &str) -> bool {
+    let is = |name: &str| tag.eq_ignore_ascii_case(name);
+    match key {
+        "spellcheck" | "draggable" | "translate" | "autocorrect" | "form" => true,
+        "list" => is("input"),
+        "type" => is("textarea"),
+        "width" | "height" => is("img") || is("video") || is("canvas") || is("source"),
+        "sandbox" => is("iframe"),
+        _ => false,
+    }
 }
