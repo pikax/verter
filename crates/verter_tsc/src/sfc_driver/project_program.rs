@@ -15,7 +15,8 @@ use verter_session::sfc_projection_diagnostics::{
     TransformLookup,
 };
 use verter_session::sfc_projection_mapper::{
-    MapperProjectHandle, MapperProjectSettings, MapperTransformResult,
+    ContentMapperProjectionAdapter, MapperProjectHandle, MapperProjectSettings,
+    MapperTransformResult,
 };
 use verter_session::sfc_projection_observations::{
     projection_input_basis, CertifiedProjectionBinding, SnapshotQualifiedObservation,
@@ -277,6 +278,17 @@ impl LiveProgram {
             .unwrap_or_default()
     }
 
+    /// Whether the open session looked on disk for a carrier's checking
+    /// module. The engine keeps every read for its session, so such a read
+    /// may belong to an import the program no longer has: which carriers
+    /// the program still reaches is known only to a session that never made
+    /// one.
+    fn probed_a_checking_module(&self, mapper: &ContentMapperProjectionAdapter) -> bool {
+        self.host_reads()
+            .iter()
+            .any(|read| mapper.carrier_of_checking_module(read).is_some())
+    }
+
     /// Close the engine session and the mapper project.
     pub(crate) fn close(mut self, driver: &SfcTypeScriptDriverAdapter) {
         if let Some(session) = self.session.take() {
@@ -326,9 +338,10 @@ pub(crate) fn check_project(
 /// Check one project through its live program. With `changes`, only the
 /// listed carriers are projected again, and the program is advanced in its
 /// running engine when its input basis held. It is opened anew when the basis
-/// or the mapper settings moved, or when the previous session failed. The
-/// surfaces of foreign carriers that did not change are kept as well, and a
-/// program advanced in place keeps serving the carriers it reached by import.
+/// or the mapper settings moved, when the previous session failed, or when
+/// that session looked for a carrier's checking module, so the carriers a
+/// program reaches by import are always those a fresh program reaches. The
+/// surfaces of foreign carriers that did not change are kept as well.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_live_project(
     driver: &SfcTypeScriptDriverAdapter,
@@ -580,38 +593,17 @@ impl ProgramInputs<'_> {
             compute_virtual_config_identity(driver.workspace.as_ref(), config, &paths).to_hash16(),
             &settings.identity,
         );
+        // A program that looked for a carrier's checking module is opened
+        // anew rather than advanced: its session cannot tell an import it
+        // still has from one since removed, and the carriers it serves, with
+        // their diagnostics, must be exactly those a fresh program reaches.
         let advance = live.session.is_some()
             && live
                 .certified
                 .as_ref()
-                .is_some_and(|certified| certified.input_basis() == &basis);
+                .is_some_and(|certified| certified.input_basis() == &basis)
+            && !live.probed_a_checking_module(&driver.mapper);
         let changes = changes.filter(|_| advance);
-        // A program advanced in place still holds the carriers it reached by
-        // import, as it holds every source it read. Each is admitted and
-        // projected again, and read again when its module moved; one deleted
-        // or refused since is no longer served.
-        if let Some(changes) = &changes {
-            let kept = &changes.previous.imported_carriers;
-            // A real file now at its module path is what the import resolves to.
-            let candidates = kept
-                .iter()
-                .filter(|carrier| !driver.workspace.file_exists(&carrier.result.virtual_file))
-                .map(|carrier| carrier.carrier.to_string());
-            check.imported_carriers =
-                self.admit_imported(&handle, &resolver, id, candidates, check);
-            for projected in &check.imported_carriers {
-                let moved = kept
-                    .iter()
-                    .find(|kept| kept.carrier == projected.carrier)
-                    .is_none_or(|kept| {
-                        kept.result.virtual_file != projected.result.virtual_file
-                            || kept.result.text != projected.result.text
-                    });
-                if moved {
-                    reprojected.push(projected.result.virtual_file.to_string());
-                }
-            }
-        }
         let inputs = ProjectProgramInputs {
             project,
             carriers: &check.carriers,

@@ -1890,6 +1890,54 @@ mod watch_session {
         assert!(codes(&w.changed(&["a/C.vue"])).is_empty());
     }
 
+    /// Once a project stops importing a carrier outside its membership, it
+    /// no longer serves it or reports the carrier's own diagnostics, as a
+    /// fresh run does not; restoring the import reports them again.
+    #[test]
+    fn watch_session_removed_import_of_an_outside_carrier_matches_fresh_runs() {
+        const IMPORTING: &str = "import \"../a/C.vue\";\n\nexport const component = 1;\n";
+        let f = Fixture::new();
+        sibling_projects(&f);
+        f.write("b/x.ts", IMPORTING);
+        // Script blocks of different languages: the carrier's own diagnostic,
+        // reported by every project that checks it.
+        f.write(
+            "a/C.vue",
+            concat!(
+                "<script lang=\"ts\">export const a = 1</script>\n",
+                "<script setup lang=\"tsx\">const b = 2</script>\n",
+            ),
+        );
+        let carrier_lines = |outcome: &RunOutcome| {
+            outcome_diagnostics(outcome)
+                .into_iter()
+                .filter(|line| line.file.ends_with("a/C.vue"))
+                .count()
+        };
+        let mut w = Watched::open(f);
+        let importing = w.f.run();
+        assert_eq!(
+            project_named(&importing, "b/tsconfig.json")
+                .imported_carriers
+                .len(),
+            1
+        );
+
+        w.f.write("b/x.ts", "export const component = 1;\n");
+        let removed = w.changed(&["b/x.ts"]);
+        assert!(project_named(&removed, "b/tsconfig.json")
+            .imported_carriers
+            .is_empty());
+        let fresh = w.f.run();
+        assert_eq!(carrier_lines(&removed), carrier_lines(&fresh));
+        assert!(carrier_lines(&removed) < carrier_lines(&importing));
+        assert_eq!(exit_status(&removed), exit_status(&fresh));
+
+        w.f.write("b/x.ts", IMPORTING);
+        let restored = w.changed(&["b/x.ts"]);
+        assert_eq!(carrier_lines(&restored), carrier_lines(&importing));
+    }
+
     /// A module created where the program's resolution probed is a change it
     /// read, as `tsc --watch` treats a failed lookup.
     #[test]
