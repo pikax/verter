@@ -556,9 +556,10 @@ fn the_wire_result_carries_the_tuples_and_numeric_codes() {
 }
 
 /// Composes like the adapter, after proving the case reaches the carrier
-/// parser as warnings and nothing worse; a case that does not panics here,
-/// which the adapter reports as an internal diagnostic.
-fn warned_only_composer(
+/// parser with diagnostics, none of which breaks the template: warnings, and
+/// the one error the template stays checkable through. A case that does not
+/// panics here, which the adapter reports as an internal diagnostic.
+fn checkable_only_composer(
     grammars: &CarrierGrammarAuthority,
     canonical: &str,
     content: &str,
@@ -568,22 +569,25 @@ fn warned_only_composer(
     let artifact =
         accepted_artifact(grammars, canonical, content).expect("the carrier is accepted");
     let parsed = &artifact.common().diagnostics;
+    let checkable = |d: &verter_language::LanguageDiagnostic| {
+        d.severity != verter_language::LanguageDiagnosticSeverity::Error
+            || d.code == verter_compiler::diagnostics::CompilerErrorCode::XVIfSameKey.code_str()
+    };
     assert!(
-        !parsed.is_empty()
-            && parsed
-                .iter()
-                .all(|d| d.severity == verter_language::LanguageDiagnosticSeverity::Warning),
-        "the case must carry warnings only: {parsed:?}"
+        !parsed.is_empty() && parsed.iter().all(checkable),
+        "the case must leave the template checkable: {parsed:?}"
     );
     compose_carrier(grammars, canonical, content, custom_elements, declarations)
 }
 
-/// Markup Vue's compiler accepts, which the carrier parser only warns about,
-/// is never a carrier syntax error and never withholds a product. Only the
-/// repeated `v-if` branch key is reported, under its own warning code.
+/// Markup the template stays checkable through is never a carrier syntax
+/// error and never withholds a product: markup Vue's compiler accepts, which
+/// the carrier parser only warns about, and a key repeated across a `v-if`
+/// chain, which Vue's compiler refuses but which is reported under its own
+/// warning code.
 #[test]
-fn markup_vue_accepts_is_never_a_syntax_error_and_withholds_nothing() {
-    let adapter = ContentMapperProjectionAdapter::with_composer(warned_only_composer);
+fn checkable_markup_is_never_a_syntax_error_and_withholds_nothing() {
+    let adapter = ContentMapperProjectionAdapter::with_composer(checkable_only_composer);
     let handle = open(&adapter, "project");
     let cases: [(&str, &str, &[MapperDiagnosticCode]); 3] = [
         (

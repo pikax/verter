@@ -607,13 +607,13 @@ pub(crate) fn compose_carrier(
         Err(failure) => return failure.into(),
     };
     // The carrier parser's own errors (a missing entry block, a malformed
-    // template), and the warnings the checker reports, are reported whether
-    // or not a module composes.
+    // template) are reported whether or not a module composes.
     let parse_diagnostics = artifact
         .common()
         .diagnostics
         .iter()
-        .filter_map(reported_parse_diagnostic)
+        .filter(|diagnostic| diagnostic.severity == LanguageDiagnosticSeverity::Error)
+        .map(carrier_parse_diagnostic)
         .collect();
     // A `src` script or template has its text in another file, which only a
     // host binds; composing without it would check a carrier that is not
@@ -680,33 +680,18 @@ pub(crate) fn accepted_artifact(
         .into_framework_parse_artifact())
 }
 
-/// The mapper's report of one carrier parser diagnostic: every error, and the
-/// one warning the checker reports, a `key` repeated within a `v-if` chain.
-/// Other warnings describe markup Vue accepts and are not reported.
-fn reported_parse_diagnostic(diagnostic: &LanguageDiagnostic) -> Option<MapperDiagnostic> {
-    match diagnostic.severity {
-        LanguageDiagnosticSeverity::Error => Some(carrier_parse_diagnostic(diagnostic)),
-        LanguageDiagnosticSeverity::Warning
-            if diagnostic.code == CompilerErrorCode::XVIfSameKey.code_str() =>
-        {
-            Some(MapperDiagnostic {
-                start: diagnostic.span.start,
-                end: diagnostic.span.end,
-                code: MapperDiagnosticCode::RepeatedBranchKey,
-                message: diagnostic.message.clone(),
-            })
-        }
-        LanguageDiagnosticSeverity::Warning | LanguageDiagnosticSeverity::Info => None,
-    }
-}
-
-/// One carrier parser error, classified by the parser's stable code.
+/// One carrier parser error, classified by the parser's stable code. A key
+/// repeated within one `v-if` chain is an error Vue's compiler refuses, but
+/// the chain is well formed and the template is checked through it, so the
+/// checker reports it under a warning code of its own.
 fn carrier_parse_diagnostic(diagnostic: &LanguageDiagnostic) -> MapperDiagnostic {
     MapperDiagnostic {
         start: diagnostic.span.start,
         end: diagnostic.span.end,
         code: if diagnostic.code == CompilerErrorCode::ScriptLangMismatch.code_str() {
             MapperDiagnosticCode::ScriptLangConflict
+        } else if diagnostic.code == CompilerErrorCode::XVIfSameKey.code_str() {
+            MapperDiagnosticCode::RepeatedBranchKey
         } else {
             MapperDiagnosticCode::Syntax
         },
