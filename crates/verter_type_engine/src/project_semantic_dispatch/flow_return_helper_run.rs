@@ -235,6 +235,10 @@ self_cell::self_cell!(
     }
 );
 
+// A parked lowering answers exactly one delivery: a copy would answer it
+// twice.
+static_assertions::assert_not_impl_any!(PlannedLowerings: Clone);
+
 /// A call argument's literal provenance between the lowerings its plan
 /// lists: each planned type is lowered in the plan's owner scope through
 /// the stepping lowerer, in order, and the plan is finished once every one
