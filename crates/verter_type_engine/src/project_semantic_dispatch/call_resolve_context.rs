@@ -775,30 +775,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// writes fresh is fresh: the arm writing it fresh widens it, and the
     /// arms' types join into one position (`c ? { v: "a" as "a" } : { v:
     /// "a" }` infers `string`).
+    ///
+    /// Every read resolves in the owner scope, and the plan's authored
+    /// types lower here, in place, in the order it lists them. A call in a
+    /// function body plans with its reads resolved in the body's scope and
+    /// requests those lowerings from its flow frame instead.
     pub(in crate::project_semantic_dispatch) fn resolve_argument_literal_provenance(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
     ) -> Option<Arc<ArgumentLiteralProvenance>> {
-        self.resolve_scoped_argument_literal_provenance(canonical, owner, authored, &|_, _| {
+        let plan = self.provenance_plan(canonical, owner, authored, &|_, _| {
             ArgumentReadLiterals::OwnerScope
-        })
-    }
-
-    /// [`Self::resolve_argument_literal_provenance`] for a call whose
-    /// argument reads may name bindings of an enclosing function body:
-    /// `reads` resolves each read, by its value path and the span of the
-    /// identifier it starts from, in the call's own scope. The plan's
-    /// authored types lower here, in place, in the order it lists them.
-    pub(in crate::project_semantic_dispatch) fn resolve_scoped_argument_literal_provenance(
-        &self,
-        canonical: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
-        reads: &dyn Fn(&verter_type_expr::ValueRef, verter_span::Span) -> ArgumentReadLiterals,
-    ) -> Option<Arc<ArgumentLiteralProvenance>> {
-        let plan = self.provenance_plan(canonical, owner, authored, reads)?;
+        })?;
         let (scope, scope_owner) = plan.owner_scope();
         let lowered: Vec<SemanticNodeId> = plan
             .lowerings()
@@ -818,10 +808,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// The literal provenance `authored` records for a call argument, up to
     /// the lowering of its authored types: the walk of
-    /// [`Self::resolve_scoped_argument_literal_provenance`] over the
-    /// argument's positions and arms, with each authored type it reads
-    /// listed for lowering where the walk first uses it. None when the
-    /// argument records no authored provenance.
+    /// [`Self::resolve_argument_literal_provenance`] over the argument's
+    /// positions and arms, with `reads` resolving each read, by its value
+    /// path and the span of the identifier it starts from, in the call's
+    /// own scope, and each authored type it reads listed for lowering where
+    /// the walk first uses it. None when the argument records no authored
+    /// provenance.
     pub(in crate::project_semantic_dispatch) fn provenance_plan(
         &self,
         canonical: &str,
@@ -2902,12 +2894,7 @@ pub mod provenance_plan_tests {
             .expect("the argument lists regular positions");
 
         let in_place = dispatch
-            .resolve_scoped_argument_literal_provenance(
-                canonical,
-                owner,
-                Some(&authored),
-                owner_scope,
-            )
+            .resolve_argument_literal_provenance(canonical, owner, Some(&authored))
             .expect("the argument lists regular positions");
         assert_eq!(finished, in_place);
         assert_eq!(
