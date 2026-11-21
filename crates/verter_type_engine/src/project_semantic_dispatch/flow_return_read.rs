@@ -57,7 +57,6 @@ impl ReadWait {
     /// A holder whose answer is consumed inside a probe the answer is made
     /// outside of marks its wait so; the operation that requested the read
     /// does not.
-    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     pub(super) fn observed(mut self) -> Self {
         verter_debug_assert!(
             !matches!(self.shape, ReadShape::Staged),
@@ -139,9 +138,9 @@ pub(in crate::project_semantic_dispatch) enum ReadDelivery {
     /// place rather than by the root read. Only its own reader makes it.
     Staged(Box<ReadWait>, bool),
     /// An observed read's ordinary answer, with what answering it observed
-    /// held aside; its holder opens it ([`FlowDemandDriver::adopt_observed`],
-    /// [`FlowDemandDriver::discard_observed`]) before it is consumed.
-    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    /// held aside; its holder opens it ([`FlowDemandDriver::adopt_observed`]
+    /// where it consumes the answer, or declines its observations as a
+    /// probe discards its own) before it is consumed.
     Observed(Box<crate::project_semantic_dispatch::flow_return_fact::ObservedRead<ReadDelivery>>),
 }
 

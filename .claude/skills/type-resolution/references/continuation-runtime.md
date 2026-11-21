@@ -431,14 +431,34 @@ either the next declaration a copy chain names, or a call-initialized
 `WideningsRead` (`begin_value_widenings`, `requests`, `finish`,
 `abandon_value_widenings`) carries several walks; it adds no step of its own.
 
-A holder may not answer the read itself yet. A delivered `ReadDelivery` is
-consumed outside the walk's probe, so a call that is not fresh could not
-drop what that read observed (an operation-budget partial would stay folded
-into the enclosing build). `deliver_value_widening` and the list's
-`deliver_value_widenings` therefore refuse every delivery with the typed
-`WideningDeliveryRefusal::NeedsObservedDelivery`, handing the walk back (or
-leaving it in the list) still waiting, until a delivery carries its read's
-observation into the probe.
+A holder may answer the read itself. `answer_value_widening` hands it the
+walk's read marked observed (`ReadWait::observed`, same key, nesting, shape
+and checking site) and answers it through the root read
+(`FlowReadDriver::answer_read`) in the file whose initializer requested it,
+so the answer comes back as `ReadDelivery::Observed`, with what answering it
+observed held aside. `deliver_value_widening` (and the list's
+`deliver_value_widenings`, walk by walk; `WideningsRead::requests` yields the
+waiting walks) opens that delivery with `FlowDemandDriver::adopt_observed`
+inside the probe's resumed observation, so the probe's own adopt (the call is
+fresh) or discard (it is not) decides whether it reaches the enclosing build,
+exactly as an in-place answer's observations do: an operation-budget partial
+of a call that is not fresh is dropped. An execution abort the answer
+observed becomes the probe's own and ends the run as no fresh literal. A
+delivery holding no observation of its own was consumed outside the probe, so
+it is refused with the typed `WideningDeliveryRefusal::NeedsObservedDelivery`,
+the walk handed back (or left in the list) still waiting and still answerable
+in place. The read is observed rather than `ReadShape::Staged`: a staged read
+is handed back unread for its own reader to make, so a holder could never
+answer it, and staging would change the shape of the indexed run's reads that
+every flow caller shares. No shipped holder declines an observed answer it
+consumes, so `FlowDemandDriver::discard_observed` compiles only in test and
+`test-support` builds.
+
+`call_resolve`'s literal-provenance plan (`ProvenancePlan`) records the
+owner-scope reads its walk found widening: `widenings()` lists their value
+paths (`ValuePath`, a `typeof` reference's segments), each once in first-read
+order — exactly the reads `value_read_widens` answers `true` for. The plan's
+decision is still that in-place walk; the list is no second walk.
 
 The walk adds no stepping of its own. A call-initialized `const` routes its
 expression source as `drain_semantic_expression_source` does, under one

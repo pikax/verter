@@ -5665,3 +5665,26 @@ fn literal_provenance_plan_lists_lowerings_in_first_use_order() {
         &dispatch, CANONICAL,
     );
 }
+
+/// An argument's literal provenance plan lists the owner-scope reads whose
+/// widening walk widens (a widening `const` and its copy), each once in
+/// first-read order, and never a regular `let` read: exactly the reads the
+/// in-place widening walk answers `true` for.
+///
+/// Mutation: listing every owner-scope read rather than the widening ones
+/// lists `kept`; listing each read every time it is read lists `read`
+/// twice.
+#[test]
+fn literal_provenance_plan_lists_its_widening_reads() {
+    let host = host();
+    upsert_source(
+        &host,
+        CANONICAL,
+        "export const read = \"r\";\nexport let kept = \"k\";\nexport const copy = read;\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    verter_type_engine::project_semantic_dispatch::call_resolve::provenance_plan_tests::plan_lists_the_reads_whose_widening_walk_widens(
+        &dispatch, CANONICAL,
+    );
+}

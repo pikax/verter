@@ -11219,15 +11219,16 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
     /// that is current here, exactly as [`Self::adopt_read`] joins it. A
     /// holder that consumes the answer inside a probe adopts it there, so the
     /// probe's own adopt or discard decides whether it reaches the build.
-    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     fn adopt_observed(
         &self,
         read: Box<super::flow_return_fact::ObservedRead<ReadDelivery>>,
     ) -> Result<ReadDelivery, crate::semantic_query::ExecutionAbort>;
     /// Open an observed read's delivery whose observations its holder
     /// declines, as a probe discards its own: they are dropped, and only an
-    /// execution abort it observed survives.
-    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    /// execution abort it observed survives. No shipped holder declines an
+    /// answer it consumes: a widening walk opens its holder's delivery
+    /// inside its freshness probe, whose own discard drops it.
+    #[cfg(any(test, feature = "test-support"))]
     fn discard_observed(
         &self,
         read: Box<super::flow_return_fact::ObservedRead<ReadDelivery>>,
@@ -12103,6 +12104,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> Result<ReadDelivery, crate::semantic_query::ExecutionAbort> {
         FlowDemandDriver::adopt_read(self, *read)
     }
+    #[cfg(any(test, feature = "test-support"))]
     fn discard_observed(
         &self,
         read: Box<super::flow_return_fact::ObservedRead<ReadDelivery>>,
@@ -13217,6 +13219,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> Result<ReadDelivery, crate::semantic_query::ExecutionAbort> {
         self.driver.adopt_observed(read)
     }
+    #[cfg(any(test, feature = "test-support"))]
     fn discard_observed(
         &self,
         read: Box<super::flow_return_fact::ObservedRead<ReadDelivery>>,
