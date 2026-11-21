@@ -1801,7 +1801,9 @@ fn module_layout(
                 let hoisted = match &statement.kind {
                     SetupStatementKind::Import { .. } => true,
                     // An exported type is a module export, so it always
-                    // stands at module scope with its `export` keyword.
+                    // stands at module scope with its `export` keyword, as
+                    // Vue hoists it, even when it reads a setup value or a
+                    // binder parameter only the setup scope binds.
                     SetupStatementKind::TypeDeclaration { name, exported } => {
                         *exported || module_types.contains(name.as_str())
                     }
@@ -2053,7 +2055,8 @@ fn exposed_binding(facts: &TsSetupProjection, callee: SourceRange) -> Option<Exp
 /// those the public declaration or an exported setup type names (the binder
 /// capture's lifted declarations) that are free in no binder parameter,
 /// depend on no setup value, transitively, and share no name with a
-/// normal-script binding.
+/// normal-script binding. An exported setup type is hoisted whether or not
+/// it is in this set (see `module_layout`).
 /// Every other setup type declaration stays in the setup scope, where the
 /// binder and the setup values are in scope and where a setup declaration
 /// shadows a normal-script one of the same name instead of merging with it.
