@@ -3720,6 +3720,113 @@ fn a_polled_indexed_argument_matches_its_synchronous_value() {
     }
 }
 
+/// A body whose call argument nests a mixed position: `v` is written by a
+/// fresh `1` and by a read of a module constant declared `"r"`, so the
+/// argument's literal provenance lowers `typeof read` in the owner scope,
+/// a lowering that waits on a read.
+const ARGUMENT_PROVENANCE: &str = "declare function keep<T>(x: T): T;\n\
+                                   declare const read: \"r\";\n\
+                                   export function provenance(c: boolean) {\n\
+                                   return keep({ v: c ? read : 1 });\n\
+                                   }\n";
+
+fn argument_provenance_read(
+    polled: bool,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    CountedBodyReads,
+) {
+    const FILE: &str = "/semantic-task/argument-provenance.ts";
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(ARGUMENT_PROVENANCE),
+        crate::FileLanguage::script_ts(),
+    );
+    list_read_on_host(host, FILE, "provenance", polled)
+}
+
+/// The owner-scope lowerings an argument's literal provenance plans are
+/// requested from the body's flow frame and answered by its root read, not
+/// lowered where the route stands; settled in place instead, they answer
+/// the same value, facts, diagnostics and receipt.
+#[test]
+fn an_argument_provenance_requests_its_planned_lowerings() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    let (requests, evidence, rows) = argument_provenance_read(false);
+    let (in_place_requests, in_place, in_place_rows) =
+        with_body_reads_in_place_for_tests(|| argument_provenance_read(false));
+    assert!(
+        !evidence.0 .3,
+        "the call is completely modeled: {evidence:?}"
+    );
+    assert_eq!(in_place_requests, 0);
+    let provenance_reads = in_place_rows
+        .iter()
+        .filter(|((stage, site, _), _)| {
+            *stage == Some("read_in_place") && *site == "argument_provenance"
+        })
+        .map(|(_, count)| *count)
+        .sum::<u64>();
+    assert!(
+        provenance_reads > 0,
+        "the planned lowering waits on a read, answered at once where nothing \
+         suspends: {in_place_rows:?}"
+    );
+    assert!(
+        requests as u64 >= provenance_reads,
+        "each read the planned lowering waits on is requested: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|((_, site, _), _)| *site != "argument_provenance"),
+        "the root answers the planned lowering's reads: {rows:?}"
+    );
+    assert_eq!(
+        evidence, in_place,
+        "requesting the lowerings preserves value, facts, diagnostics and receipt work and footprint"
+    );
+}
+
+/// Polled, the argument's planned lowerings are requested exactly as they
+/// are synchronously: neither form settles a provenance read where the
+/// route stands, and both answer the same value, facts, diagnostics and
+/// receipt.
+#[test]
+fn a_polled_argument_provenance_matches_its_synchronous_value() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    let (requests, synchronous, synchronous_rows) = argument_provenance_read(false);
+    let (polled_requests, polled, polled_rows) = argument_provenance_read(true);
+    let (_, _, in_place_rows) =
+        with_body_reads_in_place_for_tests(|| argument_provenance_read(false));
+    let provenance_reads = |rows: &CountedBodyReads| {
+        rows.iter()
+            .filter(|((_, site, _), _)| *site == "argument_provenance")
+            .map(|(_, count)| *count)
+            .sum::<u64>()
+    };
+    let planned = provenance_reads(&in_place_rows);
+    assert!(
+        planned > 0,
+        "the planned lowering waits on a read: {in_place_rows:?}"
+    );
+    for (form, rows) in [("synchronous", &synchronous_rows), ("polled", &polled_rows)] {
+        assert_eq!(
+            provenance_reads(rows),
+            0,
+            "the {form} form requests the planned lowering's reads: {rows:?}"
+        );
+    }
+    assert!(
+        polled_requests as u64 >= planned,
+        "each read the planned lowering waits on is requested when polled: {polled_rows:?}"
+    );
+    assert_eq!(polled_requests, requests);
+    semantic_poll_contract::assert_joined_matches(polled, &synchronous);
+}
+
 /// A chain of `length` functions, each returning `sink(make_i()!)`: the
 /// indexed argument's call declares its return as the return of the
 /// function before it, which `sink` never inspects.
