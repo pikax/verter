@@ -1909,6 +1909,60 @@ short.$emit('save', 'x');
     );
 }
 
+#[test]
+fn a_valueless_attribute_checks_as_true() {
+    let f = Fixture::new();
+    f.base();
+    f.write(
+        "tsconfig.json",
+        r#"{"extends":"./base.json","include":["*.vue"]}"#,
+    );
+    f.write(
+        "Child.vue",
+        r#"<script setup lang="ts">
+defineProps<{ flag?: boolean }>();
+</script>
+<template><p /></template>
+"#,
+    );
+    f.write(
+        "Parent.vue",
+        r#"<script setup lang="ts">
+import Child from './Child.vue';
+const attrs = { flag: false };
+</script>
+<template>
+  <Child flag />
+  <Child v-bind="attrs" flag />
+  <Child flag="x" />
+  <input required>
+</template>
+"#,
+    );
+    let outcome = f.run();
+    assert_eq!(outcome.carriers_checked, 2);
+    // As in vue-tsc, a bare attribute is `true`, which a boolean prop and a
+    // boolean native attribute accept, also beside an object spread; a
+    // written value stays a string.
+    let diagnostics = outcome_diagnostics(&outcome);
+    let rows: Vec<(String, u32, u32)> = diagnostics
+        .iter()
+        .filter(|d| d.verter_code.is_none())
+        .map(|d| {
+            let file = Path::new(&d.file)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (file, d.ts_code, d.line)
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![("Parent.vue".to_owned(), 2322, 8)],
+        "{diagnostics:?}"
+    );
+}
+
 /// One of the `diagnostics` fixture's own carriers, as authored.
 fn diagnostics_fixture_carrier(name: &str) -> String {
     std::fs::read_to_string(

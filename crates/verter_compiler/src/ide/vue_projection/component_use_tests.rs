@@ -242,7 +242,9 @@ fn component_use_listener_contracts_follow_the_runtime_listener_key() {
                 match &check.value {
                     MemberValue::Expression { spelling, .. }
                     | MemberValue::InlineHandler { spelling, .. } => spelling.as_str(),
-                    MemberValue::StaticText(_) => panic!("authored handler"),
+                    MemberValue::StaticText(_) | MemberValue::Valueless => {
+                        panic!("authored handler")
+                    }
                 },
             )
         })
@@ -353,6 +355,36 @@ fn component_use_static_discriminant_stays_a_literal() {
     assert!(bound_kind.render().contains("\"kind\": ('grid')"));
     let escaped = witness_of("  <Table title='a\"b' />");
     assert!(escaped.render().contains("\"title\": \"a\\\"b\""));
+}
+
+/// A valueless attribute constructs `true`, as vue-tsc writes it, so a
+/// boolean prop accepts it; a written value, even an empty one, stays its
+/// string.
+#[test]
+fn component_use_valueless_attribute_constructs_true() {
+    let witness_of = |template: &str| project(template).witnesses[0].clone();
+    let bare = witness_of("  <Table :rows=\"ids\" inline />");
+    assert_eq!(member(&bare, "inline"), &MemberValue::Valueless);
+    assert!(
+        bare.render().contains("\"inline\": true"),
+        "{}",
+        bare.render()
+    );
+    let empty = witness_of("  <Table :rows=\"ids\" inline=\"\" />");
+    assert_eq!(
+        member(&empty, "inline"),
+        &MemberValue::StaticText(String::new())
+    );
+    assert!(
+        empty.render().contains("\"inline\": \"\""),
+        "{}",
+        empty.render()
+    );
+    let written = witness_of("  <Table :rows=\"ids\" inline=\"x\" />");
+    assert_eq!(
+        member(&written, "inline"),
+        &MemberValue::StaticText("x".to_string())
+    );
 }
 
 /// A kebab-case attribute is constructed under the camel-case prop it
@@ -713,7 +745,7 @@ fn flattened(witness: &ComponentUseWitness, component: WitnessComponent) -> Stri
                     crate::template::vue_syntax::trim_handler_body(spelling).to_string()
                 },
             )),
-            MemberValue::StaticText(_) => {}
+            MemberValue::StaticText(_) | MemberValue::Valueless => {}
         }
     }
     if let Some(inner) = witness
