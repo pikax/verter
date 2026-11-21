@@ -100,8 +100,9 @@ describe("decodeComponentMetaPayload", () => {
 
     const native = decodeComponentMetaPayload(payload);
     const root = native.props[0]?.type;
+    const registry = new Map((native.typeRegistry ?? []).map((entry) => [entry.name, entry.type]));
 
-    expect(typeExprToDescriptor(root!)).toEqual({ kind: "ref", name: "TreeNode" });
+    expect(typeExprToDescriptor(root!, registry)).toEqual({ kind: "ref", name: "TreeNode" });
     expect(nativeTypeRegistryToMap(native)?.get("TreeNode")).toEqual({
       kind: "object",
       properties: [
@@ -412,7 +413,7 @@ describe("decodeComponentMetaPayload", () => {
     });
   });
 
-  it("transcribes an indexed access structurally even when the registry declares its object", () => {
+  it("does not reuse no-registry graph descriptors after a registry-backed conversion", () => {
     const payload = buildTestComponentMetaProtoPayload({
       filePath: "/project/src/Button.vue",
       props: [
@@ -442,19 +443,18 @@ describe("decodeComponentMetaPayload", () => {
       toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, payload)),
     );
     const propType = native.props[0]!.type;
+    const registry = new Map((native.typeRegistry ?? []).map((entry) => [entry.name, entry.type]));
 
-    // The bridge transcribes the wire node; it never navigates `Fields["label"]`
-    // through the registry, so the structural form survives while the registry
-    // row stays available to consumers that join on the name.
+    // Without a registry the bridge cannot resolve `Fields[label]` to
+    // the underlying member type, so the structural `IndexedAccessType`
+    // form survives end-to-end. With a registry the indexed access
+    // collapses to the resolved member type.
     expect(typeExprToDescriptor(propType)).toEqual({
       kind: "indexedAccess",
       objectType: { kind: "ref", name: "Fields" },
       indexType: { kind: "literal", value: "label" },
     });
-    expect(nativeTypeRegistryToMap(native)?.get("Fields")).toEqual({
-      kind: "object",
-      properties: [{ name: "label", type: { kind: "primitive", name: "string" }, optional: false }],
-    });
+    expect(typeExprToDescriptor(propType, registry)).toEqual({ kind: "primitive", name: "string" });
   });
 
   it("hard-fails on version mismatches and localizes a dangling node id", () => {

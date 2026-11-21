@@ -958,11 +958,7 @@ defineProps<Props>()
   // while closed-key mapped object surfaces (`Button['slots']` /
   // `Button['ui']`) publish as shallow structured ref carriers, whose
   // display/schema stays symbolic rather than materializing the carrier.
-  // Expected to fail until the producer publishes the instantiated indexed-access
-  // terminal (`ComponentSlots<typeof theme>` / `ComponentUI<typeof theme>`) with
-  // its `typeof` argument kept symbolic; compat does not substitute generic
-  // arguments to recover it.
-  it.fails("publishes finite mapped helper types with concrete indexed-access terminals and shallow surface carriers", async () => {
+  it("publishes finite mapped helper types with concrete indexed-access terminals and shallow surface carriers", async () => {
     const checker = await createRuntimeChecker("native-eval-mapped-helpers");
 
     checker.updateFile(

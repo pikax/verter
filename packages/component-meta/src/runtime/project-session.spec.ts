@@ -91,6 +91,46 @@ describe("ProjectSession", () => {
     expect(compat.slots[0]?.returnType).toBe("VNode[]");
   });
 
+  it("decodes resolved native payloads through a dedicated session method", () => {
+    const resolvedPayload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Button.vue",
+      props: [
+        { name: "resolvedLabel", type: { kind: "primitive", name: "string" }, required: true },
+      ],
+    });
+    const nativeProject = createMockNativeProject();
+    const nativeSession = createMockNativeSession({
+      getResolvedComponentMeta() {
+        return resolvedPayload;
+      },
+    });
+    const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+    const session = new ProjectSession(engine, "lease-1", nativeSession as any);
+
+    const native = session.getResolvedComponentMeta("/project/src/Button.vue") as any;
+
+    expect(native?.props[0]?.name).toBe("resolvedLabel");
+  });
+
+  it("does not fall back to the plain native query when resolved metadata is unavailable", () => {
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Button.vue",
+      props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
+    });
+    const getComponentMeta = vi.fn(() => payload);
+    const nativeProject = createMockNativeProject();
+    const nativeSession = createMockNativeSession({
+      getComponentMeta,
+    });
+    const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+    const session = new ProjectSession(engine, "lease-1", nativeSession as any);
+
+    expect(() => session.getResolvedComponentMeta("/project/src/Button.vue")).toThrow(
+      /resolved component-meta query/i,
+    );
+    expect(getComponentMeta).not.toHaveBeenCalled();
+  });
+
   describe("decoded-result memo", () => {
     it("repeated getComponentMeta decodes only once", () => {
       const payload = encodeTestComponentMetaPayload({

@@ -46,6 +46,27 @@ describe("typeExprToDescriptor: compiler intrinsics", () => {
     expect(descriptor.kind).not.toBe("unknown");
   });
 
+  it("does NOT resolve through the native registry, even when `Awaited` is registered", () => {
+    // The contract that matters: an intrinsic names no declaration, so a
+    // userland type registered under the same spelling must not capture it.
+    const registry = new Map<string, NativeTypeExpr>([
+      ["Awaited", { kind: "primitive", name: "string" }],
+    ]);
+
+    const resolved = typeExprToDescriptor(resolvedAwaited, registry);
+    expect(resolved).toEqual({
+      kind: "intrinsicApplication",
+      op: "awaited",
+      arguments: [{ kind: "ref", name: "T" }],
+    });
+
+    // Sanity check that the registry is live at all — an authored reference
+    // spelled the same way DOES go through it. Without this, the assertion
+    // above could pass for the wrong reason (an inert registry).
+    const authored = typeExprToDescriptor(authoredAwaited, registry);
+    expect(authored).not.toEqual(resolved);
+  });
+
   it("keeps the intrinsic distinct from the reference that renders the same", () => {
     expect(typeExprToDescriptor(resolvedAwaited)).not.toEqual(
       typeExprToDescriptor(authoredAwaited),
