@@ -146,15 +146,13 @@ pub enum SetupStatementKind {
         /// Imported local names.
         names: Vec<String>,
     },
-    /// Type-only declaration (`type`, `interface`); hoists to module scope
-    /// when nothing it reads is bound only in the setup scope.
+    /// Type-only declaration (`type`, `interface`); hoists to module scope.
     TypeDeclaration {
         /// Declared type name.
         name: String,
-        /// For `export type` / `export interface`, the carrier bytes from
-        /// the `export` keyword to the declaration: a module export that
-        /// keeps them at module scope and loses them in the setup scope.
-        export: Option<SourceRange>,
+        /// Authored as `export type` / `export interface`: an ordinary
+        /// module export, as Vue hoists it, that keeps its `export` keyword.
+        exported: bool,
     },
     /// Value declaration; stays inside the setup body.
     Declaration {
@@ -678,7 +676,7 @@ fn project_setup(
         .iter()
         .map(|statement| SetupStatement {
             span: range(statement.span(), block.content_start),
-            kind: classify(statement, block.content_start),
+            kind: classify(statement),
         })
         .collect();
     Ok(TsSetupProjection {
@@ -691,7 +689,7 @@ fn project_setup(
     })
 }
 
-fn classify(statement: &Statement<'_>, base: u32) -> SetupStatementKind {
+fn classify(statement: &Statement<'_>) -> SetupStatementKind {
     match statement {
         Statement::ImportDeclaration(import) => SetupStatementKind::Import {
             names: if import.import_kind.is_type() {
@@ -717,29 +715,24 @@ fn classify(statement: &Statement<'_>, base: u32) -> SetupStatementKind {
             },
         },
         _ => {
-            // `export type` / `export interface` is a module type export;
-            // any other export stays in the setup body, the error it is in
-            // Vue.
+            // `export type` / `export interface` is a module export Vue
+            // hoists; any other export stays in the setup body, the error it
+            // is in Vue.
             if let Some(export) = NamedExportParts::of_statement(statement) {
-                return match export.declaration.and_then(|declaration| {
-                    Some((
-                        declaration.span().start,
-                        type_declaration_name(declaration)?,
-                    ))
-                }) {
-                    Some((declaration_start, name)) => SetupStatementKind::TypeDeclaration {
+                return match export.declaration.and_then(type_declaration_name) {
+                    Some(name) => SetupStatementKind::TypeDeclaration {
                         name,
-                        export: Some(range(
-                            oxc_span::Span::new(export.span.start, declaration_start),
-                            base,
-                        )),
+                        exported: true,
                     },
                     None => SetupStatementKind::Other,
                 };
             }
             match statement.as_declaration() {
                 Some(declaration) => match type_declaration_name(declaration) {
-                    Some(name) => SetupStatementKind::TypeDeclaration { name, export: None },
+                    Some(name) => SetupStatementKind::TypeDeclaration {
+                        name,
+                        exported: false,
+                    },
                     None => SetupStatementKind::Declaration {
                         names: declaration_names(declaration),
                     },

@@ -121,7 +121,7 @@ fn stp11_scope_module_imports_exports_and_setup_locals_keep_scope() {
             SetupStatementKind::Import { names: vec![] },
             SetupStatementKind::TypeDeclaration {
                 name: "Local".into(),
-                export: None,
+                exported: false,
             },
             SetupStatementKind::Declaration {
                 names: vec!["p".into(), "q".into()]
@@ -150,32 +150,31 @@ fn stp11_normal_script_exports_distinguish_type_only_and_wildcard_re_exports() {
 fn setup_type_exports_classify_as_exported_type_declarations_and_value_exports_do_not() {
     let setup = concat!(
         "export interface Row { id: string }\n",
-        "export  type Rows = Row[];\n",
+        "export type Rows = Row[];\n",
         "interface Local { row: Row }\n",
         "export const limit = 1;\n",
         "export enum Mode { A }\n",
     );
-    // A type export's `export` range spans the keyword to the declaration.
     let kinds: Vec<_> = setup_of(setup)
         .statements
         .into_iter()
-        .map(|statement| match statement.kind {
-            SetupStatementKind::TypeDeclaration { name, export } => Some((
-                name,
-                export.map(|export| &setup[export.start as usize..export.end as usize]),
-            )),
-            SetupStatementKind::Other => None,
-            other => panic!("{other:?}"),
-        })
+        .map(|statement| statement.kind)
         .collect();
+    let exported = |name: &str| SetupStatementKind::TypeDeclaration {
+        name: name.into(),
+        exported: true,
+    };
     assert_eq!(
         kinds,
         [
-            Some(("Row".to_string(), Some("export "))),
-            Some(("Rows".to_string(), Some("export  "))),
-            Some(("Local".to_string(), None)),
-            None,
-            None,
+            exported("Row"),
+            exported("Rows"),
+            SetupStatementKind::TypeDeclaration {
+                name: "Local".into(),
+                exported: false,
+            },
+            SetupStatementKind::Other,
+            SetupStatementKind::Other,
         ]
     );
 }
