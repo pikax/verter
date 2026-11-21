@@ -2428,3 +2428,44 @@ const row: Row = { id: 'b' };
         .collect();
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+#[test]
+fn setup_type_exports_reading_setup_scope_names_type_check_where_they_stand() {
+    let f = Fixture::new();
+    f.base();
+    f.write(
+        "tsconfig.json",
+        r#"{"extends":"./base.json","include":["*.vue"]}"#,
+    );
+    // A setup value and a binder parameter exist only in the setup scope;
+    // a type export reading either is checked there, not as an unbound
+    // name at module scope.
+    f.write(
+        "A.vue",
+        r#"<script setup lang="ts">
+const count = 1;
+export type Counted = { count: typeof count };
+defineProps<{ counted: Counted }>();
+</script>
+
+<template><p>{{ counted.count }}</p></template>
+"#,
+    );
+    f.write(
+        "B.vue",
+        r#"<script setup lang="ts" generic="T">
+export interface Boxed { value: T }
+defineProps<{ boxed: Boxed }>();
+</script>
+
+<template><p>{{ boxed.value }}</p></template>
+"#,
+    );
+    let outcome = f.run();
+    assert_eq!(outcome.carriers_checked, 2);
+    let errors: Vec<_> = outcome_diagnostics(&outcome)
+        .into_iter()
+        .filter(|d| d.severity == crate::reporter::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
