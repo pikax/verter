@@ -150,6 +150,43 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
       expect(JSON.stringify(result.schema)).not.toContain('"kind":"event"');
     });
 
+    it("joins a symbolic function-array arm through one registry row and never a second", () => {
+      const handler = func(
+        [{ name: "x", type: primitive("number"), optional: false }],
+        primitive("void"),
+      );
+      const registry = new Map<string, TypeDescriptor>([
+        ["Handler", handler],
+        ["HandlerList", array(ref("Handler"))],
+      ]);
+
+      // The array element is a reference published on the prop itself: one join each.
+      const direct = mapPropMeta(
+        makeProp({
+          name: "onPick",
+          type: union([ref("Handler"), array(ref("Handler"))]),
+          required: true,
+        }),
+        undefined,
+        registry,
+      );
+      expect(direct.type).toBe("((x: number) => void) | ((x: number) => void)[]");
+
+      // The element reference only appears inside the joined `HandlerList` row, so
+      // reading it would be a second registry hop: the element stays symbolic.
+      const nested = mapPropMeta(
+        makeProp({
+          name: "onPick",
+          type: union([ref("Handler"), ref("HandlerList")]),
+          required: true,
+        }),
+        undefined,
+        registry,
+      );
+      expect(nested.type).not.toBe(direct.type);
+      expect(nested.type).toContain("Handler[]");
+    });
+
     // @ai-generated - Requires Numberish classification to consume the complete descriptor.
     it("declines Numberish projection when an unrelated union arm is present", () => {
       const result = mapPropMeta(

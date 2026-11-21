@@ -133,13 +133,38 @@ expansion and no row lookup by rendered application text.
 | Before | After |
 | --- | --- |
 | A branded string union (`target`) was reordered to put `(string & {})` first, and `rel` arms were sorted | arms follow the producer's published union order |
-| An annotated union containing `any` collapsed to `any` | the union keeps its arms, for example `any \| { root?: any, img?: any } \| undefined` |
+| A published union descriptor with an `any` arm collapsed to `any` | the union keeps its published arms: an `icon` prop whose descriptor is the union of `string`, `any` and `undefined` keeps the schema arms `string`, `any`, `undefined` |
 | A prop tagged `@IconifyIcon` rendered `any` | rendered from its descriptor |
 | A `@defaultValue` literal moved to the front of a literal union | the published order is kept |
 
 A member whose descriptor is exactly `any`, including an unannotated member,
 still renders `any` with schema `any` (TypeScript reduces `any | undefined` to
-`any`). An unannotated event payload renders `any[]`.
+`any`). An unannotated event payload renders `any[]`. Arms are kept only
+when the producer publishes them: an authored `as?: any | { root?: any, img?: any }`
+prop reaches compat as exactly `any`, because TypeScript reduces the union to
+`any`, so it renders `any` with schema `any`.
+
+A `F | F[]` prop whose arms are symbolic references renders as a
+function-or-array union when each arm, and the array element published on the
+prop, joins its own producer row. A reference that only appears inside a joined
+row stays symbolic: `Handler | HandlerList`, where the row `HandlerList` is
+`Handler[]`, does not become a function-or-array union.
+
+### Known gap: instantiated indexed-access terminals over a generic helper
+
+Before, JavaScript substituted a generic helper's type argument into its
+registry row to name the terminal of an indexed access. That substitution is
+gone, and the producer does not yet publish the instantiated terminal with a
+symbolic `typeof` argument. Until it does, the terminal is transcribed as the
+producer publishes it:
+
+| Case | Before | Now |
+| --- | --- | --- |
+| `type Button = ComponentConfig<typeof theme, …>`, prop `ui?: Button['slots']` (compat schema arm) | `{ kind: "object", type: "ComponentSlots<unknown>", schema: {} }` | `{ kind: "object", type: 'Button["slots"]', schema: {} }` |
+| The same prop in the native result, with the helper declared in the component's own file | `ref ComponentSlots<unknown("typeof theme")>` | `indexedAccess` of `ref Button` by the literal `"slots"` |
+
+Both are owed by the producer. Compat will not substitute generic arguments
+or navigate rows to recover them.
 
 ### API: one projection for every surface
 
