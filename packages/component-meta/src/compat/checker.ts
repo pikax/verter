@@ -1706,21 +1706,26 @@ export function projectNativeComponentMeta(
  * Classifies a `F | F[]` prop whose function arms are structurally equal. A
  * symbolic arm (`Fn | Array<Fn>`) is read through its producer registry row,
  * joined at depth one by {@link joinRegistryRef} — the same single lookup the
- * display and schema renderers use.
+ * display and schema renderers use. A reference that only appears inside a
+ * joined row stays symbolic: the array element is joined only when the array
+ * arm itself was published on the prop, never after the arm came from a row.
  */
 function classifyFunctionArrayDescriptor(
   type: TypeDescriptor,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): { functionArm: FunctionDescriptor; arrayElement: FunctionDescriptor } | undefined {
-  const joined = (arm: TypeDescriptor): TypeDescriptor =>
-    joinRegistryRef(arm, typeRegistry, new Set(), 0) ?? arm;
   const stripped = stripUndefinedArm(type);
   if (stripped.kind !== "union" || stripped.types.length !== 2) return undefined;
-  const arms = stripped.types.map(joined);
-  const fn = arms.find((arm) => arm.kind === "function");
-  const arr = arms.find((arm) => arm.kind === "array");
+  const arms = stripped.types.map((arm) => {
+    const row = joinRegistryRef(arm, typeRegistry, new Set(), 0);
+    return { descriptor: row ?? arm, depth: row ? 1 : 0 };
+  });
+  const fn = arms.find((arm) => arm.descriptor.kind === "function")?.descriptor;
+  const arrArm = arms.find((arm) => arm.descriptor.kind === "array");
+  const arr = arrArm?.descriptor;
   if (fn?.kind !== "function" || arr?.kind !== "array") return undefined;
-  const element = joined(arr.element);
+  const element =
+    joinRegistryRef(arr.element, typeRegistry, new Set(), arrArm!.depth) ?? arr.element;
   if (element.kind !== "function" || !descriptorsStructurallyEquivalent(fn, element))
     return undefined;
   return { functionArm: fn, arrayElement: element };
