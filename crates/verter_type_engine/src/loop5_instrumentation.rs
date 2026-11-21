@@ -99,6 +99,59 @@ pub static EXECUTE_COOPERATIVE_BUILD_NS_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// slot-binding carrier. Default: 0.
 pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0);
 
+/// The reductions of every `MergedDecl` carrier, by carrier: the issuing
+/// store's identity and the carrier's contributor list, each with how many
+/// times the declaration-merge reducer ran over it. How often one carrier
+/// is reduced again decides whether its reduced node is worth keeping
+/// beside it.
+type MergedDeclReductions =
+    rustc_hash::FxHashMap<(u64, Box<[crate::semantic_query::SemanticNodeId]>), u64>;
+
+static MERGED_DECL_REDUCTIONS: std::sync::LazyLock<std::sync::Mutex<MergedDeclReductions>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// How often the declaration-merge reducer ran over `MergedDecl` carriers:
+/// every reduction, the distinct carriers reduced, and the most reductions
+/// one carrier received.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MergedDeclReductionTally {
+    pub reductions: u64,
+    pub carriers: u64,
+    pub most_per_carrier: u64,
+}
+
+/// Record one reduction of the `MergedDecl` carrier with `contributors` in
+/// the semantic graph store `store` identifies.
+pub fn record_merged_decl_reduction(
+    store: u64,
+    contributors: &[crate::semantic_query::SemanticNodeId],
+) {
+    let mut reductions = MERGED_DECL_REDUCTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *reductions
+        .entry((store, Box::from(contributors)))
+        .or_default() += 1;
+}
+
+/// The merged-declaration reductions recorded in the store `store`
+/// identifies, or in every store for `None`.
+pub fn merged_decl_reductions_in(store: Option<u64>) -> MergedDeclReductionTally {
+    let reductions = MERGED_DECL_REDUCTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reductions
+        .iter()
+        .filter(|((carrier_store, _), _)| store.is_none_or(|store| store == *carrier_store))
+        .fold(MergedDeclReductionTally::default(), |tally, (_, &count)| {
+            MergedDeclReductionTally {
+                reductions: tally.reductions + count,
+                carriers: tally.carriers + 1,
+                most_per_carrier: tally.most_per_carrier.max(count),
+            }
+        })
+}
+
 /// Per-`SemanticQueryKey`-variant timing for
 /// `dispatch_operator_with_recurse` — loop 7. Each call to
 /// `dispatch_operator_with_recurse` is wrapped in a wall-clock timer
@@ -460,6 +513,10 @@ pub fn reset_all() {
     WALK_DEFINE_EMITS_ARM_NS.store(0, Ordering::Relaxed);
     WALK_DEFINE_SLOTS_ARM_CALLS.store(0, Ordering::Relaxed);
     WALK_DEFINE_SLOTS_ARM_NS.store(0, Ordering::Relaxed);
+    MERGED_DECL_REDUCTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
 }
 
 /// Snapshot of every loop-5 counter at the moment of the call. Returned
@@ -513,6 +570,11 @@ pub fn dump_loop5_instrumentation_counters() -> String {
         WALK_DEFINE_PROPS_PROPERTY_LOOP_NS.load(Ordering::Relaxed);
     let walk_define_emits_arm_calls = WALK_DEFINE_EMITS_ARM_CALLS.load(Ordering::Relaxed);
     let walk_define_emits_arm_ns = WALK_DEFINE_EMITS_ARM_NS.load(Ordering::Relaxed);
+    let MergedDeclReductionTally {
+        reductions: merged_decl_reductions,
+        carriers: merged_decl_reduced_carriers,
+        most_per_carrier: merged_decl_most_reductions_per_carrier,
+    } = merged_decl_reductions_in(None);
     let walk_define_slots_arm_calls = WALK_DEFINE_SLOTS_ARM_CALLS.load(Ordering::Relaxed);
     let walk_define_slots_arm_ns = WALK_DEFINE_SLOTS_ARM_NS.load(Ordering::Relaxed);
 
@@ -570,6 +632,9 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"WALK_DEFINE_EMITS_ARM_NS\": {walk_define_emits_arm_ns},\n  \
          \"WALK_DEFINE_SLOTS_ARM_CALLS\": {walk_define_slots_arm_calls},\n  \
          \"WALK_DEFINE_SLOTS_ARM_NS\": {walk_define_slots_arm_ns},\n  \
+         \"MERGED_DECL_REDUCTIONS\": {merged_decl_reductions},\n  \
+         \"MERGED_DECL_REDUCED_CARRIERS\": {merged_decl_reduced_carriers},\n  \
+         \"MERGED_DECL_MOST_REDUCTIONS_PER_CARRIER\": {merged_decl_most_reductions_per_carrier},\n  \
          \"DISPATCH_OPERATOR_KIND_CALLS\": {{{per_kind_calls}\n  }},\n  \
          \"DISPATCH_OPERATOR_KIND_NS\": {{{per_kind_ns}\n  }}\n}}"
     )

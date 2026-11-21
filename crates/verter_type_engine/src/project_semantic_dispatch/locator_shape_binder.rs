@@ -552,7 +552,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .ok()
                                 .flatten()
                         })
-                        .map(|prepared| AnchorPreparedDecl::Augmentation(Box::new(prepared))),
+                        .map(AnchorPreparedDecl::Type),
                 }
             }
             // A JSDoc typedef declares NO header type parameters (its deref
