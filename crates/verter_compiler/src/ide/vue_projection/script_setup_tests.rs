@@ -120,8 +120,7 @@ fn stp11_scope_module_imports_exports_and_setup_locals_keep_scope() {
         [
             SetupStatementKind::Import { names: vec![] },
             SetupStatementKind::TypeDeclaration {
-                name: "Local".into(),
-                exported: false,
+                name: "Local".into()
             },
             SetupStatementKind::Declaration {
                 names: vec!["p".into(), "q".into()]
@@ -144,39 +143,6 @@ fn stp11_normal_script_exports_distinguish_type_only_and_wildcard_re_exports() {
     );
     let facts = project_script_pair(Some(ts(normal, 0)), None, None).expect("projects");
     assert_eq!(facts.module.named_exports, ["shared", "ns"]);
-}
-
-#[test]
-fn setup_type_exports_classify_as_exported_type_declarations_and_value_exports_do_not() {
-    let setup = concat!(
-        "export interface Row { id: string }\n",
-        "export type Rows = Row[];\n",
-        "interface Local { row: Row }\n",
-        "export const limit = 1;\n",
-        "export enum Mode { A }\n",
-    );
-    let kinds: Vec<_> = setup_of(setup)
-        .statements
-        .into_iter()
-        .map(|statement| statement.kind)
-        .collect();
-    let exported = |name: &str| SetupStatementKind::TypeDeclaration {
-        name: name.into(),
-        exported: true,
-    };
-    assert_eq!(
-        kinds,
-        [
-            exported("Row"),
-            exported("Rows"),
-            SetupStatementKind::TypeDeclaration {
-                name: "Local".into(),
-                exported: false,
-            },
-            SetupStatementKind::Other,
-            SetupStatementKind::Other,
-        ]
-    );
 }
 
 #[test]
