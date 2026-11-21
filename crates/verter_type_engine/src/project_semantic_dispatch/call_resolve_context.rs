@@ -10,6 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::super::contextual_tuple::{ContextualTuple, TupleElementContext};
 use super::super::dispatch_txn::ContextKeptLiteral;
+use super::super::flow_return::value_widening::ValuePath;
 use super::super::inference::session::InferenceInfoSetup;
 use super::super::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -61,6 +62,9 @@ pub(in crate::project_semantic_dispatch) struct ProvenancePlan {
     lowerings: Vec<verter_type_expr::TypeExpr>,
     positions: Vec<PlannedPosition>,
     fresh_reads: Vec<Arc<[ArgumentPathStep]>>,
+    /// The owner-scope value reads whose declaration widens their literals,
+    /// each once, in the order the walk first reads them.
+    widenings: Vec<ValuePath>,
 }
 
 impl ProvenancePlan {
@@ -82,6 +86,18 @@ impl ProvenancePlan {
     /// uses them; empty when no decision reads a lowered type.
     pub(in crate::project_semantic_dispatch) fn lowerings(&self) -> &[verter_type_expr::TypeExpr] {
         &self.lowerings
+    }
+
+    /// The value paths of the owner-scope reads the walk found widening:
+    /// the reads whose binding keeps a widening literal (`const s = "a"`),
+    /// so the plan counts them fresh contributors, each listed once in the
+    /// order the walk first reads it. Each is the path a value read widening
+    /// walk answers `true` for in the owner scope
+    /// ([`ProjectSemanticDispatch::value_read_widens`]); a read the walk
+    /// found regular is not listed.
+    #[allow(dead_code)] // read by the holder that drives the widening walks
+    pub(in crate::project_semantic_dispatch) fn widenings(&self) -> &[ValuePath] {
+        &self.widenings
     }
 }
 
@@ -827,6 +843,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let mut lowerings: Vec<TypeExpr> = Vec::new();
         let mut positions = Vec::new();
         let mut fresh_reads: Vec<Arc<[ArgumentPathStep]>> = Vec::new();
+        let mut widenings: Vec<ValuePath> = Vec::new();
         'positions: for position in authored.positions.iter() {
             let mut path = Vec::with_capacity(position.path.len());
             for step in position.path.iter() {
@@ -868,10 +885,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         }
                         IndexedRegularLiteralSource::Read { value, root } => {
                             let (widens, contributor) = match reads(value, *root) {
-                                ArgumentReadLiterals::OwnerScope => (
-                                    self.value_read_widens(canonical, owner, &value.path),
-                                    RegularContributor::Authored(TypeExpr::TypeOf(value.clone())),
-                                ),
+                                ArgumentReadLiterals::OwnerScope => {
+                                    let widens =
+                                        self.value_read_widens(canonical, owner, &value.path);
+                                    if widens && !widenings.contains(&value.path) {
+                                        widenings.push(value.path.clone());
+                                    }
+                                    (
+                                        widens,
+                                        RegularContributor::Authored(TypeExpr::TypeOf(
+                                            value.clone(),
+                                        )),
+                                    )
+                                }
                                 ArgumentReadLiterals::Frame { widening, node } => {
                                     use super::super::flow_products::WideningMembership;
                                     match widening {
@@ -968,6 +994,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             lowerings,
             positions,
             fresh_reads,
+            widenings,
         })
     }
 
@@ -2911,6 +2938,71 @@ pub mod provenance_plan_tests {
                 .provenance_plan(canonical, owner, None, owner_scope)
                 .is_none(),
             "an argument without authored provenance plans nothing"
+        );
+    }
+
+    /// A call argument over `canonical`, whose owner scope declares the
+    /// widening `const read = "r"`, its copy `const copy = read` and the
+    /// regular `let kept = "k"`, with two positions: one whose arm reads
+    /// `read`, `kept` and `read` again, and one reading `copy` and `read`.
+    /// The plan lists the value paths of the reads the walk found widening,
+    /// each once in the order the walk first reads it, and exactly the
+    /// reads whose in-place widening walk answers `true`.
+    pub fn plan_lists_the_reads_whose_widening_walk_widens<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        canonical: &str,
+    ) {
+        let value_read = |name: &str| IndexedRegularLiteralSource::Read {
+            value: ValueRef {
+                path: vec![name.to_owned()],
+                type_args: Vec::new(),
+            },
+            root: verter_span::Span::new(0, 4),
+        };
+        let authored = IndexedLiteralProvenance {
+            positions: Arc::from([
+                IndexedLiteralPosition {
+                    path: Arc::from([IndexedLiteralStep::Element(0)]),
+                    arms: Arc::from([arm(
+                        vec![value_read("read"), value_read("kept"), value_read("read")],
+                        false,
+                        &[],
+                    )]),
+                },
+                IndexedLiteralPosition {
+                    path: Arc::from([IndexedLiteralStep::Element(1)]),
+                    arms: Arc::from([arm(
+                        vec![value_read("copy"), value_read("read")],
+                        false,
+                        &[],
+                    )]),
+                },
+            ]),
+        };
+        let owner = TopLevelOwnerId::ordinary_file();
+        let owner_scope = &|_: &ValueRef, _: verter_span::Span| ArgumentReadLiterals::OwnerScope;
+
+        let plan = dispatch
+            .provenance_plan(canonical, owner, Some(&authored), owner_scope)
+            .expect("authored provenance plans");
+        let read = |name: &str| vec![name.to_owned()];
+        assert_eq!(
+            plan.widenings(),
+            [read("read"), read("copy")],
+            "the widening reads, each once, in the order the walk first reads them"
+        );
+        let mut in_place: Vec<Vec<String>> = Vec::new();
+        for path in [read("read"), read("kept"), read("copy")] {
+            if dispatch.value_read_widens(canonical, owner, &path) && !in_place.contains(&path) {
+                in_place.push(path);
+            }
+        }
+        assert_eq!(
+            plan.widenings(),
+            in_place,
+            "the plan lists exactly the reads the in-place widening walk widens"
         );
     }
 }
