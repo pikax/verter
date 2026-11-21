@@ -101,12 +101,12 @@ export function runCommand(argv, cwd, spawnCommand = spawn) {
   });
 }
 
-async function input(options, side) {
+async function input(options, side, spawnCommand) {
   const root = options[`${side}-root`];
   const file = options[`${side}-file`];
   const result = file
     ? { output: await readFile(file, "utf8") }
-    : await runCommand(options[`${side}-command`], root);
+    : await runCommand(options[`${side}-command`], root, spawnCommand);
   const rows = normalize(result.output, root);
   if (result.exit !== undefined && result.exit !== 0 && !rows.length)
     throw new Error(`${side} command exited ${result.exit} without parseable diagnostics`);
@@ -157,11 +157,15 @@ async function acceptedDifferences(file, differences) {
   return rows;
 }
 
-/** Execute a parity run. Exact accepted rows never alter the strict comparator. */
-export async function run(args) {
+/**
+ * Execute a parity run. Exact accepted rows never alter the strict comparator.
+ * `spawnCommand` (default `child_process.spawn`) starts both sides' commands,
+ * so a caller can observe the processes it runs.
+ */
+export async function run(args, { spawnCommand } = {}) {
   const options = parseArgs(args);
-  const left = await input(options, "left");
-  const right = await input(options, "right");
+  const left = await input(options, "left", spawnCommand);
+  const right = await input(options, "right", spawnCommand);
   if (options.mode === "change" && !left.rows.length)
     throw new Error("Change detection requires seeded left diagnostics");
   const comparison = compare(left.rows, right.rows, {
