@@ -23,7 +23,8 @@ export const MEMBERS = [
   { name: "web-admin", mode: "-p" },
 ];
 
-const usage = `Usage: ${CORPUS_VARIABLE}=<directory> node scripts/sfc-projection/parity/measure.mjs
+const usage = `Usage: ${CORPUS_VARIABLE}=<directory> pnpm run parity:measure
+   or: ${CORPUS_VARIABLE}=<directory> node scripts/sfc-projection/parity/measure.mjs
 
 Measures verter-tsc's projection route against the stock vue-tsc check over the
 ${MEMBERS.map((member) => member.name).join(" and ")} members of a corpus directory
