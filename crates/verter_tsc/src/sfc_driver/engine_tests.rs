@@ -2445,7 +2445,7 @@ fn setup_type_exports_reading_setup_scope_names_type_check_where_they_stand() {
         r#"<script setup lang="ts">
 const count = 1;
 export type Counted = { count: typeof count };
-defineProps<{ counted: Counted }>();
+const counted: Counted = { count };
 </script>
 
 <template><p>{{ counted.count }}</p></template>
@@ -2455,7 +2455,8 @@ defineProps<{ counted: Counted }>();
         "B.vue",
         r#"<script setup lang="ts" generic="T">
 export interface Boxed { value: T }
-defineProps<{ boxed: Boxed }>();
+const props = defineProps<{ value: T }>();
+const boxed: Boxed = { value: props.value };
 </script>
 
 <template><p>{{ boxed.value }}</p></template>
@@ -2463,6 +2464,33 @@ defineProps<{ boxed: Boxed }>();
     );
     let outcome = f.run();
     assert_eq!(outcome.carriers_checked, 2);
+    let errors: Vec<_> = outcome_diagnostics(&outcome)
+        .into_iter()
+        .filter(|d| d.severity == crate::reporter::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn probe_public_setup_type_reading_a_setup_value() {
+    let f = Fixture::new();
+    f.base();
+    f.write(
+        "tsconfig.json",
+        r#"{"extends":"./base.json","include":["*.vue"]}"#,
+    );
+    f.write(
+        "A.vue",
+        r#"<script setup lang="ts">
+const count = 1;
+type Counted = { count: typeof count };
+defineProps<{ counted: Counted }>();
+</script>
+
+<template><p>{{ counted.count }}</p></template>
+"#,
+    );
+    let outcome = f.run();
     let errors: Vec<_> = outcome_diagnostics(&outcome)
         .into_iter()
         .filter(|d| d.severity == crate::reporter::Severity::Error)
