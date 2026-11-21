@@ -900,7 +900,7 @@ fn assemble_transaction(
             let carried = match write.value {
                 // A static value is admitted whenever one is written, even
                 // an empty `flag=""`; only a bare attribute has none.
-                WriteValue::StaticText if op.value.is_none() => MemberValue::Valueless,
+
                 WriteValue::StaticText => {
                     MemberValue::StaticText(op.static_text.clone().unwrap_or_default())
                 }
