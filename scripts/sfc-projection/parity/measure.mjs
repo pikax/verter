@@ -63,7 +63,8 @@ export function locateCorpus(env, repoRoot = REPO_ROOT) {
       `refusing to run: the corpus directory named by ${CORPUS_VARIABLE} is absent.`,
     );
   const inside = path.relative(repoRoot, root);
-  if (!inside || (!inside.startsWith("..") && !path.isAbsolute(inside)))
+  const outside = inside === ".." || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside);
+  if (!outside)
     throw new Refusal(
       `refusing to run: the corpus directory named by ${CORPUS_VARIABLE} is inside the Verter tree.`,
     );
