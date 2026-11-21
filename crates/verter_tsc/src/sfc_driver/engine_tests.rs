@@ -2445,7 +2445,7 @@ fn setup_type_exports_reading_setup_scope_names_type_check_where_they_stand() {
         r#"<script setup lang="ts">
 const count = 1;
 export type Counted = { count: typeof count };
-defineProps<{ counted: Counted }>();
+const counted: Counted = { count };
 </script>
 
 <template><p>{{ counted.count }}</p></template>
@@ -2455,7 +2455,8 @@ defineProps<{ counted: Counted }>();
         "B.vue",
         r#"<script setup lang="ts" generic="T">
 export interface Boxed { value: T }
-defineProps<{ boxed: Boxed }>();
+const props = defineProps<{ value: T }>();
+const boxed: Boxed = { value: props.value };
 </script>
 
 <template><p>{{ boxed.value }}</p></template>
