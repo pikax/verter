@@ -349,22 +349,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     #[allow(dead_code)] // the step surface a holder of the reads drives
     pub(in crate::project_semantic_dispatch) fn deliver_value_widening(
         &self,
-        mut read: Box<ValueWideningRead>,
-        delivery: ReadDelivery,
+        read: Box<ValueWideningRead>,
+        _delivery: ReadDelivery,
     ) -> Result<WideningStep, RefusedWideningDelivery> {
-        let ReadDelivery::Observed(delivered) = delivery else {
-            return Err(RefusedWideningDelivery {
-                refusal: WideningDeliveryRefusal::NeedsObservedDelivery,
-                read,
-            });
-        };
-        // The delivery answers the walk's own request.
-        let answered = read.waiting.take();
-        assert!(
-            answered.is_some(),
-            "a holder delivers only the read a widening walk waits on"
-        );
-        Ok(self.advance_value_widening(read, Some(delivered)))
+        Err(RefusedWideningDelivery {
+            refusal: WideningDeliveryRefusal::NeedsObservedDelivery,
+            read,
+        })
     }
 
     /// Drop a widening walk its holder no longer needs: what its
