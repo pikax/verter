@@ -133,7 +133,7 @@ pub fn build_declaration_product(
                 // An authored export stays one: a `.d.ts` with a default
                 // export exports nothing implicitly.
                 if declaration.exported {
-                    plan.push_unmapped("export ");
+                    plan.push_unmapped("export export ");
                 }
                 if append_rendered(&mut plan, &qualified, fragment.text(), fragment.mappings())
                     .is_err()
