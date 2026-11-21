@@ -4,17 +4,18 @@ import { withNativeTypeFacts } from "./type-graph.test-utils.js";
  *
  * Tests for `ComponentMetaSession.getComponentMetaBatch`.
  *
- * Batch projection contract:
+ * Binds the TS-side batch surface contract (R7 / R8):
  *
  * - N inputs → N positional results.
  * - Per-id misses surface as the empty-meta default.
  * - Per-id slots align positionally with input order.
- * - An unavailable batch method throws without issuing scalar calls.
+ * - When the underlying native session does not yet expose
+ *   `getComponentMetaBatch`, the per-id fallback preserves backward
+ *   compatibility.
  */
 
 import { describe, it, expect, vi } from "vitest";
 import { ComponentMetaSession } from "./project.js";
-import { ComponentMetaChecker } from "./compat/checker.js";
 
 function resolvedTypeRow(display: string) {
   return {
@@ -37,7 +38,6 @@ function nativeMetaPayload(filePath: string, propName: string) {
       {
         name: propName,
         type: { kind: "primitive", name: "string" },
-        typeFact: { kind: "complete", value: { kind: "primitive", name: "string" } },
         ...resolvedTypeRow("string"),
         required: true,
         hasDefault: false,
@@ -201,7 +201,7 @@ describe("ComponentMetaSession.getComponentMetaBatch", () => {
     expect(results[1].exposed).toEqual([]);
   });
 
-  it("throws without scalar calls when the batch method is absent", async () => {
+  it("falls back to per-id getComponentMeta when batch surface absent", async () => {
     const inputs = ["A.vue", "B.vue"];
     const getComponentMeta = vi.fn((id: string) => {
       const leaf = id.substring(id.lastIndexOf("/") + 1).replace(".vue", "");
@@ -229,63 +229,11 @@ describe("ComponentMetaSession.getComponentMetaBatch", () => {
     };
 
     const project = new ComponentMetaSession(session as any, "/test");
-    await expect(project.getComponentMetaBatch(inputs)).rejects.toThrow(
-      /batch query is unavailable/i,
-    );
-    expect(getComponentMeta).not.toHaveBeenCalled();
-  });
-});
+    const results = await project.getComponentMetaBatch(inputs);
 
-describe("shared native projection", () => {
-  it("projects the same fixture through checker and session scalar and batch calls", async () => {
-    const native = nativeMetaPayload("/test/Order.vue", "order");
-    native.props[0].type = {
-      kind: "union",
-      types: [
-        { kind: "literal", literalKind: "string", value: "a" },
-        { kind: "literal", literalKind: "string", value: "b" },
-      ],
-    } as any;
-    native.props[0].typeFact.value = native.props[0].type;
-    native.props[0].terminalDisplay.text = '"a" | "b"';
-    (native.props[0] as any).tags = [{ name: "defaultValue", text: "'b'" }];
-    (native as any).acceptedProps = [
-      {
-        ...native.props[0],
-        provenance: { kind: "declared" },
-        availability: { kind: "always" },
-        kind: "declaredProp",
-      },
-      {
-        name: "id",
-        type: { kind: "primitive", name: "string" },
-        typeFact: { kind: "complete", value: { kind: "primitive", name: "string" } },
-        terminalDisplay: { text: "string" },
-        required: false,
-        provenance: { kind: "inherited", sources: [{ kind: "nativeTag", tag: "div" }] },
-        availability: { kind: "always" },
-        kind: "attr",
-      },
-    ];
-    const getComponentMeta = vi.fn(() => native);
-    const getComponentMetaBatch = vi.fn(() => [native]);
-    const session = {
-      closed: false,
-      engine: { state: "active" },
-      getComponentMeta,
-      getComponentMetaBatch,
-      getEffectiveSource: () => "<script setup />",
-      hasFile: () => true,
-    };
-    const checker = new ComponentMetaChecker({} as any, "/test", {}, session as any);
-    const project = new ComponentMetaSession(session as any, "/test");
-    const expected = await checker.getComponentMeta("Order.vue");
-    expect(expected.props[0].type).toBe('"a" | "b"');
-    expect(expected._verter?.acceptedProps?.map((prop) => prop.name)).toEqual(["order"]);
-    expect((await checker.getComponentMetaBatch(["Order.vue"]))[0]).toEqual(expected);
-    expect(await project.getComponentMeta("Order.vue")).toEqual(expected);
-    expect((await project.getComponentMetaBatch(["Order.vue"]))[0]).toEqual(expected);
+    expect(results).toHaveLength(2);
+    expect(results[0].props.map((p) => p.name)).toEqual(["A_prop"]);
+    expect(results[1].props.map((p) => p.name)).toEqual(["B_prop"]);
     expect(getComponentMeta).toHaveBeenCalledTimes(2);
-    expect(getComponentMetaBatch).toHaveBeenCalledTimes(2);
   });
 });

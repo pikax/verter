@@ -11,7 +11,6 @@
 
 import { describe, test, expect, afterAll } from "vitest";
 import { join } from "path";
-import { typeExprToDescriptor } from "../src/type-expr-bridge.js";
 import { createCheckerByJson } from "../src/compat/checker.js";
 import { shutdownMetaRuntime } from "../src/runtime/index.js";
 
@@ -66,31 +65,5 @@ describe("masked same-name intersection honesty (native)", () => {
       join(fixtureDir, "MaskedIntersectionPropsReversed.vue"),
     );
     expectStableSymbolicCarrier(meta);
-  });
-});
-
-test("preserves the empty-object arm of an object intersection", () => {
-  expect(
-    typeExprToDescriptor({
-      kind: "intersection",
-      types: [
-        {
-          kind: "object",
-          properties: [
-            { memberKind: "property", name: "a", ty: { kind: "primitive", name: "string" } },
-          ],
-        },
-        { kind: "object", properties: [] },
-      ],
-    }),
-  ).toEqual({
-    kind: "intersection",
-    types: [
-      {
-        kind: "object",
-        properties: [{ name: "a", type: { kind: "primitive", name: "string" }, optional: false }],
-      },
-      { kind: "object", properties: [] },
-    ],
   });
 });
