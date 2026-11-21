@@ -1693,7 +1693,7 @@ fn exported_setup_types_are_module_exports_with_the_local_types_they_name() {
         "export interface Row { id: string; cell: Cell }",
         "export type Rows = Row[];",
     ] {
-        assert!(declaration.contains(exported), "{exported}:\n{declaration}");
+        assert_declares_once(declaration, exported);
     }
     assert!(
         declaration.contains("interface Cell { text: string }")
@@ -1701,6 +1701,65 @@ fn exported_setup_types_are_module_exports_with_the_local_types_they_name() {
         "{declaration}"
     );
     assert!(!declaration.contains("limit = 1"), "{declaration}");
+}
+
+/// `declaration` states `statement` exactly once, with nothing more of an
+/// `export` keyword than the statement itself carries.
+fn assert_declares_once(declaration: &str, statement: &str) {
+    let at = offset_of(declaration, statement);
+    assert!(
+        !declaration[..at].trim_end().ends_with("export"),
+        "`{statement}` carries one `export`:\n{declaration}"
+    );
+}
+
+#[test]
+fn a_normal_script_type_export_the_public_surface_names_stays_exported_in_the_declaration() {
+    let source = concat!(
+        "<script lang=\"ts\">\n",
+        "export interface Props { msg: string }\n",
+        "</script>\n",
+        "<script setup lang=\"ts\">\n",
+        "defineProps<Props>();\n",
+        "</script>\n",
+    );
+    let module = composed_declaring(source);
+    let product = module
+        .declarations
+        .as_ref()
+        .expect("a clean carrier carries its declaration product");
+    assert!(product.is_publishable(), "{:?}", product.diagnostics);
+    let declaration = &product.declaration_source;
+    assert_declares_once(declaration, "export interface Props { msg: string }");
+    assert_eq!(
+        declaration.matches("interface Props").count(),
+        1,
+        "the authored export is the only `Props`:\n{declaration}"
+    );
+}
+
+#[test]
+fn an_exported_setup_type_stands_at_module_scope_even_when_it_reads_a_setup_value() {
+    let source = concat!(
+        "<script setup lang=\"ts\">\n",
+        "const count = 1;\n",
+        "export type Counted = { count: typeof count };\n",
+        "defineProps<{ counted: Counted }>();\n",
+        "</script>\n",
+    );
+    let module = composed(source);
+    let text = module.checking_text();
+    let header = offset_of(text, "function __VerterSetupScope() {");
+    // Vue hoists every exported setup type; the value it reads stays in
+    // the setup scope, unlike vue-tsc's module-scope setup content.
+    assert!(
+        offset_of(text, "export type Counted = { count: typeof count };") < header,
+        "the export stands at module scope:\n{text}"
+    );
+    assert!(
+        offset_of(text, "const count = 1;") > header,
+        "the value it reads stays in the setup scope:\n{text}"
+    );
 }
 
 #[test]
