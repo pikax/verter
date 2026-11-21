@@ -3790,11 +3790,39 @@ fn an_argument_provenance_requests_its_planned_lowerings() {
     );
 }
 
+/// Polled, the argument's planned lowerings are requested exactly as they
+/// are synchronously: neither form settles a provenance read where the
+/// route stands, and both answer the same value, facts, diagnostics and
+/// receipt.
 #[test]
 fn a_polled_argument_provenance_matches_its_synchronous_value() {
-    let (requests, synchronous, _) = argument_provenance_read(false);
-    let (polled_requests, polled, _) = argument_provenance_read(true);
-    assert!(requests > 0);
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    let (requests, synchronous, synchronous_rows) = argument_provenance_read(false);
+    let (polled_requests, polled, polled_rows) = argument_provenance_read(true);
+    let (_, _, in_place_rows) =
+        with_body_reads_in_place_for_tests(|| argument_provenance_read(false));
+    let provenance_reads = |rows: &CountedBodyReads| {
+        rows.iter()
+            .filter(|((_, site, _), _)| *site == "argument_provenance")
+            .map(|(_, count)| *count)
+            .sum::<u64>()
+    };
+    let planned = provenance_reads(&in_place_rows);
+    assert!(
+        planned > 0,
+        "the planned lowering waits on a read: {in_place_rows:?}"
+    );
+    for (form, rows) in [("synchronous", &synchronous_rows), ("polled", &polled_rows)] {
+        assert_eq!(
+            provenance_reads(rows),
+            0,
+            "the {form} form requests the planned lowering's reads: {rows:?}"
+        );
+    }
+    assert!(
+        polled_requests as u64 >= planned,
+        "each read the planned lowering waits on is requested when polled: {polled_rows:?}"
+    );
     assert_eq!(polled_requests, requests);
     semantic_poll_contract::assert_joined_matches(polled, &synchronous);
 }
@@ -17285,4 +17313,13 @@ fn a_holders_read_answered_outside_its_probe_leaves_partiality_only_where_the_pr
             .all(|node| *node == plain_fresh_node),
         "observing a read changes where its partiality goes, never its answer"
     );
+}
+
+#[test]
+fn mutation_probe_previous_polled_argument_provenance_parity() {
+    let (requests, synchronous, _) = argument_provenance_read(false);
+    let (polled_requests, polled, _) = argument_provenance_read(true);
+    assert!(requests > 0);
+    assert_eq!(polled_requests, requests);
+    semantic_poll_contract::assert_joined_matches(polled, &synchronous);
 }
