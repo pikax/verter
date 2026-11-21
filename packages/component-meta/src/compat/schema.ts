@@ -226,34 +226,13 @@ function convertType(
     case "recursiveRef":
       return { kind: "object" as const, type: typeDescriptorToString(td), schema: {} };
 
-    case "indexedAccess": {
-      const resolved = resolveIndexedAccessForSchema(
-        td,
-        typeRegistry,
-        visited,
-        registryResolutionDepth,
-      );
-      if (resolved) {
-        visited?.add(resolved.registryKey);
-        try {
-          return convertType(
-            resolved.descriptor,
-            options,
-            typeRegistry,
-            visited,
-            registryResolutionDepth + 1,
-          );
-        } finally {
-          visited?.delete(resolved.registryKey);
-        }
-      }
-      // Indexed-access types (`T['K']`) carry a structural shape but
-      // require host-side resolution to materialise the underlying
-      // member. Surface as the structural string form with an empty
-      // schema (matches the Volar "unresolved compound type" behaviour
-      // used for refs).
+    case "indexedAccess":
+      // Indexed-access types (`T['K']`) stay as published: the terminal is
+      // the producer's to publish, and a registry row for the object type is
+      // never navigated by member name. Surface the structural string form
+      // with an empty schema (matches the Volar "unresolved compound type"
+      // behaviour used for refs).
       return { kind: "object" as const, type: typeDescriptorToString(td), schema: {} };
-    }
 
     case "syntheticSlotBinding":
       // Synthetic slot-binding carriers are opaque terminals. They MUST
@@ -266,39 +245,6 @@ function convertType(
     case "unknown":
       return "unknown";
   }
-}
-
-function resolveIndexedAccessForSchema(
-  td: Extract<TypeDescriptor, { kind: "indexedAccess" }>,
-  typeRegistry?: Map<string, TypeDescriptor>,
-  visited: Set<string> = new Set(),
-  registryResolutionDepth = 0,
-): { descriptor: TypeDescriptor; registryKey: string } | undefined {
-  const objectType = td.objectType;
-  if (
-    objectType.kind !== "ref" ||
-    td.indexType.kind !== "literal" ||
-    typeof td.indexType.value !== "string"
-  )
-    return undefined;
-  const object = joinRegistryRef(objectType, typeRegistry, visited, registryResolutionDepth);
-  if (object?.kind !== "object") return undefined;
-  const registryKey = objectType.name;
-  const key = td.indexType.value;
-  const property = object.properties.find((candidate) => candidate.name === key);
-  if (!property) {
-    return undefined;
-  }
-  if (!property.optional) {
-    return { descriptor: property.type, registryKey };
-  }
-  return {
-    descriptor: {
-      kind: "union",
-      types: [property.type, { kind: "primitive", name: "undefined" }],
-    },
-    registryKey,
-  };
 }
 
 export function flattenSchemaEnumEntries(schema: PropertyMetaSchema): PropertyMetaSchema[] {

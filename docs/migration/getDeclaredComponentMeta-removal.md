@@ -126,6 +126,7 @@ expansion and no row lookup by rendered application text.
 | A `type` prop with `"button" \| "submit" \| "reset"` arms rendered as an HTML button-type union | rendered like any other literal union; no role is inferred from the prop name |
 | `ComponentSlots` / `ComponentUI` refs projected to slot-name and UI-helper shapes | rendered from the published descriptor; no helper is recognized by name |
 | `Box<string>['value']` expanded from a row named `Box<string>` | stays shallow (`Box<string>["value"]`); rendered type arguments never identify a row |
+| The compat schema of `RecordShape['value']` looked up the member `value` in the `RecordShape` row and rendered its type (`string`; an optional member became `string \| undefined`) | a registry row is never navigated by member name: the schema stays `{ kind: "object", type: 'RecordShape["value"]', schema: {} }` unless the producer publishes the terminal |
 | A name published by several declarations used one of them | a name whose rows have different declarations is withheld from the registry map |
 
 ### Display: published order and `any` arms
