@@ -83,10 +83,10 @@ use crate::semantic_query::{
 
 /// The anchor declaration's prepared source, held so its
 /// `name_resolution` map can be borrowed for the shape-lowering pass —
-/// whichever prepared family the locator anchor names (a cached type /
-/// value declaration, or an augmentation-scoped contribution prepared in
-/// the anchor file's own context, exactly as the augmentation stitch
-/// prepares it).
+/// whichever prepared family the locator anchor names: a cached type
+/// declaration (an augmentation-scoped contribution included, shared with
+/// the augmentation stitch that prepared it in the anchor file's own
+/// context) or a value declaration.
 enum AnchorPreparedDecl {
     Type(
         verter_retention::heap_size::OwnedValue<
@@ -98,7 +98,6 @@ enum AnchorPreparedDecl {
             verter_session_query::type_solver::PreparedValueDecl,
         >,
     ),
-    Augmentation(Box<verter_session_query::type_solver::PreparedTypeDecl>),
 }
 
 fn register_locator_function_alias(
@@ -199,7 +198,6 @@ impl AnchorPreparedDecl {
         match self {
             Self::Type(prepared) => &prepared.name_resolution,
             Self::Value(prepared) => &prepared.name_resolution,
-            Self::Augmentation(prepared) => &prepared.name_resolution,
         }
     }
 }
@@ -2859,58 +2857,91 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         LocatorRefPlan::Carrier(RefHeadResolution::Unresolved)
     }
 
+    /// The `LowerLocator` read naming the fixed authored shape of the body
+    /// `locator` names ([`Self::lower_locator`]'s read): the env-bearing
+    /// slot is derived FROM the locator anchor (so the key's anchor-match
+    /// gate holds by construction) with the anchor canonical's LIVE
+    /// `parse_env_hash` / `resolve_env_hash` dimensions. Strictly
+    /// unsubstituted: substituted demands route through `Instantiate {
+    /// args }`, never through this read.
+    ///
+    /// Reads only the host view. An `Err` is a malformed identity — unreachable
+    /// by construction, since the slot is derived from the locator anchor —
+    /// that fails closed instead of lowering under the wrong slot: no read is
+    /// issued for it.
+    pub(super) fn locator_shape_key(
+        &self,
+        locator: AuthoredBodyLocator,
+    ) -> Result<SemanticQueryKey, QueryError> {
+        let anchor = match &locator {
+            AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
+            AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
+            AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
+            AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
+        };
+        let env = self
+            .ctx
+            .host_view_env_hashes_for(anchor.canonical_id.as_ref());
+        let slot = self
+            .finalize_slot_seed_in_env(
+                crate::semantic_query::DeclarationSlotSeed::new(
+                    anchor.canonical_id.clone(),
+                    anchor.owner,
+                    anchor.symbol.clone(),
+                    crate::semantic_query::SemanticSymbolSpace::Type,
+                ),
+                &env,
+            )
+            .with_symbol_space(semantic_space_for_locator_space(anchor.space));
+        LocatorLoweringKey::new_unsubstituted(
+            slot,
+            locator,
+            ParseEnvHash::from_env_hash(env.parse_env_hash),
+            ResolveEnvHash::from_env_hash(env.resolve_env_hash),
+        )
+        .map(|key| SemanticQueryKey::LowerLocator { key })
+        .map_err(|_| QueryError::Miss)
+    }
+
+    /// The shape a [`Self::locator_shape_key`] read answered, given the
+    /// read's UN-narrowed answer: narrowed to its type node, with the read's
+    /// dependency facts observed onto the active tracer.
+    pub(super) fn finish_locator_shape_read(
+        &self,
+        read: crate::semantic_query::CacheRead<
+            QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
+    ) -> QueryResult<SemanticNodeId> {
+        let read = super::narrow_value_cache_read(read);
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
+        read.value
+    }
+
     construction_ordinal_seam! {
         /// The session-private locator-shape provider: lower the fixed authored
         /// shape of the body `locator` names, memoized under the first-class
         /// [`SemanticQueryKey::LowerLocator`] query on the shared
-        /// multi-candidate read-set-validated substrate.
-        ///
-        /// The env-bearing slot is derived FROM the locator anchor (so the
-        /// key's anchor-match gate holds by construction) with the anchor
-        /// canonical's LIVE `parse_env_hash` / `resolve_env_hash` dimensions.
-        /// Strictly unsubstituted: substituted demands route through
-        /// `Instantiate { args }`, never through this provider.
+        /// multi-candidate read-set-validated substrate — the
+        /// [`Self::locator_shape_key`] read made in place, answered by
+        /// [`Self::finish_locator_shape_read`].
         ///
         /// This is the production body source:
         /// `lower_located_body_with_provenance` demands every declaration body
         /// through this provider (never a prepared-body read), then owns
         /// args-substitution and the post-substitution view projection.
         fn lower_locator(&self, locator: AuthoredBodyLocator) -> QueryResult<SemanticNodeId> {
-            let anchor = match &locator {
-                AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
-                AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
-                AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
-                AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
-            };
-            let env = self
-                .ctx
-                .host_view_env_hashes_for(anchor.canonical_id.as_ref());
-            let slot = self
-                .finalize_slot_seed_in_env(
-                    crate::semantic_query::DeclarationSlotSeed::new(
-                        anchor.canonical_id.clone(),
-                        anchor.owner,
-                        anchor.symbol.clone(),
-                        crate::semantic_query::SemanticSymbolSpace::Type,
-                    ),
-                    &env,
-                )
-                .with_symbol_space(semantic_space_for_locator_space(anchor.space));
-            let key = match LocatorLoweringKey::new_unsubstituted(
-                slot,
-                locator,
-                ParseEnvHash::from_env_hash(env.parse_env_hash),
-                ResolveEnvHash::from_env_hash(env.resolve_env_hash),
-            ) {
-                Ok(key) => key,
-                // Unreachable by construction — the slot is derived from the
-                // locator anchor — but a malformed identity must fail closed,
-                // never lower under the wrong slot.
-                Err(_) => return QueryResult::Error(QueryError::Miss),
-            };
-            let read = self.execute_read(SemanticQueryKey::LowerLocator { key });
-            crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
-            read.value
+            match self.locator_shape_key(locator) {
+                Ok(key) => {
+                    // The in-place read is traced as `execute_read` traces it.
+                    #[cfg(any(test, feature = "test-support"))]
+                    super::raise::DISPATCH_TRACE.with(|t| {
+                        t.borrow_mut()
+                            .push(super::raise::query_key_discriminant(&key))
+                    });
+                    self.finish_locator_shape_read(self.execute_via_cold_build_helper(key))
+                }
+                Err(error) => QueryResult::Error(error),
+            }
         }
     }
 }

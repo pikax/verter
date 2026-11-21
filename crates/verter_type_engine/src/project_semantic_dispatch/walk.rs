@@ -2124,6 +2124,11 @@ construction_ordinal_seam! {
         graph: crate::semantic_query_memo::GraphIn<'_, M>,
         contributors: &[SemanticNodeId],
     ) -> SemanticNodeId {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        crate::loop5_instrumentation::record_merged_decl_reduction(
+            graph.store().operand_store_identity(),
+            contributors,
+        );
         let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
         let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
         for contributor in contributors {
@@ -14415,6 +14420,47 @@ mod m1_merge_visibility_tests {
 
     fn one_member_surface(m: ShallowSurfaceMember) -> ShallowSurface {
         ShallowSurface::from_entries(vec![super::ShallowSurfaceEntry::Member(m)], None)
+    }
+
+    #[test]
+    fn merged_declaration_reductions_are_counted_per_carrier() {
+        let graph = SemanticGraphStore::new();
+        let _roots = graph.enter_node_root_scope();
+        let object = |name| {
+            let surface = one_member_surface(member(
+                &graph,
+                name,
+                MemberVisibility::Public,
+                MemberMergeRole::Authored,
+                PrimitiveKind::Number,
+            ));
+            graph.intern_node(SemanticNodeData::Object(super::surface_view_from_shallow(
+                &surface,
+            )))
+        };
+        let (first, second) = (object("first"), object("second"));
+        let reduce = |contributors: &[crate::semantic_query::SemanticNodeId]| {
+            super::reduce_merged_decl_with_graph(
+                crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+                    &graph,
+                ),
+                contributors,
+            )
+        };
+        reduce(&[first, second]);
+        reduce(&[first, second]);
+        reduce(&[second, first]);
+        assert_eq!(
+            crate::loop5_instrumentation::merged_decl_reductions_in(Some(
+                graph.operand_store_identity()
+            )),
+            crate::loop5_instrumentation::MergedDeclReductionTally {
+                reductions: 3,
+                carriers: 2,
+                most_per_carrier: 2,
+            },
+            "each contributor order is its own carrier, and a carrier reduced again is counted again"
+        );
     }
 
     #[test]

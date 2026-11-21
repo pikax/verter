@@ -125,6 +125,12 @@ impl<T: CachedData> HeldValue<T> for Result<Held<T>, CachedValue<T>> {
 
 type PreparedTypeDeclSlot = Arc<PreparedDeclSlot<PreparedTypeDecl>>;
 type PreparedTypeDeclSlots = Arc<FxHashMap<verter_type_expr::DeclBindingKey, PreparedTypeDeclSlot>>;
+/// The write-once slots of a file's augmentation-scoped type
+/// declarations (`declare module "…" { … }` / `declare global { … }`
+/// members), by scope, then by owner and name.
+type AugmentationTypeDeclSlots = Arc<
+    FxHashMap<verter_session_query::declarations::AugmentationScopeKind, PreparedTypeDeclSlots>,
+>;
 type PreparedValueDeclSlot = Arc<PreparedDeclSlot<PreparedValueDecl>>;
 type PreparedValueDeclSlots =
     Arc<FxHashMap<verter_type_expr::DeclBindingKey, PreparedValueDeclSlot>>;
@@ -956,6 +962,11 @@ pub struct PreparedTypeDeclCache {
     /// bundle's admission are retained on.
     account: StoreAccount,
     slots: PreparedTypeDeclSlots,
+    /// One write-once slot per augmentation-scoped type declaration of the
+    /// file, so each is prepared once per cache however many contributor
+    /// folds and locator anchors read it
+    /// ([`Self::prepare_augmentation_type_decl_outcome_in`]).
+    augmentation_slots: AugmentationTypeDeclSlots,
     /// Per-FILE TYPE-space `name_resolution` base table, built lazily ONCE
     /// per cache (`OnceLock` collapses concurrent initializers) and shared
     /// via `Arc` by every non-namespaced prepared type decl this cache
@@ -979,13 +990,32 @@ impl PreparedTypeDeclCache {
         self.slots.is_empty()
     }
 
+    /// The augmentation-scoped type declaration `(scope, owner,
+    /// symbol_name)`, prepared once per cache under the same protocol as
+    /// [`Self::get_in_keeping`]: a committed slot answers warm; a cold
+    /// preparation commits a genuine result or absence through the cache's
+    /// retention account; a broken decl-body lease leaves the slot vacant
+    /// and marks the read non-cacheable; a failure returns uncommitted. A
+    /// name the file declares in no such scope is a genuine absence.
     fn prepare_augmentation_type_decl_outcome_in(
         &self,
         scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> PreparedDeclOutcome<PreparedTypeDecl> {
-        prepare_augmentation_type_decl_outcome_in(
+    ) -> PreparedDeclOutcome<CachedValue<PreparedTypeDecl>> {
+        let Some(slot) = self.augmentation_slots.get(scope).and_then(|declarations| {
+            declarations.get(&verter_type_expr::DeclBindingKey::new(owner, symbol_name))
+        }) else {
+            return PreparedDeclOutcome::Ready(None);
+        };
+        if let Some(cached) = slot.committed() {
+            return PreparedDeclOutcome::Ready(cached);
+        }
+        let _gate = slot.build_gate.lock();
+        if let Some(cached) = slot.committed() {
+            return PreparedDeclOutcome::Ready(cached);
+        }
+        match prepare_augmentation_type_decl_outcome_in(
             &self.canonical_id,
             self.state.as_ref(),
             scope,
@@ -994,7 +1024,18 @@ impl PreparedTypeDeclCache {
             (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
             &self.import_canonicalization,
             &self.interner,
-        )
+        ) {
+            PreparedDeclOutcome::LeaseMiss => {
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
+                );
+                PreparedDeclOutcome::LeaseMiss
+            }
+            PreparedDeclOutcome::Ready(value) => {
+                PreparedDeclOutcome::Ready(slot.commit(value, &self.account))
+            }
+            PreparedDeclOutcome::Failed(failure) => PreparedDeclOutcome::Failed(failure),
+        }
     }
 
     pub fn contains_key(&self, symbol_name: &str) -> bool {
@@ -1205,6 +1246,24 @@ impl PreparedTypeDeclCache {
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 symbol_name,
             ))
+            .is_some_and(|slot| slot.value.get().is_some())
+    }
+
+    /// Test observability: whether the write-once slot of the
+    /// augmentation-scoped type declaration `(scope, owner, symbol_name)`
+    /// holds a COMMITTED entry (never a validity signal).
+    #[cfg(test)]
+    pub(crate) fn augmentation_slot_committed_for_test(
+        &self,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> bool {
+        self.augmentation_slots
+            .get(scope)
+            .and_then(|declarations| {
+                declarations.get(&verter_type_expr::DeclBindingKey::new(owner, symbol_name))
+            })
             .is_some_and(|slot| slot.value.get().is_some())
     }
 
@@ -1610,6 +1669,7 @@ impl verter_retention::heap_size::HeapSize for PreparedTypeDeclCache {
             interner: _,
             account: _,
             slots,
+            augmentation_slots,
             name_resolution_bases,
             #[cfg(test)]
                 cold_build_count: _,
@@ -1618,6 +1678,7 @@ impl verter_retention::heap_size::HeapSize for PreparedTypeDeclCache {
             + dep_edges.heap_size(meter)
             + import_canonicalization.heap_size(meter)
             + slot_table_heap(slots, meter)
+            + augmentation_slot_table_heap(augmentation_slots, meter)
             + base_table_heap(name_resolution_bases, meter)
     }
 }
@@ -1673,6 +1734,31 @@ fn slot_table_heap<'t, T: CachedData>(
                 }
         })
         .sum::<usize>()
+}
+
+/// A type declaration cache's augmentation slot tables: the scope table's
+/// block and buckets, each scope's heap and each scope's slot table.
+fn augmentation_slot_table_heap<'t>(
+    slots: &'t AugmentationTypeDeclSlots,
+    meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+) -> usize {
+    use verter_retention::heap_size::HeapSize;
+    use verter_session_query::retention::allocation::arc_block_bytes;
+    type Scope = verter_session_query::declarations::AugmentationScopeKind;
+    if !meter.first(slots) {
+        return 0;
+    }
+    arc_block_bytes(std::mem::size_of::<FxHashMap<Scope, PreparedTypeDeclSlots>>())
+        + verter_retention::heap_size::hash_table_bytes(
+            slots.capacity(),
+            std::mem::size_of::<(Scope, PreparedTypeDeclSlots)>(),
+        )
+        + slots
+            .iter()
+            .map(|(scope, declarations)| {
+                scope.heap_size(meter) + slot_table_heap(declarations, meter)
+            })
+            .sum::<usize>()
 }
 
 /// A declaration cache's per-owner base table: its block, its buckets and
@@ -1893,13 +1979,14 @@ impl PreparedDeclBundle {
     }
 
     /// Prepare an augmentation contributor against the same pinned state,
-    /// dependency edges, and exact import canonicalization as this bundle.
+    /// dependency edges, and exact import canonicalization as this bundle,
+    /// once per bundle: a later read answers from the committed slot.
     pub(crate) fn prepare_augmentation_type_decl_outcome_in(
         &self,
         scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         symbol_name: &str,
-    ) -> PreparedDeclOutcome<PreparedTypeDecl> {
+    ) -> PreparedDeclOutcome<CachedValue<PreparedTypeDecl>> {
         self.prepared_type_decls
             .prepare_augmentation_type_decl_outcome_in(scope, owner, symbol_name)
     }
@@ -1929,7 +2016,7 @@ impl PreparedDeclBundle {
         scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Result<Option<PreparedTypeDecl>, PreparationFailure> {
+    ) -> Result<Option<CachedValue<PreparedTypeDecl>>, PreparationFailure> {
         self.prepare_augmentation_type_decl_outcome_in(scope, owner, symbol_name)
             .into_result()
     }
@@ -2091,6 +2178,16 @@ pub fn build_prepared_type_decl_cache(
             .entry(key)
             .or_insert_with(|| Arc::new(PreparedDeclSlot::new()));
     }
+    let mut augmentation_slots: FxHashMap<
+        verter_session_query::declarations::AugmentationScopeKind,
+        FxHashMap<verter_type_expr::DeclBindingKey, PreparedTypeDeclSlot>,
+    > = FxHashMap::default();
+    for (scope, key) in state.augmentation_type_decl_keys() {
+        augmentation_slots
+            .entry(scope.clone())
+            .or_default()
+            .insert(key.clone(), Arc::new(PreparedDeclSlot::new()));
+    }
     let name_resolution_bases = slots
         .keys()
         .map(|key| key.owner.lexical())
@@ -2109,6 +2206,12 @@ pub fn build_prepared_type_decl_cache(
         interner: Arc::clone(interner),
         account: StoreAccount::default(),
         slots: Arc::new(slots),
+        augmentation_slots: Arc::new(
+            augmentation_slots
+                .into_iter()
+                .map(|(scope, declarations)| (scope, Arc::new(declarations)))
+                .collect(),
+        ),
         name_resolution_bases: Arc::new(name_resolution_bases),
         #[cfg(test)]
         cold_build_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
