@@ -1742,11 +1742,12 @@ fn delete(range: SourceRange) -> EmitOp<'static> {
 /// The module layout over the carrier, as emit operations and the template
 /// scope's replacement (see `scope_at`):
 ///
-/// - the normal script, the setup imports, the setup type declarations the
-///   public declaration may name at module scope and the exported setup
-///   types, verbatim (the setup ones moved ahead of the setup scope, in
-///   source order, each with its own line end, an exported one keeping its
-///   `export`);
+/// - the normal script, the setup imports and the setup type declarations
+///   that may stand at module scope (see `module_scope_types`), verbatim
+///   (the setup ones moved ahead of the setup scope, in source order, each
+///   with its own line end, an exported one keeping its `export`; an
+///   exported one that must stay in the setup scope loses it there, where
+///   it is no legal modifier);
 /// - the preludes, each once in key order, the global component fallbacks
 ///   and the public declaration over the setup scope;
 /// - one function over the authored generic binder holding the remaining
@@ -1800,12 +1801,15 @@ fn module_layout(
             for (ordinal, statement) in facts.statements.iter().enumerate() {
                 let hoisted = match &statement.kind {
                     SetupStatementKind::Import { .. } => true,
-                    // An exported type is a module export, so it always
-                    // stands at module scope with its `export` keyword, as
-                    // Vue hoists it, even when it reads a setup value or a
-                    // binder parameter only the setup scope binds.
-                    SetupStatementKind::TypeDeclaration { name, exported } => {
-                        *exported || module_types.contains(name.as_str())
+                    // An exported type is judged as any other: one that
+                    // reads a setup value or a binder parameter, which only
+                    // the setup scope binds, stays there without `export`.
+                    SetupStatementKind::TypeDeclaration { name, export } => {
+                        let hoisted = module_types.contains(name.as_str());
+                        if let (false, Some(export)) = (hoisted, export) {
+                            ops.push(delete(*export));
+                        }
+                        hoisted
                     }
                     SetupStatementKind::Declaration { .. } | SetupStatementKind::Other => false,
                 };
@@ -2055,8 +2059,7 @@ fn exposed_binding(facts: &TsSetupProjection, callee: SourceRange) -> Option<Exp
 /// those the public declaration or an exported setup type names (the binder
 /// capture's lifted declarations) that are free in no binder parameter,
 /// depend on no setup value, transitively, and share no name with a
-/// normal-script binding. An exported setup type is hoisted whether or not
-/// it is in this set (see `module_layout`).
+/// normal-script binding.
 /// Every other setup type declaration stays in the setup scope, where the
 /// binder and the setup values are in scope and where a setup declaration
 /// shadows a normal-script one of the same name instead of merging with it.
@@ -2064,14 +2067,14 @@ fn module_scope_types<'c>(
     capture: &'c BinderCapturePlan,
     normal_script_bindings: &[String],
 ) -> FxHashSet<&'c str> {
-    let mut memo = vec![None; capture.declarations.len()];
+    let safe = module_scope_safety(capture);
     let mut blocked = FxHashSet::default();
     let mut hoisted = FxHashSet::default();
-    for (index, declaration) in capture.declarations.iter().enumerate() {
+    for (declaration, safe) in capture.declarations.iter().zip(safe) {
         if !declaration.from_setup {
             continue;
         }
-        if module_scope_safe(capture, index, &mut memo) {
+        if safe {
             hoisted.insert(declaration.name.as_str());
         } else {
             blocked.insert(declaration.name.as_str());
@@ -2083,37 +2086,46 @@ fn module_scope_types<'c>(
     hoisted
 }
 
-fn module_scope_safe(
-    capture: &BinderCapturePlan,
-    index: usize,
-    memo: &mut Vec<Option<bool>>,
-) -> bool {
-    if let Some(known) = memo[index] {
-        return known;
-    }
-    // A cycle is decided by its other members.
-    memo[index] = Some(true);
-    let declaration = &capture.declarations[index];
-    let mut safe = !declaration.from_setup
-        || (matches!(
-            declaration.kind,
-            LiftedDeclarationKind::TypeAlias | LiftedDeclarationKind::Interface
-        ) && declaration.binder_params.is_empty());
-    for dependency in &declaration.dependencies {
-        if !safe {
-            break;
-        }
-        safe = match &dependency.origin {
-            DependencyOrigin::LocalDeclaration { index } => {
-                *index >= capture.declarations.len() || module_scope_safe(capture, *index, memo)
+/// Whether each lifted declaration may stand at module scope: it is a
+/// normal-script declaration or a setup type free in no binder parameter,
+/// and every local declaration it reaches is one too. Unsafety spreads from
+/// each unsafe declaration to its dependents until none changes, so a cycle
+/// is safe only when every member it reaches is, whichever member is asked
+/// first.
+fn module_scope_safety(capture: &BinderCapturePlan) -> Vec<bool> {
+    let count = capture.declarations.len();
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); count];
+    let mut safe: Vec<bool> = Vec::with_capacity(count);
+    for (index, declaration) in capture.declarations.iter().enumerate() {
+        let mut locally_safe = !declaration.from_setup
+            || (matches!(
+                declaration.kind,
+                LiftedDeclarationKind::TypeAlias | LiftedDeclarationKind::Interface
+            ) && declaration.binder_params.is_empty());
+        for dependency in &declaration.dependencies {
+            let reached: &[usize] = match &dependency.origin {
+                DependencyOrigin::LocalDeclaration { index } => std::slice::from_ref(index),
+                DependencyOrigin::LocalDeclarations { indices } => indices,
+                DependencyOrigin::BinderParam { .. } => {
+                    locally_safe = false;
+                    &[]
+                }
+                _ => &[],
+            };
+            for &reached in reached.iter().filter(|&&reached| reached < count) {
+                dependents[reached].push(index);
             }
-            DependencyOrigin::LocalDeclarations { indices } => indices.iter().all(|index| {
-                *index >= capture.declarations.len() || module_scope_safe(capture, *index, memo)
-            }),
-            DependencyOrigin::BinderParam { .. } => false,
-            _ => true,
-        };
+        }
+        safe.push(locally_safe);
     }
-    memo[index] = Some(safe);
+    let mut pending: Vec<usize> = (0..count).filter(|&index| !safe[index]).collect();
+    while let Some(unsafe_index) = pending.pop() {
+        for &dependent in &dependents[unsafe_index] {
+            if safe[dependent] {
+                safe[dependent] = false;
+                pending.push(dependent);
+            }
+        }
+    }
     safe
 }

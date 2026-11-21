@@ -1739,27 +1739,92 @@ fn a_normal_script_type_export_the_public_surface_names_stays_exported_in_the_de
 }
 
 #[test]
-fn an_exported_setup_type_stands_at_module_scope_even_when_it_reads_a_setup_value() {
+fn an_exported_setup_type_that_reads_setup_scope_names_stays_there_without_its_export() {
+    // A setup value and a binder parameter exist only in the setup scope,
+    // so a type reading either cannot stand at module scope, exported or
+    // not; inside the setup function `export` is not a legal modifier.
+    for (source, statement) in [
+        (
+            concat!(
+                "<script setup lang=\"ts\">
+",
+                "const count = 1;
+",
+                "export type Counted = { count: typeof count };
+",
+                "defineProps<{ counted: Counted }>();
+",
+                "</script>
+",
+            ),
+            "type Counted = { count: typeof count };",
+        ),
+        (
+            concat!(
+                "<script setup lang=\"ts\" generic=\"T\">
+",
+                "export interface Boxed { value: T }
+",
+                "defineProps<{ boxed: Boxed }>();
+",
+                "</script>
+",
+            ),
+            "interface Boxed { value: T }",
+        ),
+    ] {
+        let module = composed(source);
+        let text = module.checking_text();
+        let header = offset_of(text, "function __VerterSetupScope");
+        assert!(
+            offset_of(text, statement) > header,
+            "`{statement}` stays in the setup scope:
+{text}"
+        );
+        assert!(
+            !text.contains(&format!("export {statement}")),
+            "`{statement}` loses its `export` there:
+{text}"
+        );
+        assert_maps_verbatim(&module, source, statement);
+    }
+}
+
+#[test]
+fn a_setup_type_in_a_cycle_with_an_unsafe_member_stays_in_the_setup_scope() {
+    // `A` is reached first and reaches `B` before `C`; `B` reads only
+    // `A`, whose verdict is still open when `B` is judged, and `C` reads a
+    // setup value, so the whole cycle stays in the setup scope.
     let source = concat!(
-        "<script setup lang=\"ts\">\n",
-        "const count = 1;\n",
-        "export type Counted = { count: typeof count };\n",
-        "defineProps<{ counted: Counted }>();\n",
-        "</script>\n",
+        "<script setup lang=\"ts\">
+",
+        "interface A { b: B; c: C }
+",
+        "interface B { a: A }
+",
+        "const count = 1;
+",
+        "type C = { count: typeof count };
+",
+        "defineProps<{ a: A }>();
+",
+        "</script>
+",
     );
     let module = composed(source);
     let text = module.checking_text();
     let header = offset_of(text, "function __VerterSetupScope() {");
-    // Vue hoists every exported setup type; the value it reads stays in
-    // the setup scope, unlike vue-tsc's module-scope setup content.
-    assert!(
-        offset_of(text, "export type Counted = { count: typeof count };") < header,
-        "the export stands at module scope:\n{text}"
-    );
-    assert!(
-        offset_of(text, "const count = 1;") > header,
-        "the value it reads stays in the setup scope:\n{text}"
-    );
+    for statement in [
+        "interface A { b: B; c: C }",
+        "interface B { a: A }",
+        "type C = { count: typeof count };",
+    ] {
+        assert!(
+            offset_of(text, statement) > header,
+            "`{statement}` stays in the setup scope:
+{text}"
+        );
+    }
 }
 
 #[test]
