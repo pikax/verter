@@ -75,6 +75,21 @@ test("a corpus inside the Verter tree or without a member is refused", async () 
     () => locateCorpus({ [CORPUS_VARIABLE]: path.join(repoRoot, "scripts") }, repoRoot),
     (error) => error instanceof Refusal && /inside the Verter tree/.test(error.message),
   );
+  // A directory whose name merely starts with two dots is still inside.
+  const tree = await corpusWith([]);
+  try {
+    await mkdir(path.join(tree, "..corpus"));
+    assert.throws(
+      () => locateCorpus({ [CORPUS_VARIABLE]: path.join(tree, "..corpus") }, tree),
+      (error) => error instanceof Refusal && /inside the Verter tree/.test(error.message),
+    );
+  } finally {
+    await rm(tree, { recursive: true, force: true });
+  }
+  assert.throws(
+    () => locateCorpus({ [CORPUS_VARIABLE]: repoRoot }, repoRoot),
+    (error) => error instanceof Refusal && /inside the Verter tree/.test(error.message),
+  );
   const root = await corpusWith(["web"]);
   try {
     assert.throws(
