@@ -30935,7 +30935,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     step = self.continue_call_route(flight, progress);
                 }
                 CallStep::Provenance(flight, argument) => {
-                    if suspend && body_requests_reads() {
+                    if false && suspend && body_requests_reads() {
                         return self.helper_step_on_run(
                             run,
                             Box::new(HelperWait::argument_provenance(flight, argument)),
