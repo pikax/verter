@@ -130,6 +130,11 @@ pub fn build_declaration_product(
         }
         match declaration.emission.as_ref() {
             Some(fragment) => {
+                // An authored export stays one: a `.d.ts` with a default
+                // export exports nothing implicitly.
+                if declaration.exported {
+                    plan.push_unmapped("export ");
+                }
                 if append_rendered(&mut plan, &qualified, fragment.text(), fragment.mappings())
                     .is_err()
                 {
