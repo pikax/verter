@@ -401,8 +401,9 @@ describe("typeDescriptorToSchema", () => {
     });
   });
 
-  // @ai-generated - Distinguishes producer-expanded indexed access from an unsubstituted generic body.
-  it("expands non-generic indexed access from the producer registry", () => {
+  // Indexed-access terminals are the producer's to publish: a registry row for
+  // the object type is never navigated by member name on the JS side.
+  it("keeps non-generic indexed access shallow beside a registry row for its object", () => {
     const schema = typeDescriptorToSchema(
       indexedAccess(ref("RecordShape"), literal("value")),
       undefined,
@@ -411,7 +412,7 @@ describe("typeDescriptorToSchema", () => {
       ]),
     );
 
-    expect(schema).toBe("string");
+    expect(schema).toEqual({ kind: "object", type: 'RecordShape["value"]', schema: {} });
   });
 
   // @ai-generated - A generic registry declaration is not an instantiated descriptor.
