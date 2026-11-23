@@ -5290,6 +5290,35 @@ fn a_cold_carrier_evaluation_records_its_read_in_its_own_proof() {
     }
 }
 
+/// The body reads of an identity carrier's families (an instantiation or
+/// an indexed access) made anywhere but the requested carrier walk
+/// (`read_in_place / carrier`): each is a carrier a wrapper settled in
+/// place through the dispatcher's own walk, attributed to the wrapper's
+/// site.
+fn carrier_reads_off_the_walk(
+    rows: &[(
+        verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
+        u64,
+    )],
+) -> Vec<(
+    Option<&'static str>,
+    &'static str,
+    verter_type_engine::semantic_query::SemanticQueryKeyTag,
+)> {
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    rows.iter()
+        .filter(|((stage, site, family), count)| {
+            *count > 0
+                && matches!(
+                    family,
+                    SemanticQueryKeyTag::Instantiate | SemanticQueryKeyTag::IndexedAccess
+                )
+                && !(*stage == Some("read_in_place") && *site == "carrier")
+        })
+        .map(|(site, _)| *site)
+        .collect()
+}
+
 const CARRIER_GUARD_PROOF_FILE: &str = "/semantic-task/carrier-guard-proof.ts";
 const CARRIER_GUARD_PROOF_BODY: &str = r#"
 import type { Box } from "./carrier-box";
@@ -5353,9 +5382,8 @@ fn a_guard_enumerating_carrier_arms_records_each_read_in_its_own_proof() {
             "{name}: an enumerated carrier stood at a cold evaluation and read for it: {rows:?}"
         );
         assert!(
-            rows.iter()
-                .all(|((_, site, _), _)| *site != "unwrap_identity_carrier_for_relation"),
-            "{name}: no arm settles through the relation's direct unwrap: {rows:?}"
+            carrier_reads_off_the_walk(&rows).is_empty(),
+            "{name}: no arm settles its carrier in place, outside the requested walk: {rows:?}"
         );
         let proofs: Vec<_> = graph
             .evaluate_deferred_memo_proofs_for_tests()
@@ -5393,10 +5421,11 @@ fn a_guard_enumerating_carrier_arms_records_each_read_in_its_own_proof() {
 const CARRIER_KINDS_FILE: &str = "/semantic-task/carrier-kinds.ts";
 const CARRIER_KINDS: &str = "export interface KindA { kind: \"a\"; }\n\
 export interface KindB { kind: \"b\"; }\n\
-export type Either = KindA | KindB;\n";
+export type Either = KindA | KindB;\n\
+export type Mode = \"a\" | \"b\";\n";
 const CARRIER_ALGEBRA_FILE: &str = "/semantic-task/carrier-algebra.ts";
 const CARRIER_ALGEBRA_BODY: &str = r#"
-import type { Either, KindA, KindB } from "./carrier-kinds";
+import type { Either, KindA, KindB, Mode } from "./carrier-kinds";
 interface Generator<T, TReturn, TNext> {}
 function isKindA(value: unknown): value is KindA { return true as boolean as never; }
 export function distributed(value: null | undefined) {
@@ -5421,6 +5450,13 @@ export function nestedYield(a: KindA, b: KindB) {
         yield b;
     };
 }
+export function disjoint(value: KindB | null) {
+    if (isKindA(value)) return value;
+    return 0;
+}
+export function literalMember() {
+    return { m: "a" } satisfies { m: Mode };
+}
 "#;
 
 /// An algebra operation the flow body calls as one step reads every
@@ -5432,7 +5468,8 @@ export function nestedYield(a: KindA, b: KindB) {
 ///
 /// - `distributed`: a type predicate over `null | undefined` distributes
 ///   its intersection with `KindA`, each pair collapsing because `KindA`,
-///   read through its carrier, is an object type;
+///   read through its carrier, is an object type, and the predicate's
+///   indexed narrow reads the keys `KindA` requires through its carrier;
 /// - `reduced`: the array literal's element union reduces `KindA` beside
 ///   `KindB`, each view and its unit-typed `kind` read through its
 ///   carrier, the different discriminants keeping both;
@@ -5444,16 +5481,29 @@ export function nestedYield(a: KindA, b: KindB) {
 /// - `nestedYield`: a nested generator's yield join reduces `KindA` beside
 ///   `KindB`, its two yields, reading each view through its carrier; the
 ///   file declares the `Generator` head its wrap names, as the host loads
-///   no lib.
+///   no lib;
+/// - `disjoint`: a type predicate over `KindB | null` distributes its
+///   intersection with `KindA`; `KindB & KindA` is proved disjoint, and
+///   the class of that collapse (the conflicting unit `kind` members)
+///   reads both operands and their members through their carriers;
+/// - `literalMember`: the literal `"a"` is kept under the contextual
+///   member type `Mode`, an alias declared in another file, which the
+///   literal-context reader looks through by its carrier.
+///
+/// No body read of a carrier's family stands anywhere but the carrier
+/// walk, and none at all under the operation's own site.
 #[test]
 fn an_algebra_operation_reads_its_carriers_as_requests_not_in_place() {
     use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
     for (name, site) in [
         ("distributed", "distribute_intersection"),
         ("reduced", "reduce_arms_to_supertypes"),
         ("primitive", "reduce_arms_to_supertypes"),
         ("nestedReturn", "join_flow_return_contributors"),
         ("nestedYield", "attach_function_kind_wrap"),
+        ("disjoint", "distribute_intersection"),
+        ("literalMember", "literal_of_contextual_type"),
     ] {
         let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
         crate::u6_flow_shape_corpus_tests::upsert(
@@ -5484,7 +5534,17 @@ fn an_algebra_operation_reads_its_carriers_as_requests_not_in_place() {
             "{name}: the operation's carriers were requested and read: {rows:?}"
         );
         assert!(
-            rows.iter().all(|((_, read_site, _), _)| *read_site != site),
+            carrier_reads_off_the_walk(&rows).is_empty(),
+            "{name}: no carrier is read in place, outside the requested walk: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|((_, read_site, family), _)| {
+                *read_site != site
+                    || !matches!(
+                        family,
+                        SemanticQueryKeyTag::Instantiate | SemanticQueryKeyTag::IndexedAccess
+                    )
+            }),
             "{name}: {site} reads no carrier through the dispatcher's direct walk: {rows:?}"
         );
     }
@@ -5515,7 +5575,6 @@ export function objectArgument(a: KindA) {
 #[test]
 fn a_contextual_object_reads_its_parameter_carrier_as_a_request() {
     use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
-    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
     let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
     crate::u6_flow_shape_corpus_tests::upsert(
         &host,
@@ -5545,10 +5604,7 @@ fn a_contextual_object_reads_its_parameter_carrier_as_a_request() {
         "the parameter's carrier was requested and read: {rows:?}"
     );
     assert!(
-        rows.iter().all(|((stage, site, family), _)| {
-            *family != SemanticQueryKeyTag::Instantiate
-                || (*stage == Some("read_in_place") && *site == "carrier")
-        }),
+        carrier_reads_off_the_walk(&rows).is_empty(),
         "the contextual typing reads no carrier through the dispatcher's direct walk: {rows:?}"
     );
 }
