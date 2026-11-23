@@ -133,15 +133,16 @@ expansion and no row lookup by rendered application text.
 
 | Before | After |
 | --- | --- |
-| A branded string union (`target`) was reordered to put `(string & {})` first, and `rel` arms were sorted | arms follow the producer's published union order |
+| A branded string union (`target`) was reordered to put `(string & {})` first, and `rel` arms were sorted | descriptor-derived output (schema arms and descriptor-rendered text) follows the producer's published union order. An ordinary prop whose `PropertyMeta.type` passes the producer's display text through keeps that text unchanged, so its arm order can differ from the schema arms |
 | A published union descriptor with an `any` arm collapsed to `any` | the union keeps its published arms: an `icon` prop whose descriptor is the union of `string`, `any` and `undefined` keeps the schema arms `string`, `any`, `undefined` |
 | A prop tagged `@IconifyIcon` rendered `any` | rendered from its descriptor |
 | A `@defaultValue` literal moved to the front of a literal union | the published order is kept |
 
-A member whose descriptor is exactly `any`, including an unannotated member,
-still renders `any` with schema `any` (TypeScript reduces `any | undefined` to
-`any`). An unannotated event payload renders `any[]`. Arms are kept only
-when the producer publishes them: an authored `as?: any | { root?: any, img?: any }`
+A member whose descriptor is exactly `any` (including a published union whose
+only arm is `any`, and an unannotated member) still renders `any` with schema
+`any` (TypeScript reduces `any | undefined` to `any`). An unannotated event
+payload renders `any[]`. Arms are kept only when the producer publishes them:
+an authored `as?: any | { root?: any, img?: any }`
 prop reaches compat as exactly `any`, because TypeScript reduces the union to
 `any`, so it renders `any` with schema `any`.
 
@@ -162,10 +163,11 @@ producer publishes it:
 | Case | Before | Now |
 | --- | --- | --- |
 | `type Button = ComponentConfig<typeof theme, …>`, prop `ui?: Button['slots']` (compat schema arm) | `{ kind: "object", type: "ComponentSlots<unknown>", schema: {} }` | `{ kind: "object", type: 'Button["slots"]', schema: {} }` |
-| The same prop in the native result, with the helper declared in the component's own file | `ref ComponentSlots<unknown("typeof theme")>` | `indexedAccess` of `ref Button` by the literal `"slots"` |
+| The same prop's projected Verter descriptor (`meta._verter.props[].type`), with the helper declared in the component's own file | `ref ComponentSlots<unknown("typeof theme")>`, produced by the JavaScript registry substitution | `indexedAccess` of `ref Button` by the literal `"slots"` |
 
-Both are owed by the producer. Compat will not substitute generic arguments
-or navigate rows to recover them.
+The decoded `NativeComponentMetaResult` never carried the substituted form;
+only the projected descriptor did. Both are owed by the producer. Compat will
+not substitute generic arguments or navigate rows to recover them.
 
 ### API: one projection for every surface
 
@@ -175,6 +177,7 @@ or navigate rows to recover them.
 | `ProjectSession.getResolvedComponentMeta(...)` routed native project queries through the resolved-surface method | removed from the JavaScript runtime; native and compat queries both use `getComponentMeta`. The raw `@verter/native` binding is unchanged |
 | A session without resolved metadata fell back to the plain native query | there is one query lane, so there is nothing to fall back to |
 | Checker, session scalar and session batch calls each projected native results their own way | all use `projectNativeComponentMeta(meta, options)` |
+| `typeExprToDescriptor(expr, registry)` took a registry and expanded references through its rows | the registry argument is removed: call `typeExprToDescriptor(expr)`. References and indexed-access operands stay symbolic even when the caller holds a registry |
 
 ## What stays unchanged
 
