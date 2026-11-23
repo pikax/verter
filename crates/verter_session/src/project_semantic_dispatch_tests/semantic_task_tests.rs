@@ -5506,11 +5506,13 @@ export function objectArgument(a: KindA) {
 /// member types that object under the call's suspended collector. The
 /// parameter it is checked against is an interface applied across files,
 /// and each read of that application's carrier the object's members make
-/// is requested and answered at the carrier walk: none stands at the
-/// contextual object's own sites.
+/// is requested and answered at the carrier walk: no instantiation read
+/// stands at the contextual object's own sites, where only the member
+/// checks' own path and signature reads remain.
 #[test]
 fn a_contextual_object_reads_its_parameter_carrier_as_a_request() {
     use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
     let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
     crate::u6_flow_shape_corpus_tests::upsert(
         &host,
@@ -5540,8 +5542,9 @@ fn a_contextual_object_reads_its_parameter_carrier_as_a_request() {
         "the parameter's carrier was requested and read: {rows:?}"
     );
     assert!(
-        rows.iter().all(|((_, site, _), _)| {
-            *site != "contextual_object_member" && *site != "contextual_object_order"
+        rows.iter().all(|((_, site, family), _)| {
+            *family != SemanticQueryKeyTag::Instantiate
+                || (*site != "contextual_object_member" && *site != "contextual_object_order")
         }),
         "the contextual object reads no carrier through the dispatcher's direct walk: {rows:?}"
     );
