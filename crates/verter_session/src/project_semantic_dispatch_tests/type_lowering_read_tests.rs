@@ -1519,7 +1519,8 @@ const UNREADABLE_ARM_DECLARATION: &str =
 /// only their reuse evidence: the flow-driven lowering answers what the
 /// native lowering answers, as completely. A read answered ahead of the
 /// decision instead lands its dependencies and partiality in the enclosing
-/// build and none in the decision's observation.
+/// build and none in the decision's observation: the same flow lowering
+/// driven that way fails the per-read assertions.
 #[test]
 fn a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decision() {
     use verter_type_engine::project_semantic_dispatch::lower::OwnerLoweringDriverForTests as Driver;
@@ -1588,6 +1589,18 @@ fn a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decisi
             (text.as_str(), flow.partial),
             (native_text.as_str(), native.partial),
             "{driver:?}: the flow-driven lowering answers what the native lowering answers, as completely: {flow:?}"
+        );
+    }
+    // The same flow lowering with each decision read answered ahead of the
+    // decision and taken once as delivered: a partial read's dependencies
+    // or partiality miss the decision's observation, which the per-read
+    // assertions above reject.
+    for driver in [Driver::FlowRequestedAhead, Driver::FlowInPlaceAhead] {
+        let (_, ahead) = lower(driver);
+        assert!(
+            ahead.decision_reads.iter().any(|read| read.partial
+                && (read.dependencies.is_empty() || !read.observed_partial[1])),
+            "{driver:?}: a decision read answered ahead of the decision leaves its dependencies or partiality outside the decision's observation: {ahead:?}"
         );
     }
 }
