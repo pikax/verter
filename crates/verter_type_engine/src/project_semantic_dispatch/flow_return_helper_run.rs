@@ -339,21 +339,22 @@ impl ProvenanceFrame {
         }
     }
 
-    /// Hand the parked lowering its `delivery`, then request each planned
-    /// type's lowering in turn: `Done` keeps its node, `Wait` parks the
-    /// lowering at the read it requests.
+    /// Hand the parked lowering its `delivery`, made for the body in the
+    /// canonical file paired with it, then request each planned type's
+    /// lowering in turn: `Done` keeps its node, `Wait` parks the lowering at
+    /// the read it requests.
     fn advance(
         &mut self,
         dispatch: &impl FlowDemandDriver,
-        delivery: Option<ReadDelivery>,
+        delivery: Option<(ReadDelivery, &str)>,
     ) -> ReadStep<()> {
         let lowered = &mut self.lowered;
         self.plan.with_dependent_mut(|plan, parked| {
-            if let Some(delivery) = delivery {
+            if let Some((delivery, canonical)) = delivery {
                 let lowering = parked
                     .as_mut()
                     .expect("a delivered read answers the parked lowering");
-                match dispatch.deliver_lowering(lowering, delivery) {
+                match dispatch.deliver_lowering(lowering, delivery, canonical) {
                     ReadStep::Wait(wait) => return ReadStep::Wait(provenance_wait(wait)),
                     ReadStep::Ready(node) => {
                         *parked = None;
@@ -835,7 +836,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                 HelperFrame::Provenance(mut frame) => {
                     let step = match frame.wait.take() {
                         Some(wait) => ReadStep::Wait(wait),
-                        None => frame.advance(self.dispatch, delivered.take()),
+                        None => frame.advance(
+                            self.dispatch,
+                            delivered
+                                .take()
+                                .map(|delivery| (delivery, self.st.canonical)),
+                        ),
                     };
                     return match step {
                         ReadStep::Ready(()) => {
