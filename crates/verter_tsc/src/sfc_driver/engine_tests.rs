@@ -2049,6 +2049,86 @@ mod watch_session {
         assert_eq!(carrier_lines(&restored), carrier_lines(&importing));
     }
 
+    /// A carrier outside every membership, created after a project imports
+    /// it, is a change that project read: the import resolves to it, as in a
+    /// fresh run.
+    #[test]
+    fn watch_session_carrier_created_after_its_import_matches_fresh_runs() {
+        let f = Fixture::new();
+        sibling_projects(&f);
+        f.write("a/A.vue", CLEAN);
+        f.write(
+            "b/x.ts",
+            "import C from \"../shared/C.vue\";\n\nexport const component = C;\n",
+        );
+        let mut w = Watched::open(f);
+        assert_eq!(codes(&w.f.run()), vec![2307]);
+
+        w.f.write("shared/C.vue", CLEAN);
+        let created = w.changed(&["shared/C.vue"]);
+        assert!(codes(&created).is_empty(), "{:?}", codes(&created));
+        let [imported] = project_named(&created, "b/tsconfig.json")
+            .imported_carriers
+            .as_slice()
+        else {
+            panic!("one imported carrier");
+        };
+        assert!(
+            imported.carrier.ends_with("shared/C.vue"),
+            "{}",
+            imported.carrier
+        );
+    }
+
+    /// The serving ordinal of the engine session that answered a project.
+    fn session_ordinal(outcome: &RunOutcome, config: &str) -> u64 {
+        project_named(outcome, config)
+            .binding
+            .as_ref()
+            .expect("the project was certified")
+            .engine
+            .serving_identity()
+            .editor_session_generation
+    }
+
+    /// Member carriers served at a tsx or js checking module are looked for
+    /// at other dialects' paths first. A project that imports them reaches no
+    /// carrier outside its membership, so a recheck whose input basis held
+    /// advances its program in the engine session that is already open.
+    #[test]
+    fn watch_session_member_tsx_and_js_carriers_keep_the_engine_session() {
+        let f = Fixture::new();
+        f.base();
+        f.write(
+            "tsconfig.json",
+            r#"{"extends":"./base.json","compilerOptions":{"allowJs":true},"include":["*.vue","*.ts"]}"#,
+        );
+        f.write(
+            "View.vue",
+            r#"<script setup lang="tsx">const value: string = "text";</script><template>{{ value }}</template>"#,
+        );
+        f.write(
+            "Plain.vue",
+            r#"<script setup>const value = "text";</script><template>{{ value }}</template>"#,
+        );
+        const MAIN: &str = "import View from \"./View.vue\";\nimport Plain from \"./Plain.vue\";\n\nexport const views = [View, Plain];\n";
+        f.write("main.ts", MAIN);
+        let (session, first) = WatchSession::open(&f.request()).unwrap();
+        assert_eq!(reported(&first), reported(&f.run()));
+        let opened = session_ordinal(&first, "tsconfig.json");
+        let mut w = Watched { f, session };
+
+        for edit in 1..=2 {
+            w.f.write("main.ts", &format!("{MAIN}// edit {edit}\n"));
+            let edited = w.changed(&["main.ts"]);
+            assert!(codes(&edited).is_empty(), "{:?}", codes(&edited));
+            assert!(project_named(&edited, "tsconfig.json")
+                .imported_carriers
+                .is_empty());
+            assert_eq!(session_ordinal(&edited, "tsconfig.json"), opened);
+        }
+    }
+
     /// A module created where the program's resolution probed is a change it
     /// read, as `tsc --watch` treats a failed lookup.
     #[test]
