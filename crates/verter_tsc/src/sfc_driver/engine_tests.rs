@@ -2049,14 +2049,19 @@ mod watch_session {
         assert_eq!(carrier_lines(&restored), carrier_lines(&importing));
     }
 
-    /// A carrier outside every membership, created after a project imports
-    /// it, is a change that project read: the import resolves to it, as in a
-    /// fresh run.
+    /// A carrier outside every membership, created in an existing directory
+    /// after a project imports it, is a change that project read: the import
+    /// resolves to it, as in a fresh run.
     #[test]
     fn watch_session_carrier_created_after_its_import_matches_fresh_runs() {
         let f = Fixture::new();
         sibling_projects(&f);
         f.write("a/A.vue", CLEAN);
+        // The engine looks for a module only in a directory that exists.
+        f.write(
+            "shared/types.d.ts",
+            "export declare const shared: string;\n",
+        );
         f.write(
             "b/x.ts",
             "import C from \"../shared/C.vue\";\n\nexport const component = C;\n",
