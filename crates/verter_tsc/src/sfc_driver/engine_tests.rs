@@ -2085,6 +2085,36 @@ mod watch_session {
         );
     }
 
+    /// A carrier created after the only import of it was removed is not
+    /// reached: the program's earlier lookup of it no longer stands for an
+    /// import, and the carrier's errors are not reported, as in a fresh run.
+    #[test]
+    fn watch_session_carrier_created_after_its_import_was_removed_matches_fresh_runs() {
+        let f = Fixture::new();
+        sibling_projects(&f);
+        f.write("a/A.vue", CLEAN);
+        f.write(
+            "shared/types.d.ts",
+            "export declare const shared: string;\n",
+        );
+        f.write(
+            "b/x.ts",
+            "import C from \"../shared/C.vue\";\n\nexport const component = C;\n",
+        );
+        let mut w = Watched::open(f);
+        assert_eq!(codes(&w.f.run()), vec![2307]);
+
+        w.f.write("b/x.ts", "export const component = 1;\n");
+        assert!(codes(&w.changed(&["b/x.ts"])).is_empty());
+
+        w.f.write("shared/C.vue", BROKEN);
+        let created = w.changed(&["shared/C.vue"]);
+        assert!(codes(&created).is_empty(), "{:?}", codes(&created));
+        assert!(project_named(&created, "b/tsconfig.json")
+            .imported_carriers
+            .is_empty());
+    }
+
     /// A carrier outside every membership, created with its directory after
     /// a project imports it, is reached once the directory and the carrier
     /// are reported, as a change source reports a new directory beside the
