@@ -37,7 +37,7 @@ pub const ROOT_ARM_PRELUDE: PreludeDeclaration = PreludeDeclaration {
     key: "51-fallthrough-root-arm",
     text: concat!(
         "declare const __VerterRootProbe: boolean;\n",
-        "declare function __VerterRootArm<W>(w: W): { readonly __verterRootArm: W };\n",
+        "declare function __VerterRootArm<W>(witness: unknown): { readonly __verterRootArm: W };\n",
     ),
 };
 

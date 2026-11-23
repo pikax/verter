@@ -189,17 +189,29 @@ impl ComponentResolutionProjection {
 }
 
 /// The default imports, from either script block, whose relative specifier
-/// resolves to the carrier itself: each names this carrier's own constructor.
+/// resolves to the carrier itself: each names this carrier's own constructor,
+/// unless a setup declaration shadows a normal-script import.
 fn self_imported_names<'a>(
     script: &'a ScriptProjectionFacts,
     canonical_id: &str,
 ) -> FxHashSet<&'a str> {
+    let declared_in_setup = |name: &str| {
+        script.setup.iter().any(|setup| {
+            setup.statements.iter().any(|statement| {
+                matches!(&statement.kind, SetupStatementKind::Declaration { names }
+                    if names.iter().any(|declared| declared == name))
+            })
+        })
+    };
     script
         .module
         .imports
         .iter()
         .filter(|import| specifier_names(&import.source, canonical_id))
-        .filter_map(|import| import.default_name.as_deref())
+        .filter_map(|import| {
+            let name = import.default_name.as_deref()?;
+            (import.from_setup || !declared_in_setup(name)).then_some(name)
+        })
         .collect()
 }
 
