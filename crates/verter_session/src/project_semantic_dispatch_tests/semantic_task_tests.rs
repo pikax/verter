@@ -5397,6 +5397,7 @@ export type Either = KindA | KindB;\n";
 const CARRIER_ALGEBRA_FILE: &str = "/semantic-task/carrier-algebra.ts";
 const CARRIER_ALGEBRA_BODY: &str = r#"
 import type { Either, KindA, KindB } from "./carrier-kinds";
+interface Generator<T, TReturn, TNext> {}
 function isKindA(value: unknown): value is KindA { return true as boolean as never; }
 export function distributed(value: null | undefined) {
     if (isKindA(value)) return value;
@@ -5441,7 +5442,9 @@ export function nestedYield(a: KindA, b: KindB) {
 /// - `nestedReturn`: a nested function's return join reduces `KindA` beside
 ///   `KindB`, its two return sites, reading each view through its carrier;
 /// - `nestedYield`: a nested generator's yield join reduces `KindA` beside
-///   `KindB`, its two yields, reading each view through its carrier.
+///   `KindB`, its two yields, reading each view through its carrier; the
+///   file declares the `Generator` head its wrap names, as the host loads
+///   no lib.
 #[test]
 fn an_algebra_operation_reads_its_carriers_as_requests_not_in_place() {
     use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
@@ -5485,6 +5488,63 @@ fn an_algebra_operation_reads_its_carriers_as_requests_not_in_place() {
             "{name}: {site} reads no carrier through the dispatcher's direct walk: {rows:?}"
         );
     }
+}
+
+const CARRIER_OPTIONS_FILE: &str = "/semantic-task/carrier-options.ts";
+const CARRIER_OPTIONS: &str = "export interface KindA { kind: \"a\"; }\n\
+export interface Options<T> { seed: T; map: (value: T) => T; }\n";
+const CARRIER_OBJECT_CALL_FILE: &str = "/semantic-task/carrier-object-call.ts";
+const CARRIER_OBJECT_CALL_BODY: &str = r#"
+import type { KindA, Options } from "./carrier-options";
+function make<T>(options: Options<T>): T { return options.seed; }
+export function objectArgument(a: KindA) {
+    return make({ seed: a, map: (value) => value });
+}
+"#;
+
+/// A generic call whose object literal argument holds a context-sensitive
+/// member types that object under the call's suspended collector. The
+/// parameter it is checked against is an interface applied across files,
+/// and each read of that application's carrier the object's members make
+/// is requested and answered at the carrier walk: none stands at the
+/// contextual object's own sites.
+#[test]
+fn a_contextual_object_reads_its_parameter_carrier_as_a_request() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CARRIER_OPTIONS_FILE,
+        CARRIER_OPTIONS,
+        crate::FileLanguage::script_ts(),
+    );
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CARRIER_OBJECT_CALL_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(CARRIER_OBJECT_CALL_BODY),
+        crate::FileLanguage::script_ts(),
+    );
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let key = root_return_key(&dispatch, CARRIER_OBJECT_CALL_FILE, "objectArgument");
+    let _ = body_reads::take();
+    let read = dispatch.execute_via_cold_build_helper(key);
+    let rows = body_reads::take();
+    assert!(
+        !read.result_is_partial() && read.partial_reasons().is_empty(),
+        "the call reads with complete evidence: {read:?}"
+    );
+    assert!(
+        rows.iter().any(|((stage, site, _), count)| {
+            *stage == Some("read_in_place") && *site == "carrier" && *count > 0
+        }),
+        "the parameter's carrier was requested and read: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|((_, site, _), _)| {
+            *site != "contextual_object_member" && *site != "contextual_object_order"
+        }),
+        "the contextual object reads no carrier through the dispatcher's direct walk: {rows:?}"
+    );
 }
 
 /// A module-level promise's awaited operand, read on a fresh host. The
