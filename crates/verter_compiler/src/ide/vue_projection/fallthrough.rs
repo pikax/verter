@@ -122,6 +122,7 @@ impl FallthroughProjection {
         PublicDeclarationExtras {
             props_intersection: self.fallthrough.props_type.clone(),
             attrs_type: Some(self.attrs.attrs_type.clone()),
+            reads_setup_return: !self.root_statements.is_empty(),
         }
     }
 }
@@ -441,6 +442,9 @@ pub fn project_fallthrough(
         && has_surface
     {
         projection.fallthrough.props_type = Some(attrs);
+    } else {
+        // Nothing falls through, so no arm needs to return its surface.
+        projection.root_statements.clear();
     }
     projection
 }

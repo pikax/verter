@@ -894,7 +894,13 @@ fn compose_template_scope(
         .module
         .normal_script_bindings
         .retain(|name| public.is_normal_value_binding(name));
-    let context = project_template_context(&context_script, public, &referenced, &kinds);
+    let context = project_template_context(
+        &context_script,
+        public,
+        &referenced,
+        &kinds,
+        fallthrough.declaration_extras().reads_setup_return,
+    );
     let reads_context = statements.iter().any(|statement| {
         statement.fragment.pieces.iter().any(|piece| match piece {
             CheckingPiece::Expression(id) | CheckingPiece::Replay(id) => {

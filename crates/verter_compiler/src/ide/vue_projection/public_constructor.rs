@@ -179,6 +179,15 @@ pub const PUBLIC_COMPONENT: &str = "__VerterPublicComponent";
 pub const PUBLIC_PROPS: &str = "__VerterPublicProps";
 /// Name of the rendered instance alias.
 pub const PUBLIC_INSTANCE: &str = "__VerterPublicInstance";
+/// The props the template context reads when the public props read the
+/// setup scope's return: the declared props alone.
+pub const TEMPLATE_PROPS: &str = "__VerterTemplateProps";
+/// The instance the template context reads when the public props read the
+/// setup scope's return: the public instance without that return.
+pub const TEMPLATE_INSTANCE: &str = "__VerterTemplateInstance";
+/// The setup scope function whose return a component root's surface and the
+/// exposed members are read from.
+const SETUP_SCOPE_PROVIDER: &str = "__VerterSetupScope";
 /// The expose provider: a function over the authored binder whose body is
 /// the setup statements and which returns the `defineExpose` argument.
 /// Rendered in the public declaration whenever setup exposes members.
@@ -670,10 +679,8 @@ impl VuePublicConstructorContract {
             Some(attrs) => (" | \"$attrs\"", format!("  readonly $attrs: {attrs};\n")),
             None => ("", String::new()),
         };
-        out.push_str(&format!(
-            "type {PUBLIC_INSTANCE}{alias_binder} = Omit<import(\"vue\").ComponentPublicInstance, \"$props\" | \"$emit\" | \"$slots\"{attrs_key}> & {{\n  readonly $props: {PUBLIC_PROPS}{args};\n  $emit: {};\n  readonly $slots: {slots};\n{attrs_member}}}",
-            emit.join(" & ")
-        ));
+        let emit = emit.join(" & ");
+        let exposed_reads_setup = provider == Some(SETUP_SCOPE_PROVIDER);
         let exposed = provider.map(|provider| {
             let returned = format!("ReturnType<typeof {provider}{args}>");
             let returned = if self.setup_is_async {
@@ -681,31 +688,51 @@ impl VuePublicConstructorContract {
             } else {
                 returned
             };
-            let returned = if matches!(provider, "__VerterSetupScope") {
+            let returned = if provider == SETUP_SCOPE_PROVIDER {
                 format!("Exclude<{returned}, {{ readonly __verterRootArm: unknown }}>")
             } else {
                 returned
             };
             format!("import(\"vue\").ShallowUnwrapRef<{returned}>")
         });
-        if self.normal_default.is_some() {
-            let mut omitted = format!("\"$props\" | \"$emit\" | \"$slots\"{attrs_key}");
-            if !inherits_props {
-                omitted.push_str(&format!(
-                    " | keyof InstanceType<typeof {OPTIONS_CONSTRUCTOR}>[\"$props\"]"
+        let instance = |props: &str, exposed: Option<&String>| {
+            let mut text = format!(
+                "Omit<import(\"vue\").ComponentPublicInstance, \"$props\" | \"$emit\" | \"$slots\"{attrs_key}> & {{\n  readonly $props: {props}{args};\n  $emit: {emit};\n  readonly $slots: {slots};\n{attrs_member}}}"
+            );
+            if self.normal_default.is_some() {
+                let mut omitted = format!("\"$props\" | \"$emit\" | \"$slots\"{attrs_key}");
+                if !inherits_props {
+                    omitted.push_str(&format!(
+                        " | keyof InstanceType<typeof {OPTIONS_CONSTRUCTOR}>[\"$props\"]"
+                    ));
+                }
+                if let Some(exposed) = exposed {
+                    omitted.push_str(&format!(" | keyof {exposed}"));
+                }
+                text.push_str(&format!(
+                    " & Omit<InstanceType<typeof {OPTIONS_CONSTRUCTOR}>, {omitted}>"
                 ));
             }
-            if let Some(exposed) = &exposed {
-                omitted.push_str(&format!(" | keyof {exposed}"));
+            if let Some(exposed) = exposed {
+                text.push_str(&format!(" & {exposed}"));
             }
+            text
+        };
+        out.push_str(&format!(
+            "type {PUBLIC_INSTANCE}{alias_binder} = {};\n",
+            instance(PUBLIC_PROPS, exposed.as_ref())
+        ));
+        if extras.reads_setup_return {
+            // The setup scope's return is inferred from the template context,
+            // so that context reads neither the return's bridge nor the
+            // surface the setup scope exposes.
+            let exposed = exposed.as_ref().filter(|_| !exposed_reads_setup);
             out.push_str(&format!(
-                " & Omit<InstanceType<typeof {OPTIONS_CONSTRUCTOR}>, {omitted}>"
+                "type {TEMPLATE_PROPS}{alias_binder} = {};\ntype {TEMPLATE_INSTANCE}{alias_binder} = {};\n",
+                self.declared_props_type(),
+                instance(TEMPLATE_PROPS, exposed)
             ));
         }
-        if let Some(exposed) = exposed {
-            out.push_str(&format!(" & {exposed}"));
-        }
-        out.push_str(";\n");
 
         let parameter = match self.props_requirement {
             PropsRequirement::Required => format!("props: {PUBLIC_PROPS}{args}"),
@@ -848,6 +875,11 @@ pub struct PublicDeclarationExtras {
     pub props_intersection: Option<String>,
     /// Replaces the `$attrs` member type.
     pub attrs_type: Option<String>,
+    /// The props intersection reads the setup scope's return (a component
+    /// root's specialized surface). That return is inferred from the
+    /// template context, so the context then reads [`TEMPLATE_INSTANCE`] and
+    /// [`TEMPLATE_PROPS`] instead of the public aliases.
+    pub reads_setup_return: bool,
 }
 
 impl VuePublicConstructorContract {
@@ -881,8 +913,15 @@ impl VuePublicConstructorContract {
                 } else {
                     "\"$props\""
                 };
+                let template = if extras.reads_setup_return {
+                    format!(
+                        "type {TEMPLATE_PROPS} = {declared};\ntype {TEMPLATE_INSTANCE} = Omit<InstanceType<typeof {OPTIONS_CONSTRUCTOR}>, {omit}> & {{ readonly $props: {TEMPLATE_PROPS};{attrs} }};\n"
+                    )
+                } else {
+                    String::new()
+                };
                 return Some(format!(
-                    "type {PUBLIC_PROPS} = {props};\ntype {PUBLIC_INSTANCE} = Omit<InstanceType<typeof {OPTIONS_CONSTRUCTOR}>, {omit}> & {{ readonly $props: {PUBLIC_PROPS};{attrs} }};\ndeclare const {PUBLIC_COMPONENT}: (typeof {OPTIONS_COMPONENT} extends abstract new (...args: any[]) => unknown ? __VerterUseContract<typeof {OPTIONS_COMPONENT}> : typeof {OPTIONS_COMPONENT}) & {{ new (...args: {{}} extends {PUBLIC_PROPS} ? [props?: {PUBLIC_PROPS}] : [props: {PUBLIC_PROPS}]): {PUBLIC_INSTANCE}; }};\nexport default {PUBLIC_COMPONENT};\n"
+                    "type {PUBLIC_PROPS} = {props};\ntype {PUBLIC_INSTANCE} = Omit<InstanceType<typeof {OPTIONS_CONSTRUCTOR}>, {omit}> & {{ readonly $props: {PUBLIC_PROPS};{attrs} }};\n{template}declare const {PUBLIC_COMPONENT}: (typeof {OPTIONS_COMPONENT} extends abstract new (...args: any[]) => unknown ? __VerterUseContract<typeof {OPTIONS_COMPONENT}> : typeof {OPTIONS_COMPONENT}) & {{ new (...args: {{}} extends {PUBLIC_PROPS} ? [props?: {PUBLIC_PROPS}] : [props: {PUBLIC_PROPS}]): {PUBLIC_INSTANCE}; }};\nexport default {PUBLIC_COMPONENT};\n"
                 ));
             }
             return Some(format!(

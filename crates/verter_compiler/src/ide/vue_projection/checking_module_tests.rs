@@ -2901,6 +2901,33 @@ defineProps<{ value: number }>();
         !text.contains("format: (value: unknown) => string"),
         "{text}"
     );
+    // The setup scope's return is inferred from the template context, so
+    // the context reads the declared props and an instance without that
+    // return; otherwise TypeScript sees the return depend on itself.
+    assert!(
+        text.contains("null! as __VerterTemplateInstance & __VerterTemplateProps"),
+        "{text}"
+    );
+    let template_props = text
+        .lines()
+        .find(|line| line.starts_with("type __VerterTemplateProps ="))
+        .unwrap();
+    assert!(!template_props.contains("ReturnType"), "{template_props}");
+    let template_instance = text
+        .split("type __VerterTemplateInstance =")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(
+                ";
+",
+            )
+            .next()
+        })
+        .unwrap();
+    assert!(
+        !template_instance.contains("__VerterSetupScope"),
+        "{template_instance}"
+    );
     assert!(
         !text.contains("__VerterUseContract<typeof Child>"),
         "{text}"
@@ -3444,6 +3471,27 @@ defineExpose({ value: props.value });
         "{text}"
     );
     assert!(text.contains("Exclude<ReturnType<typeof __VerterSetupScope<T>>, { readonly __verterRootArm: unknown }>"), "{text}");
+    // The exposed surface is the setup scope's return, so the template
+    // context reads neither it nor the bridge.
+    assert!(
+        text.contains("null! as __VerterTemplateInstance<T> & __VerterTemplateProps<T>"),
+        "{text}"
+    );
+    let template_instance = text
+        .split("type __VerterTemplateInstance<")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(
+                ";
+",
+            )
+            .next()
+        })
+        .unwrap();
+    assert!(
+        !template_instance.contains("__VerterSetupScope"),
+        "{template_instance}"
+    );
     assert!(
         text.contains("if (__VerterRootProbe) return __VerterRootArm"),
         "{text}"

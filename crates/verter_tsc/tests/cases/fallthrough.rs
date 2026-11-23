@@ -144,18 +144,21 @@ fn setup_temp_project() -> (tempfile::TempDir, PathBuf) {
     (temp, temp_path)
 }
 
-/// `file(line,col): error TSxxxx: message` → the `.vue` basename.
+/// `file(line,col): error TSxxxx: message`, or `file: error TSxxxx: message`
+/// for a diagnostic in generated code with no authored position → the
+/// `.vue` basename.
 fn error_files(stdout: &str) -> Vec<String> {
     let mut files = Vec::new();
     for line in stdout.lines() {
-        let Some(paren) = line.find('(') else {
+        let Some(error) = line.find(": error TS") else {
             continue;
         };
-        let rest = &line[paren..];
-        if !rest.contains("): error TS") {
-            continue;
-        }
-        let file = line[..paren].replace('\\', "/");
+        let head = &line[..error];
+        let head = match head.strip_suffix(')').and_then(|head| head.rfind('(')) {
+            Some(paren) => &head[..paren],
+            None => head,
+        };
+        let file = head.replace('\\', "/");
         if let Some(name) = file.rsplit('/').next() {
             files.push(name.to_string());
         }
