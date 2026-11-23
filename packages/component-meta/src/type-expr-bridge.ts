@@ -63,6 +63,7 @@ import {
   NODE_UNION,
   NODE_UNKNOWN,
   intrinsicOpDisplayName,
+  intrinsicOpWireToken,
   type GraphNodeRecord,
   type GraphObjectMemberRecord,
   type GraphPropertyKeyRecord,
@@ -748,6 +749,19 @@ function graphNodeToDescriptor(
         transcribeTypeExpr(createGraphTypeExprRef(expr.graph, id), graphVisiting),
       );
       return typeArguments.length > 0 ? typeRef(name, typeArguments) : typeRef(name);
+    }
+    // Compiler intrinsics retain their operation identity and transcribed
+    // operands, as on the plain native path. An op with no wire token keeps
+    // its printed text instead of becoming a known operation.
+    case NODE_INTRINSIC_APPLICATION: {
+      const op = intrinsicOpWireToken(node.op);
+      if (op === undefined) return unknown(graphTypeExprToString(expr));
+      return intrinsicApplication(
+        op,
+        node.argumentNodeIds.map((id) =>
+          transcribeTypeExpr(createGraphTypeExprRef(expr.graph, id), graphVisiting),
+        ),
+      );
     }
     case NODE_TYPE_PARAMETER:
       return typeParameter(expr.graph.getString(node.nameId), {

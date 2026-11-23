@@ -49,6 +49,22 @@ export function intrinsicOpDisplayName(op: number): string {
   }
 }
 
+/**
+ * Descriptor token for a wire op code. Mirrors the Rust
+ * `CompilerIntrinsicTypeOp::wire_str`; UNSPECIFIED and unknown codes have no
+ * token, so they never become an `Awaited` application.
+ */
+export function intrinsicOpWireToken(op: number): string | undefined {
+  switch (op) {
+    case INTRINSIC_OP_AWAITED:
+      return "awaited";
+    case INTRINSIC_OP_NO_INFER:
+      return "noInfer";
+    default:
+      return undefined;
+  }
+}
+
 export const SYNTHETIC_CARRIER_SURFACE_SLOT_BINDING = 0;
 export const SYNTHETIC_CARRIER_SURFACE_BINDING = 1;
 
