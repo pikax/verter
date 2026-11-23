@@ -1248,7 +1248,7 @@ fn an_await_in_class_heritage_makes_the_scope_async() {
     offset_of(&text, "async function __VerterSetupScope() {");
     offset_of(
         &text,
-        "ShallowUnwrapRef<Awaited<ReturnType<typeof __VerterSetupScope>>>",
+        "ShallowUnwrapRef<Exclude<Awaited<ReturnType<typeof __VerterSetupScope>>, { readonly __verterRootArm: unknown }>>",
     );
 }
 
@@ -1289,7 +1289,7 @@ fn top_level_await_makes_the_scope_async_and_the_exposed_type_awaited() {
     offset_of(&text, "async function __VerterSetupScope() {");
     offset_of(
         &text,
-        "ShallowUnwrapRef<Awaited<ReturnType<typeof __VerterSetupScope>>>",
+        "ShallowUnwrapRef<Exclude<Awaited<ReturnType<typeof __VerterSetupScope>>, { readonly __verterRootArm: unknown }>>",
     );
 }
 
