@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 3,
+  "framework": "vue",
+  "domain": {
+    "upstream": "https://github.com/vuejs/core",
+    "commit": "1595469ef66e4126351609f7df8ef334560aa3fa",
+    "tree": "a417748239111b19c9f78380531fda9ef13f7c6c",
+    "packageVersion": "3.6.0-rc.15"
+  },
+  "packageLockSha256": "418ffca6ed806b30f93c82b8358720a3b13618ab35f5703cac9b310f3a5ea44a",
+  "realizedClosureSha256": "53efe33accfa5889757f32e75632a78cb45ab17d545e59294d7b98303c6021f3",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "272128d5ea31d82994ef9d8d302f1c96f4b02be502e7f7308defa978c4b8ac74",
+    "commit": "bb2a37408f614ac46d44fe8fc3f322e2e41baf72",
+    "tree": "62e1014cbb73a39d167385413bf7e59b62afa75e",
+    "worktreeDirty": false,
+    "implementationSha256": "659b65c5474b664d15192338b68000d6609a70849da0149c9995ce5230367dcc"
+  },
+  "fixture": {
+    "path": "fixtures/vue/slots.vue",
+    "sha256": "6fe3f95ee839d348bce0786b11edd912f7e0b085c5166c8d15da75058ab062a7"
+  },
+  "options": {
+    "backend": "vapor",
+    "sourceMap": true,
+    "isProd": true,
+    "transformAssetUrls": {
+      "includeAbsolute": true
+    }
+  },
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "ea43efdff05e24010b430e2cc40865d6af62d854eed871c50ef2a5324254e8e9",
+    "mapPresent": true
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "a7b08b677b2f23e5a84b183e586d60624517c7923847b9e0e5b10899f607ee80",
+    "normalizedDigestSha256": "f95510a69eb5ceaa2e3755fffa74e639ee33dd3a910d73db2038a3503fbd6e6e"
+  },
+  "code": "const _sfc_main = { __vapor: true }\nimport { child as _child, setInsertionState as _setInsertionState, createSlot as _createSlot, next as _next, template as _template } from 'vue';\nconst t0 = _template(\"Untitled\", 2)\nconst t1 = _template(\"<div class=panel><header></header><main>\", 1)\n\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n6 = t1()\n  const n3 = _child(n6)\n  const n5 = _next(n3)\n  _setInsertionState(n3)\n  const n0 = _createSlot(\"header\", null, () => {\n    const n2 = t0()\n    return n2\n  })\n  _setInsertionState(n5)\n  const n4 = _createSlot()\n  return n6\n}\n_sfc_main.render = render\nexport default _sfc_main",
+  "map": {
+    "version": 3,
+    "sources": [
+      "fixtures/vue/slots.vue"
+    ],
+    "sourcesContent": [
+      "<template>\n  <div class=\"panel\">\n    <header>\n      <slot name=\"header\">Untitled</slot>\n    </header>\n    <main>\n      <slot />\n    </main>\n  </div>\n</template>\n"
+    ],
+    "names": [],
+    "mappings": ";;;;;;;;;;yBAGY,QAAa"
+  }
+}

@@ -107,7 +107,12 @@ describe("package/evidence-lock drift refusal", () => {
     const mutated = path.join(dir, "package-lock.json");
     const original = readFileSync(VUE_EVIDENCE_LOCK, "utf8");
     // A real, minimal, PROVEN-applied mutation: flip one integrity char.
-    const mutatedText = original.replace("sha512-yM", "sha512-XM");
+    // The first integrity's leading base64 character is read from the
+    // committed lock, so the plant tracks whatever closure the domain pins.
+    const mutatedText = original.replace(
+      /"integrity": "sha512-(.)/,
+      (_, first) => `"integrity": "sha512-${first === "A" ? "B" : "A"}`,
+    );
     expect(mutatedText).not.toBe(original); // proves the plant actually applied
     writeFileSync(mutated, mutatedText);
     expect(() =>
