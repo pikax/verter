@@ -5290,6 +5290,322 @@ fn a_cold_carrier_evaluation_records_its_read_in_its_own_proof() {
     }
 }
 
+/// The body reads of an identity carrier's families (an instantiation or
+/// an indexed access) made anywhere but the requested carrier walk
+/// (`read_in_place / carrier`): each is a carrier a wrapper settled in
+/// place through the dispatcher's own walk, attributed to the wrapper's
+/// site.
+fn carrier_reads_off_the_walk(
+    rows: &[(
+        verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
+        u64,
+    )],
+) -> Vec<(
+    Option<&'static str>,
+    &'static str,
+    verter_type_engine::semantic_query::SemanticQueryKeyTag,
+)> {
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    rows.iter()
+        .filter(|((stage, site, family), count)| {
+            *count > 0
+                && matches!(
+                    family,
+                    SemanticQueryKeyTag::Instantiate | SemanticQueryKeyTag::IndexedAccess
+                )
+                && !(*stage == Some("read_in_place") && *site == "carrier")
+        })
+        .map(|(site, _)| *site)
+        .collect()
+}
+
+const CARRIER_GUARD_PROOF_FILE: &str = "/semantic-task/carrier-guard-proof.ts";
+const CARRIER_GUARD_PROOF_BODY: &str = r#"
+import type { Box } from "./carrier-box";
+export function typed(value: Box["a"] | Box["b"]) {
+    if (typeof value === "undefined") return 1;
+    return 0;
+}
+export function equal(value: Box["a"] | Box["b"]) {
+    if (value === undefined) return 1;
+    return 0;
+}
+"#;
+
+/// A guard that enumerates its subject's arms through their identity
+/// carriers requests each carrier's walk, so the first, cold evaluation of
+/// an arm makes its read inside that evaluation and the proof it is
+/// published with names the file declaring what it read. Each arm projects
+/// a member an imported interface inherits from a third file: the answer
+/// roots on that third file and the arm's node on the reading file, so the
+/// interface's own file is named only if the member read, which goes
+/// through its declaration, is recorded in the proof. No arm settles
+/// through the relation's direct unwrap.
+#[test]
+fn a_guard_enumerating_carrier_arms_records_each_read_in_its_own_proof() {
+    use verter_session_query::facts::version::FactVersionRef;
+    use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
+    for name in ["typed", "equal"] {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CARRIER_PROOF_BASE_FILE,
+            CARRIER_PROOF_BASE,
+            crate::FileLanguage::script_ts(),
+        );
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CARRIER_PROOF_BOX_FILE,
+            CARRIER_PROOF_BOX,
+            crate::FileLanguage::script_ts(),
+        );
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CARRIER_GUARD_PROOF_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(CARRIER_GUARD_PROOF_BODY),
+            crate::FileLanguage::script_ts(),
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = Arc::clone(dispatch.graph_arc());
+        let key = root_return_key(&dispatch, CARRIER_GUARD_PROOF_FILE, name);
+        let _ = body_reads::take();
+        let read = dispatch.execute_via_cold_build_helper(key);
+        let rows = body_reads::take();
+        assert!(
+            !read.result_is_partial() && read.partial_reasons().is_empty(),
+            "{name}: the guard reads with complete evidence: {read:?}"
+        );
+        assert!(
+            rows.iter().any(|((stage, site, _), count)| {
+                *stage == Some("read_in_place") && *site == "carrier" && *count > 0
+            }),
+            "{name}: an enumerated carrier stood at a cold evaluation and read for it: {rows:?}"
+        );
+        assert!(
+            carrier_reads_off_the_walk(&rows).is_empty(),
+            "{name}: no arm settles its carrier in place, outside the requested walk: {rows:?}"
+        );
+        let proofs: Vec<_> = graph
+            .evaluate_deferred_memo_proofs_for_tests()
+            .into_iter()
+            .filter(|(node, _)| {
+                matches!(
+                    graph.node_data(*node).as_deref(),
+                    Some(SemanticNodeData::IndexedAccess { .. })
+                )
+            })
+            .collect();
+        assert!(
+            !proofs.is_empty(),
+            "{name}: the member projections are published evaluations"
+        );
+        for (node, (facts, roots)) in &proofs {
+            let mut named = Vec::new();
+            for fact in facts.iter() {
+                match fact {
+                    FactVersionRef::Receipt(receipt) => {
+                        named.extend(receipt.canonicals().iter().map(|c| c.to_string()));
+                    }
+                    fact => named.extend(fact.canonical_id().map(str::to_owned)),
+                }
+            }
+            assert!(
+                named.iter().any(|c| c == CARRIER_PROOF_BOX_FILE),
+                "{name}: the evaluation of {node:?} proves the declaration its member read went \
+                 through: named {named:?}, facts {facts:?}, self-roots {roots:?}, reads {rows:?}"
+            );
+        }
+    }
+}
+
+const CARRIER_KINDS_FILE: &str = "/semantic-task/carrier-kinds.ts";
+const CARRIER_KINDS: &str = "export interface KindA { kind: \"a\"; }\n\
+export interface KindB { kind: \"b\"; }\n\
+export type Either = KindA | KindB;\n\
+export type Mode = \"a\" | \"b\";\n";
+const CARRIER_ALGEBRA_FILE: &str = "/semantic-task/carrier-algebra.ts";
+const CARRIER_ALGEBRA_BODY: &str = r#"
+import type { Either, KindA, KindB, Mode } from "./carrier-kinds";
+interface Generator<T, TReturn, TNext> {}
+function isKindA(value: unknown): value is KindA { return true as boolean as never; }
+export function distributed(value: null | undefined) {
+    if (isKindA(value)) return value;
+    return 0;
+}
+export function reduced(a: KindA, b: KindB) {
+    return [a, b];
+}
+export function primitive(either: Either, text: string) {
+    return [either, text];
+}
+export function nestedReturn(a: KindA, b: KindB, c: boolean) {
+    return () => {
+        if (c) return a;
+        return b;
+    };
+}
+export function nestedYield(a: KindA, b: KindB) {
+    return function* () {
+        yield a;
+        yield b;
+    };
+}
+export function disjoint(value: KindB | null) {
+    if (isKindA(value)) return value;
+    return 0;
+}
+export function literalMember() {
+    return { m: "a" } satisfies { m: Mode };
+}
+"#;
+
+/// An algebra operation the flow body calls as one step reads every
+/// identity carrier it looks through as a request answered in place, never
+/// through the dispatcher's direct walk: the body's reads under the
+/// operation's own site are none, and the carriers' reads stand at the
+/// carrier walk. Each body reaches its operation with interface carriers
+/// declared in another file and only shortcuts that need no relation:
+///
+/// - `distributed`: a type predicate over `null | undefined` distributes
+///   its intersection with `KindA`, each pair collapsing because `KindA`,
+///   read through its carrier, is an object type, and the predicate's
+///   indexed narrow reads the keys `KindA` requires through its carrier;
+/// - `reduced`: the array literal's element union reduces `KindA` beside
+///   `KindB`, each view and its unit-typed `kind` read through its
+///   carrier, the different discriminants keeping both;
+/// - `primitive`: the reduction of `Either` beside `string` asks whether
+///   `Either` may be below a primitive, reading each member of the union it
+///   names through its carrier;
+/// - `nestedReturn`: a nested function's return join reduces `KindA` beside
+///   `KindB`, its two return sites, reading each view through its carrier;
+/// - `nestedYield`: a nested generator's yield join reduces `KindA` beside
+///   `KindB`, its two yields, reading each view through its carrier; the
+///   file declares the `Generator` head its wrap names, as the host loads
+///   no lib;
+/// - `disjoint`: a type predicate over `KindB | null` distributes its
+///   intersection with `KindA`; `KindB & KindA` is proved disjoint, and
+///   the class of that collapse (the conflicting unit `kind` members)
+///   reads both operands and their members through their carriers;
+/// - `literalMember`: the literal `"a"` is kept under the contextual
+///   member type `Mode`, an alias declared in another file, which the
+///   literal-context reader looks through by its carrier.
+///
+/// No body read of a carrier's family stands anywhere but the carrier
+/// walk, under the operation's own site or any other. Every row is read
+/// and reported, so one failing row does not hide another.
+#[test]
+fn an_algebra_operation_reads_its_carriers_as_requests_not_in_place() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
+    let mut failures = Vec::new();
+    for (name, site) in [
+        ("distributed", "distribute_intersection"),
+        ("reduced", "reduce_arms_to_supertypes"),
+        ("primitive", "reduce_arms_to_supertypes"),
+        ("nestedReturn", "join_flow_return_contributors"),
+        ("nestedYield", "attach_function_kind_wrap"),
+        ("disjoint", "distribute_intersection"),
+        ("literalMember", "literal_of_contextual_type"),
+    ] {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CARRIER_KINDS_FILE,
+            CARRIER_KINDS,
+            crate::FileLanguage::script_ts(),
+        );
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CARRIER_ALGEBRA_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(CARRIER_ALGEBRA_BODY),
+            crate::FileLanguage::script_ts(),
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let key = root_return_key(&dispatch, CARRIER_ALGEBRA_FILE, name);
+        let _ = body_reads::take();
+        let read = dispatch.execute_via_cold_build_helper(key);
+        let rows = body_reads::take();
+        if read.result_is_partial() || !read.partial_reasons().is_empty() {
+            failures.push(format!(
+                "{name}: the body reads with partial evidence: {read:?}"
+            ));
+        }
+        if !rows.iter().any(|((stage, site, _), count)| {
+            *stage == Some("read_in_place") && *site == "carrier" && *count > 0
+        }) {
+            failures.push(format!(
+                "{name}: {site}'s carriers were not requested at the carrier walk: {rows:?}"
+            ));
+        }
+        let off_walk = carrier_reads_off_the_walk(&rows);
+        if !off_walk.is_empty() {
+            failures.push(format!(
+                "{name}: carriers read in place, outside the requested walk, at {off_walk:?}: \
+                 {rows:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+const CARRIER_OPTIONS_FILE: &str = "/semantic-task/carrier-options.ts";
+const CARRIER_OPTIONS: &str = "export interface KindA { kind: \"a\"; }\n\
+export interface Options<T> { seed: T; map: (value: T) => T; }\n";
+const CARRIER_OBJECT_CALL_FILE: &str = "/semantic-task/carrier-object-call.ts";
+const CARRIER_OBJECT_CALL_BODY: &str = r#"
+import type { KindA, Options } from "./carrier-options";
+function make<T>(options: Options<T>): T { return options.seed; }
+export function objectArgument(a: KindA) {
+    return make({ seed: a, map: (value) => value });
+}
+"#;
+
+/// A generic call whose object literal argument holds a context-sensitive
+/// member types that object under the call's suspended collector. The
+/// parameter it is checked against is an interface applied across files,
+/// and each read of that application's carrier the object's members make
+/// is requested and answered at the carrier walk. So is every other
+/// carrier the contextual typing reads: the object's `this` marker and
+/// error-type lookups, and the contextual view of each member. Every
+/// instantiation read the body makes stands at the carrier walk; the
+/// contextual object's own sites keep only the member checks' path and
+/// signature reads.
+#[test]
+fn a_contextual_object_reads_its_parameter_carrier_as_a_request() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CARRIER_OPTIONS_FILE,
+        CARRIER_OPTIONS,
+        crate::FileLanguage::script_ts(),
+    );
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CARRIER_OBJECT_CALL_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(CARRIER_OBJECT_CALL_BODY),
+        crate::FileLanguage::script_ts(),
+    );
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let key = root_return_key(&dispatch, CARRIER_OBJECT_CALL_FILE, "objectArgument");
+    let _ = body_reads::take();
+    let read = dispatch.execute_via_cold_build_helper(key);
+    let rows = body_reads::take();
+    assert!(
+        !read.result_is_partial() && read.partial_reasons().is_empty(),
+        "the call reads with complete evidence: {read:?}"
+    );
+    assert!(
+        rows.iter().any(|((stage, site, _), count)| {
+            *stage == Some("read_in_place") && *site == "carrier" && *count > 0
+        }),
+        "the parameter's carrier was requested and read: {rows:?}"
+    );
+    assert!(
+        carrier_reads_off_the_walk(&rows).is_empty(),
+        "the contextual typing reads no carrier through the dispatcher's direct walk: {rows:?}"
+    );
+}
+
 /// A module-level promise's awaited operand, read on a fresh host. The
 /// return expression keeps its `Awaited` slice form, so the expression run
 /// requests normalization after the operand's value reaches its waiting pop.

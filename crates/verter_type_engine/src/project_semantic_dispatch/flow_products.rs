@@ -1180,6 +1180,9 @@ pub(super) struct DispatchFlowAlgebra<'a, D: super::flow_return::FlowDemandDrive
     pub dispatch: &'a D,
     /// The joining frame's null algebra.
     pub nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    /// The joining frame's identity-carrier walk, which a subtype
+    /// reduction reads each carrier through.
+    pub settle: super::relation::CarrierSettle<'a>,
 }
 
 impl<D: super::flow_return::FlowDemandDriver> FlowSemanticAlgebra for DispatchFlowAlgebra<'_, D> {
@@ -1196,11 +1199,11 @@ impl<D: super::flow_return::FlowDemandDriver> FlowSemanticAlgebra for DispatchFl
     }
     fn subtype_union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
         self.dispatch
-            .subtype_reduced_union(members, self.nullability)
+            .subtype_reduced_union(members, self.nullability, self.settle)
     }
     fn evolving_array(&self, elements: &[EvolvingElement]) -> FlowAlgebraComposite {
         self.dispatch
-            .finalize_evolving_array(elements, self.nullability)
+            .finalize_evolving_array(elements, self.nullability, self.settle)
     }
 }
 

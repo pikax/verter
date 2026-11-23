@@ -553,7 +553,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                 };
                 for (position, arm) in index.arms.iter().enumerate() {
                     let position = position as u32;
-                    match self.dispatch.closed_object_own_string_keys(*arm) {
+                    match self
+                        .dispatch
+                        .closed_object_own_string_keys(*arm, &|node| self.settle_carrier(node))
+                    {
                         Some(keys) => {
                             for key in &keys {
                                 own.by_key
@@ -645,9 +648,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         target: SemanticNodeId,
         negated: bool,
     ) -> Option<(GuardNarrowing, PredicateNarrowConsumption)> {
-        let refuting = self
-            .dispatch
-            .assignability_refuting_keys(target, self.st.canonical)?;
+        let refuting =
+            self.dispatch
+                .assignability_refuting_keys(target, self.st.canonical, &|node| {
+                    self.settle_carrier(node)
+                })?;
         let own = self.own_key_arms(&arms.index);
         let holders = |key: &Arc<str>| own.by_key.get(key).map_or(&[][..], Vec::as_slice);
         let rarest = refuting.iter().min_by_key(|key| holders(key).len())?;

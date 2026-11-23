@@ -92,8 +92,46 @@ walk through the direct `classify_truthiness_domain_read`. Native guard chains,
 including guards called between expression-stack arms, settle the same helper
 through `settle_now`, attributed as `read_in_place / carrier`. Their callers do
 not yet retain the guard chain at a request. Concrete carriers settle without
-requesting a read or allocating a standing-walk box. Other carrier wrappers
-continue to use their existing relation entry points.
+requesting a read or allocating a standing-walk box.
+
+Every other carrier wrapper the flow body reaches is requested the same way
+(`carrier_in_place` in `flow_return_helper_run.rs`): the evaluator's
+identity-carrier settles (`settle_carrier`), the per-evaluation memo arm
+enumeration reads through (`carrier_unwrap`, so `enumerated_union_arms_or_self`
+requests each arm's walk), and reduction views (`reduction_view`) each request
+the walk and answer it at once, attributed as `read_in_place / carrier`. The
+contextual wrappers (`contextual_view`, `contextual_this_type`,
+`contextual_error_type`, `contextual_undeclared_names` in
+`flow_return_contextual.rs`) walk on the evaluator: an applied declaration's
+`Skeleton` instantiation is requested from its key
+(`contextual_carrier_key`), any other node reads through its requested
+reduction view. The contextual call's object wrappers in
+`call_resolve_contextual.rs` (`contextual_object_order`,
+`contextual_object_member`) take that view from their flow caller. The flow
+driver exposes no direct relation unwrap, reduction view or contextual view,
+so a flow body cannot settle a carrier wrapper in place.
+
+Dispatcher algebra the body calls as one operation takes the walk it reads
+carriers through as a parameter (`CarrierSettle` in `relation.rs`) and reads
+through no other: intersection distribution (`distribute_intersection` →
+`intersection_parts`' object-type check), supertype reduction
+(`reduce_arms_to_supertypes`, `subtype_reduced_union`,
+`finalize_evolving_array`: the reduction views, `unit_typed_properties` and
+`may_be_below_a_primitive`), the function joins that reduce through
+them (`join_flow_return_contributors`, and `attach_function_kind_wrap`'s
+yield join), the collapse class of a disjoint pair
+(`nodes_comparable_settled` → `checker_intersection_collapse`, its union
+arms and discriminant members), the indexed predicate narrow's key reads
+(`assignability_refuting_keys`, `closed_object_own_string_keys`), and the
+literal-context reader (`literal_of_contextual_type`, its constraint
+walk `base_constraint_primitive_kinds`). The relation's own descent stays
+the relation authority's. The flow evaluator passes its requested walk
+(`settle_carrier`, and the frame algebra's `DispatchFlowAlgebra::settle` for
+product joins), and the root read's own joins, made after its evaluator
+returns but inside its frame, pass the same requested walk
+(`carrier_in_place`), so those reads are attributed as
+`read_in_place / carrier`; a dispatcher caller outside a flow frame passes
+the dispatcher's own `unwrap_identity_carrier_for_relation`.
 
 An unsettled composite is named in the current signature epoch. If that epoch
 retires while its result request waits, the producer refuses the retired handle

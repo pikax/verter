@@ -1330,31 +1330,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// refuses is its TS2590 recovery, a resource partial holding the
     /// undistributed intersection as its origin. `None` when some factor is
     /// empty, or when the connected demand cannot pay for the distribution
-    /// (the demand is then partial).
+    /// (the demand is then partial). A member the combinations look through
+    /// to its structure is read through `settle` ([`CarrierSettle`]).
     pub(super) fn distribute_intersection(
         &self,
         factors: &[Vec<SemanticNodeId>],
         origin: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
+        settle: CarrierSettle<'_>,
     ) -> Option<DistributedIntersection> {
         if factors.iter().any(Vec::is_empty) {
             return None;
         }
         let graph = self.graph();
         let mut undecided = false;
-        let parts =
-            match self.simplified_parts(factors, false, nullability, ordered, &mut undecided) {
-                Ok(Some(parts)) => parts,
-                Ok(None) => return None,
-                Err(refusal) => {
-                    let written = self.intern_intersection_members(origin, ordered);
-                    return Some(DistributedIntersection {
-                        node: self.recover_at_operation_budget(refusal, Some(written)),
-                        undecided,
-                    });
-                }
-            };
+        let parts = match self.simplified_parts(
+            factors,
+            false,
+            nullability,
+            ordered,
+            &mut undecided,
+            settle,
+        ) {
+            Ok(Some(parts)) => parts,
+            Ok(None) => return None,
+            Err(refusal) => {
+                let written = self.intern_intersection_members(origin, ordered);
+                return Some(DistributedIntersection {
+                    node: self.recover_at_operation_budget(refusal, Some(written)),
+                    undecided,
+                });
+            }
+        };
         let origin_count: usize = origin
             .iter()
             .map(|node| self.constituent_count(*node))
@@ -1387,8 +1395,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         origin: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> Option<SemanticNodeId> {
-        self.distribute_intersection(factors, origin, nullability, false)
-            .map(|distributed| distributed.node)
+        self.distribute_intersection(factors, origin, nullability, false, &|node| {
+            self.unwrap_identity_carrier_for_relation(node)
+        })
+        .map(|distributed| distributed.node)
     }
 
     /// The parts of the intersection of `factors`, as the checker's
@@ -1406,6 +1416,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
         undecided: &mut bool,
+        settle: CarrierSettle<'_>,
     ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::checker_policy::OperationRefusal>
     {
         let graph = self.graph();
@@ -1421,7 +1432,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // The factors share no member: the intersection is empty.
             Vec::new()
         } else {
-            match self.intersection_parts(factors, divided, nullability, ordered, undecided)? {
+            match self.intersection_parts(
+                factors,
+                divided,
+                nullability,
+                ordered,
+                undecided,
+                settle,
+            )? {
                 Some(parts) => parts,
                 None => return Ok(None),
             }
@@ -1452,6 +1470,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
         undecided: &mut bool,
+        settle: CarrierSettle<'_>,
     ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::checker_policy::OperationRefusal>
     {
         use super::relation::ComparabilityVerdict;
@@ -1463,7 +1482,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let parts = match half {
                     [only] => only.clone(),
                     _ => {
-                        match self.simplified_parts(half, false, nullability, ordered, undecided)? {
+                        match self.simplified_parts(
+                            half,
+                            false,
+                            nullability,
+                            ordered,
+                            undecided,
+                            settle,
+                        )? {
                             Some(parts) => parts,
                             None => return Ok(None),
                         }
@@ -1478,7 +1504,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .collect(),
                 );
             }
-            return self.simplified_parts(&halves, true, nullability, ordered, undecided);
+            return self.simplified_parts(&halves, true, nullability, ordered, undecided, settle);
         }
         let combinations = match super::canonical_algebra::admit_cross_product(
             factors.iter().map(Vec::len),
@@ -1509,7 +1535,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
         };
         let object_type = |node: SemanticNodeId| {
-            let concrete = match self.unwrap_identity_carrier_for_relation(node) {
+            let concrete = match settle(node) {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
                 super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
             };
@@ -1546,7 +1572,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     return (true, false);
                 }
-                match self.nodes_comparable(left, right) {
+                match self.nodes_comparable_settled(left, right, settle) {
                     ComparabilityVerdict::Disjoint(proof)
                         if proof.checker_reduces_intersection_to_never() =>
                     {
@@ -4447,6 +4473,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> FlowReturnResult {
         use verter_session_query::flow::skeleton::FunctionBodyKind;
         if kind == FunctionBodyKind::Plain {
@@ -4454,7 +4481,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let (yield_join, undecided) = match kind {
             FunctionBodyKind::Generator | FunctionBodyKind::AsyncGenerator => {
-                self.join_yield_contributions(yield_contributions, nullability)
+                self.join_yield_contributions(yield_contributions, nullability, settle)
             }
             FunctionBodyKind::Async | FunctionBodyKind::Plain => (None, false),
         };
@@ -4508,6 +4535,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         contributions: &[YieldContribution],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> (Option<SemanticNodeId>, bool) {
         if contributions.is_empty() {
             return (None, false);
@@ -4543,7 +4571,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // join's is (`getUnionType(yieldTypes, UnionReduction.Subtype)`).
         let mut undecided = false;
         if arms.len() >= 2 {
-            match self.reduce_arms_to_supertypes(&arms, nullability) {
+            match self.reduce_arms_to_supertypes(&arms, nullability, settle) {
                 ReunionReduction::Reduced(reduced) => arms = reduced,
                 ReunionReduction::Undecided => undecided = true,
             }
@@ -7865,6 +7893,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             degradation,
             ir.empty_completion,
             key.context.policy.nullability,
+            &|node| carrier_in_place(self, canonical, node),
         ) {
             Ok(joined) => {
                 // Attach the function-kind wrap to the BODY join — deferred
@@ -7894,6 +7923,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         &yield_contributions,
                         &binder_env,
                         key.context.policy.nullability,
+                        &|node| carrier_in_place(self, canonical, node),
                     )
                 } else {
                     result
@@ -8096,15 +8126,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///
     /// Each operand is judged through its [`ReductionArm::view`] — the
     /// operand before its nested widening nullable values widened, the
-    /// type the checker's reduction compares.
+    /// type the checker's reduction compares. Every identity carrier the
+    /// reduction looks through is read through `settle` ([`CarrierSettle`]).
     fn reduce_arms_to_supertypes(
         &self,
         arms: &[ReductionArm],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> ReunionReduction {
         let resolved: Vec<SemanticNodeId> = arms
             .iter()
-            .map(|arm| self.resolved_reduction_view(arm.view))
+            .map(|arm| self.resolved_reduction_view(arm.view, settle))
             .collect();
         // The checker flattens every operand into one member list before
         // it reduces, so an empty object type standing as ONE MEMBER of a
@@ -8157,7 +8189,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 continue;
             }
             let key = self
-                .unit_typed_properties(arms[index].view, nullability)
+                .unit_typed_properties(arms[index].view, nullability, settle)
                 .into_iter()
                 .find_map(|(key, unit)| unit.map(|unit| (key, unit)));
             let mut undecided = false;
@@ -8169,12 +8201,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     continue;
                 }
-                if self.reduction_pair_is_kind_disjoint(resolved[index], resolved[other]) {
+                if self.reduction_pair_is_kind_disjoint(resolved[index], resolved[other], settle) {
                     continue;
                 }
                 if let Some((key, unit)) = &key {
                     let peer_unit = self
-                        .unit_typed_properties(arms[other].view, nullability)
+                        .unit_typed_properties(arms[other].view, nullability, settle)
                         .into_iter()
                         .find(|(peer_key, _)| peer_key.element_access_collides(key))
                         .and_then(|(_, peer_unit)| peer_unit);
@@ -8229,11 +8261,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The union of `members` under SUBTYPE reduction, each union member
     /// taken arm by arm ([`Self::reduce_arms_to_supertypes`]); a pair the
     /// relation authority cannot decide keeps every arm and reports the
-    /// composite incomplete.
+    /// composite incomplete. Carriers are read through `settle`.
     pub(super) fn subtype_reduced_union(
         &self,
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> super::flow_products::FlowAlgebraComposite {
         let graph = self.graph();
         let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
@@ -8257,7 +8290,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if arms.len() >= 2 {
             let operands: Vec<ReductionArm> =
                 arms.iter().copied().map(ReductionArm::plain).collect();
-            match self.reduce_arms_to_supertypes(&operands, nullability) {
+            match self.reduce_arms_to_supertypes(&operands, nullability, settle) {
                 ReunionReduction::Reduced(reduced) => {
                     arms = reduced.into_iter().map(|arm| arm.node).collect();
                 }
@@ -8276,11 +8309,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// array of the elements' union under subtype reduction. With
     /// `strictNullChecks` off a widening `null` / `undefined` element
     /// vanishes beside any other element and reads `any` alone, the
-    /// array-literal rule.
+    /// array-literal rule. Carriers are read through `settle`.
     pub(super) fn finalize_evolving_array(
         &self,
         elements: &[super::flow_products::EvolvingElement],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> super::flow_products::FlowAlgebraComposite {
         let graph = self.graph();
         let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
@@ -8305,7 +8339,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 incomplete: false,
             }
         } else {
-            self.subtype_reduced_union(&nodes, nullability)
+            self.subtype_reduced_union(&nodes, nullability, settle)
         };
         super::flow_products::FlowAlgebraComposite {
             node: graph.intern_node(SemanticNodeData::Array {
@@ -8327,9 +8361,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
+        settle: CarrierSettle<'_>,
     ) -> bool {
         let graph = self.graph();
-        let source_object_like = !self.may_be_below_a_primitive(source);
+        let source_object_like = !self.may_be_below_a_primitive(source, settle);
         let target_data = graph.node_data(target);
         let primitive_like_target = matches!(
             target_data.as_deref(),
@@ -8369,14 +8404,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `Function`), a union with such a member (a union is below a
     /// primitive only when each of its members is), or an intersection none
     /// of whose members has a primitive part. Other declaration carriers
-    /// are read through what they name.
+    /// are read through what they name, each through `settle`
+    /// ([`CarrierSettle`]).
     ///
     /// Unions and intersections are read through, however they nest, from a
     /// work list; one that contains itself is left open.
-    pub fn may_be_below_a_primitive(&self, node: SemanticNodeId) -> bool {
+    pub fn may_be_below_a_primitive(
+        &self,
+        node: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> bool {
         use crate::graph_walk::Verdict;
         crate::graph_walk::classify(node, |node| {
-            let resolved = self.resolved_reduction_view(node);
+            let resolved = self.resolved_reduction_view(node, settle);
             let graph = self.graph();
             let data = graph.node_data(resolved);
             Verdict::Leaf(Some(match data.as_deref() {
@@ -8460,8 +8500,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// A reduction operand's view read through transparent aliases and
     /// declaration carriers to the structure it names (the node itself
-    /// when it names none, or when its carrier does not resolve).
-    pub(super) fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
+    /// when it names none, or when its carrier does not resolve), the
+    /// carrier read through `settle` ([`CarrierSettle`]).
+    pub(super) fn resolved_reduction_view(
+        &self,
+        view: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> SemanticNodeId {
         match self.graph().node_data(view).as_deref() {
             Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
                 return self.regularized_empty_object_program(view);
@@ -8473,7 +8518,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ) => {}
             _ => return view,
         }
-        match self.unwrap_identity_carrier_for_relation(view) {
+        match settle(view) {
             super::relation::IdentityCarrierUnwrap::Concrete(resolved) => {
                 self.regularized_empty_object_program(resolved)
             }
@@ -8606,11 +8651,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// (the literal arity when the tuple has no optional or rest element).
     /// An optional property is `T | undefined` under `strictNullChecks`,
     /// a unit type only when `T` is `undefined`. A declared type is read
-    /// through its resolved structure; any other type lists nothing.
+    /// through its resolved structure, its carrier read through `settle`;
+    /// any other type lists nothing.
     fn unit_typed_properties(
         &self,
         node: SemanticNodeId,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> Vec<(crate::semantic_query::PropertyKey, Option<SemanticNodeId>)> {
         let graph = self.graph();
         let node = match graph.node_data(node).as_deref() {
@@ -8618,7 +8665,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::Alias(_)
                 | SemanticNodeData::DeclRef { .. }
                 | SemanticNodeData::InstantiationRef { .. },
-            ) => match self.unwrap_identity_carrier_for_relation(node) {
+            ) => match settle(node) {
                 super::relation::IdentityCarrierUnwrap::Concrete(resolved) => resolved,
                 super::relation::IdentityCarrierUnwrap::Unresolvable => return Vec::new(),
             },
@@ -8844,6 +8891,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         empty_completion: verter_session_query::flow::slice::EmptyCompletion,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         let graph = self.graph();
         // `strictNullChecks` off: a nullable contribution adds nothing to
@@ -9104,7 +9152,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .map_or(ReductionArm::plain(*arm), |contribution| contribution.arm)
                 })
                 .collect();
-            match self.reduce_arms_to_supertypes(&reduction_arms, nullability) {
+            match self.reduce_arms_to_supertypes(&reduction_arms, nullability, settle) {
                 ReunionReduction::Reduced(reduced) => {
                     arms = reduced.iter().map(|arm| arm.node).collect();
                 }
@@ -11019,8 +11067,9 @@ mod call_stack;
 #[path = "flow_return_helper_run.rs"]
 mod helper_run;
 use helper_run::{
-    lowering_in_place, settle_now, signature_buckets_in_place, signature_list_in_place,
-    CarrierStep, FlowLowering, HelperWait, LowerStart, MemberPathFrame, PendingHelper,
+    carrier_in_place, lowering_in_place, reduction_view_in_place, settle_now,
+    signature_buckets_in_place, signature_list_in_place, CarrierStep, FlowLowering, HelperWait,
+    LowerStart, MemberPathFrame, PendingHelper,
 };
 #[path = "flow_return_nested.rs"]
 mod nested;
@@ -11078,7 +11127,8 @@ use super::call_resolve::*;
 use super::dispatch_txn::RelationStep;
 use super::evaluate::StructuralFactDemandOutcome;
 use super::relation::{
-    ComparabilityVerdict, IdentityCarrierRead, IdentityCarrierStep, IdentityCarrierUnwrap,
+    CarrierSettle, ComparabilityVerdict, IdentityCarrierRead, IdentityCarrierStep,
+    IdentityCarrierUnwrap,
 };
 use super::signature_utility::AuthoredSignatures;
 use crate::semantic_query::{
@@ -11331,15 +11381,23 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
     fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool;
     fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId>;
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId;
+    /// The checker's `isLiteralOfContextualType`
+    /// ([`ProjectSemanticDispatch::literal_of_contextual_type`]), each
+    /// carrier read through `settle`.
     fn literal_of_contextual_type(
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
+        settle: CarrierSettle<'_>,
     ) -> bool;
+    /// The union of `members` under subtype reduction
+    /// ([`ProjectSemanticDispatch::subtype_reduced_union`]), each carrier
+    /// read through `settle`.
     fn subtype_reduced_union(
         &self,
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> super::flow_products::FlowAlgebraComposite;
     fn attach_function_kind_wrap(
         &self,
@@ -11348,6 +11406,7 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> FlowReturnResult;
     fn attach_inferred_predicate(
         &self,
@@ -11388,12 +11447,16 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         &self,
         signature: SemanticNodeId,
     ) -> Option<verter_type_expr::MemberVisibility>;
+    /// The intersection of `factors` distributed
+    /// ([`ProjectSemanticDispatch::distribute_intersection`]), each carrier
+    /// read through `settle`.
     fn distribute_intersection(
         &self,
         factors: &[Vec<SemanticNodeId>],
         origin: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
+        settle: CarrierSettle<'_>,
     ) -> Option<DistributedIntersection>;
     fn erase_nullable_members(
         &self,
@@ -11417,10 +11480,14 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         &self,
         key: SemanticQueryKey,
     ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>>;
+    /// The final type of an evolving array
+    /// ([`ProjectSemanticDispatch::finalize_evolving_array`]), each carrier
+    /// read through `settle`.
     fn finalize_evolving_array(
         &self,
         elements: &[super::flow_products::EvolvingElement],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> super::flow_products::FlowAlgebraComposite;
     fn flow_binder_env(
         &self,
@@ -11484,6 +11551,7 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         empty_completion: verter_session_query::flow::slice::EmptyCompletion,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure>;
     fn lower_lib_global(
         &self,
@@ -11495,7 +11563,15 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
     ) -> Option<SemanticNodeId>;
     fn materialize_flow_return_wrap(&self, result: FlowReturnResult) -> FlowReturnResult;
     fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool;
-    fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict;
+    /// Whether `a` and `b` can share an inhabitant
+    /// ([`ProjectSemanticDispatch::nodes_comparable_settled`]), a disjoint
+    /// pair's collapse class reading each carrier through `settle`.
+    fn nodes_comparable(
+        &self,
+        a: SemanticNodeId,
+        b: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> ComparabilityVerdict;
     fn normalize_node_for_structural_fact_demand(
         &self,
         node: SemanticNodeId,
@@ -11557,34 +11633,49 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
     ) -> super::build::ExpressionSplice;
     fn opaque(&self, err: QueryError) -> SemanticNodeId;
     fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId>;
-    fn contextual_object_this_type(
+    /// The instantiation a contextual type's view reads, computed without
+    /// reading it ([`ProjectSemanticDispatch::contextual_carrier_key`]).
+    fn contextual_carrier_key(&self, node: SemanticNodeId) -> Option<SemanticQueryKey>;
+    fn names_contextual_this_marker(
         &self,
-        node: SemanticNodeId,
+        demand_canonical: &str,
         canonical: &str,
-    ) -> Option<SemanticNodeId>;
-    fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId;
-    fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
-    fn contextual_undeclared_names(
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool;
+    fn undeclared_name_occurrences(
         &self,
         node: SemanticNodeId,
         canonical: &str,
     ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence>;
+    /// Advance a suspended call's collector by one checked property
+    /// ([`ProjectSemanticDispatch::contextual_object_member`]), its deferred
+    /// target read through `view`.
     fn contextual_object_member(
         &self,
         state: &mut super::call_resolve::ContextualCallState,
         name: &str,
         value: Option<SemanticNodeId>,
+        view: &dyn Fn(SemanticNodeId) -> SemanticNodeId,
     ) -> Result<Option<SemanticNodeId>, ResolveCallFailure>;
+    /// The order a contextual object's properties type in
+    /// ([`ProjectSemanticDispatch::contextual_object_order`]), each
+    /// declaration a property's type reaches read through `view`.
     fn contextual_object_order(
         &self,
         state: &super::call_resolve::ContextualCallState,
         names: &[Option<Arc<str>>],
         canonical: &str,
+        view: &dyn Fn(SemanticNodeId) -> SemanticNodeId,
     ) -> Vec<usize>;
+    /// `arms` after the checker's subtype reduction
+    /// ([`ProjectSemanticDispatch::reduce_arms_to_supertypes`]), each
+    /// carrier read through `settle`.
     fn reduce_arms_to_supertypes(
         &self,
         arms: &[ReductionArm],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> ReunionReduction;
     fn reduce_template_literal_nodes(
         &self,
@@ -11625,7 +11716,6 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<crate::semantic_query::SurfaceView>;
-    fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId;
     /// The contextual tuple `node`, whose elements are `elements`
     /// ([`ProjectSemanticDispatch::contextual_tuple`]).
     fn contextual_tuple(
@@ -11657,17 +11747,27 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
     ) -> SemanticNodeId;
     fn type_parameter_apparent_receiver(&self, receiver: SemanticNodeId) -> SemanticNodeId;
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>>;
+    /// The keys refuting assignability to `target`
+    /// ([`ProjectSemanticDispatch::assignability_refuting_keys`]), its
+    /// carriers read through `settle`.
     fn assignability_refuting_keys(
         &self,
         target: SemanticNodeId,
         canonical: &str,
+        settle: CarrierSettle<'_>,
     ) -> Option<Vec<Arc<str>>>;
-    fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>>;
+    /// A plain closed object's own keys
+    /// ([`ProjectSemanticDispatch::closed_object_own_string_keys`]), its
+    /// carriers read through `settle`.
+    fn closed_object_own_string_keys(
+        &self,
+        source: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> Option<Vec<Arc<str>>>;
     fn unique_symbol_identity_for_typeof_node(
         &self,
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart>;
-    fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap;
     fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId;
     fn value_read_widens(
         &self,
@@ -12287,17 +12387,25 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
+        settle: CarrierSettle<'_>,
     ) -> bool {
         body_read_site!("literal_of_contextual_type");
-        ProjectSemanticDispatch::literal_of_contextual_type(self, candidate, contextual, &[])
+        ProjectSemanticDispatch::literal_of_contextual_type(
+            self,
+            candidate,
+            contextual,
+            &[],
+            settle,
+        )
     }
     fn subtype_reduced_union(
         &self,
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> super::flow_products::FlowAlgebraComposite {
         body_read_site!("subtype_reduced_union");
-        ProjectSemanticDispatch::subtype_reduced_union(self, members, nullability)
+        ProjectSemanticDispatch::subtype_reduced_union(self, members, nullability, settle)
     }
     fn attach_function_kind_wrap(
         &self,
@@ -12306,6 +12414,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> FlowReturnResult {
         body_read_site!("attach_function_kind_wrap");
         ProjectSemanticDispatch::attach_function_kind_wrap(
@@ -12315,6 +12424,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             yield_contributions,
             binder_env,
             nullability,
+            settle,
         )
     }
     fn attach_inferred_predicate(
@@ -12396,6 +12506,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         origin: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
+        settle: CarrierSettle<'_>,
     ) -> Option<DistributedIntersection> {
         body_read_site!("distribute_intersection");
         ProjectSemanticDispatch::distribute_intersection(
@@ -12404,6 +12515,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             origin,
             nullability,
             ordered,
+            settle,
         )
     }
     fn erase_nullable_members(
@@ -12453,9 +12565,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         elements: &[super::flow_products::EvolvingElement],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> super::flow_products::FlowAlgebraComposite {
         body_read_site!("finalize_evolving_array");
-        ProjectSemanticDispatch::finalize_evolving_array(self, elements, nullability)
+        ProjectSemanticDispatch::finalize_evolving_array(self, elements, nullability, settle)
     }
     fn flow_binder_env(
         &self,
@@ -12566,6 +12679,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         empty_completion: verter_session_query::flow::slice::EmptyCompletion,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         body_read_site!("join_flow_return_contributors");
         ProjectSemanticDispatch::join_flow_return_contributors(
@@ -12577,6 +12691,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             degradation,
             empty_completion,
             nullability,
+            settle,
         )
     }
     fn lower_lib_global(
@@ -12605,9 +12720,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         body_read_site!("mentions_node");
         ProjectSemanticDispatch::mentions_node(self, node, target)
     }
-    fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict {
+    fn nodes_comparable(
+        &self,
+        a: SemanticNodeId,
+        b: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> ComparabilityVerdict {
         body_read_site!("nodes_comparable");
-        ProjectSemanticDispatch::nodes_comparable(self, a, b)
+        ProjectSemanticDispatch::nodes_comparable_settled(self, a, b, settle)
     }
     fn normalize_node_for_structural_fact_demand(
         &self,
@@ -12695,55 +12815,62 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         body_read_site!("receiver_this_types");
         ProjectSemanticDispatch::receiver_this_types(self, node)
     }
-    fn contextual_object_this_type(
+    fn contextual_carrier_key(&self, node: SemanticNodeId) -> Option<SemanticQueryKey> {
+        body_read_site!("contextual_carrier_key");
+        ProjectSemanticDispatch::contextual_carrier_key(self, node)
+    }
+    fn names_contextual_this_marker(
         &self,
-        node: SemanticNodeId,
+        demand_canonical: &str,
         canonical: &str,
-    ) -> Option<SemanticNodeId> {
-        body_read_site!("contextual_object_this_type");
-        ProjectSemanticDispatch::contextual_object_this_type(self, node, canonical)
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        body_read_site!("names_contextual_this_marker");
+        ProjectSemanticDispatch::names_contextual_this_marker(
+            self,
+            demand_canonical,
+            canonical,
+            owner,
+            name,
+        )
     }
-    fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId {
-        body_read_site!("contextual_carrier_view");
-        ProjectSemanticDispatch::contextual_carrier_view(self, node)
-    }
-    fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        body_read_site!("contextual_error_type");
-        ProjectSemanticDispatch::contextual_error_type(self, node)
-    }
-    fn contextual_undeclared_names(
+    fn undeclared_name_occurrences(
         &self,
         node: SemanticNodeId,
         canonical: &str,
     ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
-        body_read_site!("contextual_undeclared_names");
-        ProjectSemanticDispatch::contextual_undeclared_names(self, node, canonical)
+        body_read_site!("undeclared_name_occurrences");
+        ProjectSemanticDispatch::undeclared_name_occurrences(self, node, canonical)
     }
     fn contextual_object_member(
         &self,
         state: &mut super::call_resolve::ContextualCallState,
         name: &str,
         value: Option<SemanticNodeId>,
+        view: &dyn Fn(SemanticNodeId) -> SemanticNodeId,
     ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
         body_read_site!("contextual_object_member");
-        ProjectSemanticDispatch::contextual_object_member(self, state, name, value)
+        ProjectSemanticDispatch::contextual_object_member(self, state, name, value, view)
     }
     fn contextual_object_order(
         &self,
         state: &super::call_resolve::ContextualCallState,
         names: &[Option<Arc<str>>],
         canonical: &str,
+        view: &dyn Fn(SemanticNodeId) -> SemanticNodeId,
     ) -> Vec<usize> {
         body_read_site!("contextual_object_order");
-        ProjectSemanticDispatch::contextual_object_order(self, state, names, canonical)
+        ProjectSemanticDispatch::contextual_object_order(self, state, names, canonical, view)
     }
     fn reduce_arms_to_supertypes(
         &self,
         arms: &[ReductionArm],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> ReunionReduction {
         body_read_site!("reduce_arms_to_supertypes");
-        ProjectSemanticDispatch::reduce_arms_to_supertypes(self, arms, nullability)
+        ProjectSemanticDispatch::reduce_arms_to_supertypes(self, arms, nullability, settle)
     }
     fn reduce_template_literal_nodes(
         &self,
@@ -12802,10 +12929,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         body_read_site!("resolve_typeinfo_surface_view");
         ProjectSemanticDispatch::resolve_typeinfo_surface_view(self, base, context)
     }
-    fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
-        body_read_site!("resolved_reduction_view");
-        ProjectSemanticDispatch::resolved_reduction_view(self, view)
-    }
     fn contextual_tuple(
         &self,
         node: SemanticNodeId,
@@ -12858,13 +12981,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         target: SemanticNodeId,
         canonical: &str,
+        settle: CarrierSettle<'_>,
     ) -> Option<Vec<Arc<str>>> {
         body_read_site!("assignability_refuting_keys");
-        ProjectSemanticDispatch::assignability_refuting_keys(self, target, canonical)
+        ProjectSemanticDispatch::assignability_refuting_keys(self, target, canonical, settle)
     }
-    fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>> {
+    fn closed_object_own_string_keys(
+        &self,
+        source: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> Option<Vec<Arc<str>>> {
         body_read_site!("closed_object_own_string_keys");
-        ProjectSemanticDispatch::closed_object_own_string_keys(self, source)
+        ProjectSemanticDispatch::closed_object_own_string_keys(self, source, settle)
     }
     fn unique_symbol_identity_for_typeof_node(
         &self,
@@ -12872,10 +13000,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
         body_read_site!("unique_symbol_identity_for_typeof_node");
         ProjectSemanticDispatch::unique_symbol_identity_for_typeof_node(self, node)
-    }
-    fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
-        body_read_site!("unwrap_identity_carrier_for_relation");
-        ProjectSemanticDispatch::unwrap_identity_carrier_for_relation(self, id)
     }
     fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
         body_read_site!("regularized_empty_object_program");
@@ -13392,16 +13516,19 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
+        settle: CarrierSettle<'_>,
     ) -> bool {
         self.driver
-            .literal_of_contextual_type(candidate, contextual)
+            .literal_of_contextual_type(candidate, contextual, settle)
     }
     fn subtype_reduced_union(
         &self,
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> super::flow_products::FlowAlgebraComposite {
-        self.driver.subtype_reduced_union(members, nullability)
+        self.driver
+            .subtype_reduced_union(members, nullability, settle)
     }
     fn attach_function_kind_wrap(
         &self,
@@ -13410,6 +13537,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> FlowReturnResult {
         self.driver.attach_function_kind_wrap(
             result,
@@ -13417,6 +13545,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
             yield_contributions,
             binder_env,
             nullability,
+            settle,
         )
     }
     fn attach_inferred_predicate(
@@ -13488,9 +13617,10 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         origin: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
+        settle: CarrierSettle<'_>,
     ) -> Option<DistributedIntersection> {
         self.driver
-            .distribute_intersection(factors, origin, nullability, ordered)
+            .distribute_intersection(factors, origin, nullability, ordered, settle)
     }
     fn erase_nullable_members(
         &self,
@@ -13533,8 +13663,10 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         &self,
         elements: &[super::flow_products::EvolvingElement],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> super::flow_products::FlowAlgebraComposite {
-        self.driver.finalize_evolving_array(elements, nullability)
+        self.driver
+            .finalize_evolving_array(elements, nullability, settle)
     }
     fn flow_binder_env(
         &self,
@@ -13625,6 +13757,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         empty_completion: verter_session_query::flow::slice::EmptyCompletion,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         self.driver.join_flow_return_contributors(
             contributors,
@@ -13634,6 +13767,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
             degradation,
             empty_completion,
             nullability,
+            settle,
         )
     }
     fn lower_lib_global(
@@ -13653,8 +13787,13 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool {
         self.driver.mentions_node(node, target)
     }
-    fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict {
-        self.driver.nodes_comparable(a, b)
+    fn nodes_comparable(
+        &self,
+        a: SemanticNodeId,
+        b: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> ComparabilityVerdict {
+        self.driver.nodes_comparable(a, b, settle)
     }
     fn normalize_node_for_structural_fact_demand(
         &self,
@@ -13729,48 +13868,54 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
         self.driver.receiver_this_types(node)
     }
-    fn contextual_object_this_type(
+    fn contextual_carrier_key(&self, node: SemanticNodeId) -> Option<SemanticQueryKey> {
+        self.driver.contextual_carrier_key(node)
+    }
+    fn names_contextual_this_marker(
         &self,
-        node: SemanticNodeId,
+        demand_canonical: &str,
         canonical: &str,
-    ) -> Option<SemanticNodeId> {
-        self.driver.contextual_object_this_type(node, canonical)
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        self.driver
+            .names_contextual_this_marker(demand_canonical, canonical, owner, name)
     }
-    fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId {
-        self.driver.contextual_carrier_view(node)
-    }
-    fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        self.driver.contextual_error_type(node)
-    }
-    fn contextual_undeclared_names(
+    fn undeclared_name_occurrences(
         &self,
         node: SemanticNodeId,
         canonical: &str,
     ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
-        self.driver.contextual_undeclared_names(node, canonical)
+        self.driver.undeclared_name_occurrences(node, canonical)
     }
     fn contextual_object_member(
         &self,
         state: &mut super::call_resolve::ContextualCallState,
         name: &str,
         value: Option<SemanticNodeId>,
+        view: &dyn Fn(SemanticNodeId) -> SemanticNodeId,
     ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
-        self.driver.contextual_object_member(state, name, value)
+        self.driver
+            .contextual_object_member(state, name, value, view)
     }
     fn contextual_object_order(
         &self,
         state: &super::call_resolve::ContextualCallState,
         names: &[Option<Arc<str>>],
         canonical: &str,
+        view: &dyn Fn(SemanticNodeId) -> SemanticNodeId,
     ) -> Vec<usize> {
-        self.driver.contextual_object_order(state, names, canonical)
+        self.driver
+            .contextual_object_order(state, names, canonical, view)
     }
     fn reduce_arms_to_supertypes(
         &self,
         arms: &[ReductionArm],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        settle: CarrierSettle<'_>,
     ) -> ReunionReduction {
-        self.driver.reduce_arms_to_supertypes(arms, nullability)
+        self.driver
+            .reduce_arms_to_supertypes(arms, nullability, settle)
     }
     fn reduce_template_literal_nodes(
         &self,
@@ -13824,9 +13969,6 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> Option<crate::semantic_query::SurfaceView> {
         self.driver.resolve_typeinfo_surface_view(base, context)
     }
-    fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
-        self.driver.resolved_reduction_view(view)
-    }
     fn contextual_tuple(
         &self,
         node: SemanticNodeId,
@@ -13873,20 +14015,23 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         &self,
         target: SemanticNodeId,
         canonical: &str,
+        settle: CarrierSettle<'_>,
     ) -> Option<Vec<Arc<str>>> {
-        self.driver.assignability_refuting_keys(target, canonical)
+        self.driver
+            .assignability_refuting_keys(target, canonical, settle)
     }
-    fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>> {
-        self.driver.closed_object_own_string_keys(source)
+    fn closed_object_own_string_keys(
+        &self,
+        source: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> Option<Vec<Arc<str>>> {
+        self.driver.closed_object_own_string_keys(source, settle)
     }
     fn unique_symbol_identity_for_typeof_node(
         &self,
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
         self.driver.unique_symbol_identity_for_typeof_node(node)
-    }
-    fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
-        self.driver.unwrap_identity_carrier_for_relation(id)
     }
     fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
         self.driver.regularized_empty_object_program(node)
@@ -16234,7 +16379,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 .collect();
             frame.entry_order =
                 self.dispatch
-                    .contextual_object_order(state, &names, self.st.canonical);
+                    .contextual_object_order(state, &names, self.st.canonical, &|node| {
+                        self.contextual_view(node)
+                    });
             frame.inference = Some(state);
             self.drive_object_literal(&mut frame)
         } else {
@@ -16257,11 +16404,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let enclosing = self.st.object_first_pass_context;
         self.st.object_first_pass_context = ObjectFirstPassContext {
             ty: contextual,
-            marked: contextual.is_some_and(|ty| {
-                self.dispatch
-                    .contextual_object_this_type(ty, self.st.canonical)
-                    .is_some()
-            }),
+            marked: contextual.is_some_and(|ty| self.contextual_this_type(ty).is_some()),
         };
         let mut frame = self.object_eval_frame(entries, offset, false, contextual);
         frame.skips_context_sensitive = true;
@@ -16280,16 +16423,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             else {
                 return None;
             };
-            self.contextual_property_type(self.dispatch.contextual_carrier_view(context), name)
+            self.contextual_property_type(self.contextual_view(context), name)
         });
         ObjectFirstPassContext {
             ty,
             marked: frame.first_pass_context.marked
-                || ty.is_some_and(|ty| {
-                    self.dispatch
-                        .contextual_object_this_type(ty, self.st.canonical)
-                        .is_some()
-                }),
+                || ty.is_some_and(|ty| self.contextual_this_type(ty).is_some()),
         }
     }
 
@@ -16326,13 +16465,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let enclosing_contextual_receiver = self.st.contextual_object_receiver.clone();
         let inherits_receiver = std::mem::take(&mut self.st.inherits_contextual_object_receiver);
         self.st.contextual_object_this = contextual
-            .and_then(|context| {
-                self.dispatch
-                    .contextual_object_this_type(context, self.st.canonical)
-            })
+            .and_then(|context| self.contextual_this_type(context))
             .or(enclosing_contextual_this.filter(|_| inherits_receiver));
-        let contextual_error =
-            contextual.and_then(|context| self.dispatch.contextual_error_type(context));
+        let contextual_error = contextual.and_then(|context| self.contextual_error_type(context));
         if contextual_error.is_some() || self.st.contextual_object_this.is_some() {
             self.forget_own_literal_reports(entries);
         }
@@ -16347,21 +16482,19 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     .or(self.st.contextual_object_this)
                     .or_else(|| {
                         contextual.and_then(|context| {
-                            self.dispatch
-                                .contextual_object_this_type(context, self.st.canonical)
-                                .or_else(|| {
-                                    let context = self.dispatch.resolved_reduction_view(context);
-                                    (!matches!(
-                                        self.dispatch.graph().node_data(context).as_deref(),
-                                        Some(
-                                            SemanticNodeData::TypeParam { .. }
-                                                | SemanticNodeData::Primitive(
-                                                    PrimitiveKind::Any | PrimitiveKind::Unknown
-                                                )
-                                        )
-                                    ))
-                                    .then_some(context)
-                                })
+                            self.contextual_this_type(context).or_else(|| {
+                                let context = self.reduction_view(context);
+                                (!matches!(
+                                    self.dispatch.graph().node_data(context).as_deref(),
+                                    Some(
+                                        SemanticNodeData::TypeParam { .. }
+                                            | SemanticNodeData::Primitive(
+                                                PrimitiveKind::Any | PrimitiveKind::Unknown
+                                            )
+                                    )
+                                ))
+                                .then_some(context)
+                            })
                         })
                     })
             })
@@ -16389,7 +16522,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                             pending.extend(members.iter().copied())
                         }
                         _ => {
-                            let resolved = self.dispatch.contextual_carrier_view(node);
+                            let resolved = self.contextual_view(node);
                             if resolved != node {
                                 pending.push(resolved);
                             }
@@ -16874,7 +17007,11 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             };
             let inferred_context = match (&member.key, frame.inference.as_deref_mut()) {
                 (verter_session_query::flow::slice::SliceObjectKey::Static(name), Some(state)) => {
-                    match self.dispatch.contextual_object_member(state, name, None) {
+                    match self
+                        .dispatch
+                        .contextual_object_member(state, name, None, &|node| {
+                            self.reduction_view(node)
+                        }) {
                         Ok(context) => context,
                         Err(_) => return self.object_eval_abandon(frame),
                     }
@@ -17182,7 +17319,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         ) {
             if self
                 .dispatch
-                .contextual_object_member(state, name, Some(surface_member.value))
+                .contextual_object_member(state, name, Some(surface_member.value), &|node| {
+                    self.reduction_view(node)
+                })
                 .is_err()
             {
                 self.record_degradation(FlowReturnDegradation::UnmodeledPosition);
@@ -17222,7 +17361,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &mut self,
         operand: SemanticNodeId,
     ) -> Option<Vec<crate::semantic_query::SurfaceMember>> {
-        let resolved = match self.dispatch.unwrap_identity_carrier_for_relation(operand) {
+        let resolved = match self.settle_carrier(operand) {
             super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
             super::relation::IdentityCarrierUnwrap::Unresolvable => operand,
         };
@@ -17652,14 +17791,15 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     }
 
     /// The checker's `isLiteralOfContextualType`, decided by the one
-    /// literal-context classifier the call executor also reads.
+    /// literal-context classifier the call executor also reads, each
+    /// carrier it looks through requested on this evaluation's body.
     fn literal_of_contextual_type(
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
     ) -> bool {
         self.dispatch
-            .literal_of_contextual_type(candidate, contextual)
+            .literal_of_contextual_type(candidate, contextual, &|node| self.settle_carrier(node))
     }
 
     /// The checker's contextual type of the property `name` of an object
@@ -17677,15 +17817,13 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         name: &str,
     ) -> Option<SemanticNodeId> {
         let graph = self.dispatch.graph();
-        let contextual = self.dispatch.resolved_reduction_view(contextual);
+        let contextual = self.reduction_view(contextual);
         let data = graph.node_data(contextual);
         if let Some(SemanticNodeData::Intersection(members)) = data.as_deref() {
             let members = members.to_vec();
             if members.iter().any(|member| {
                 matches!(
-                    graph
-                        .node_data(self.dispatch.resolved_reduction_view(*member))
-                        .as_deref(),
+                    graph.node_data(self.reduction_view(*member)).as_deref(),
                     Some(SemanticNodeData::TypeParam { .. })
                 )
             }) {
@@ -17822,7 +17960,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         shape: super::call_resolve::ArrayLiteralShape,
     ) -> Option<SemanticNodeId> {
         let graph = self.dispatch.graph();
-        let contextual = self.dispatch.resolved_reduction_view(contextual);
+        let contextual = self.reduction_view(contextual);
         let data = graph.node_data(contextual);
         match data.as_deref()? {
             SemanticNodeData::Union(members) => {
@@ -17886,7 +18024,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
     ) -> bool {
         let graph = self.dispatch.graph();
-        let contextual = self.dispatch.resolved_reduction_view(contextual);
+        let contextual = self.reduction_view(contextual);
         let data = graph.node_data(contextual);
         match data.as_deref() {
             Some(SemanticNodeData::Tuple { .. }) => true,
@@ -17968,10 +18106,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             }
         }
         if unique.len() >= 2 {
-            match self
-                .dispatch
-                .reduce_arms_to_supertypes(&unique, self.st.nullability)
-            {
+            let reduction =
+                self.dispatch
+                    .reduce_arms_to_supertypes(&unique, self.st.nullability, &|node| {
+                        self.settle_carrier(node)
+                    });
+            match reduction {
                 ReunionReduction::Reduced(reduced) => unique = reduced,
                 ReunionReduction::Undecided => {
                     self.record_degradation(FlowReturnDegradation::FlowGap(
@@ -18935,9 +19075,11 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ) -> FlowLayerState {
         let _ = observation;
         let first = incoming.first().expect("a continuation has a predecessor");
+        let settle = |node: SemanticNodeId| self.settle_carrier(node);
         let frame_algebra = super::flow_products::DispatchFlowAlgebra {
             dispatch: self.dispatch,
             nullability: self.st.nullability,
+            settle: &settle,
         };
         if incoming.len() == 1 {
             let mut frame = self.tables.execution(self.st.frame_execution).borrow_mut();
@@ -19260,9 +19402,11 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &mut self,
         elements: Vec<super::flow_products::EvolvingElement>,
     ) -> ReachingTypeProduct {
-        let finalized = self
-            .dispatch
-            .finalize_evolving_array(&elements, self.st.nullability);
+        let finalized =
+            self.dispatch
+                .finalize_evolving_array(&elements, self.st.nullability, &|node| {
+                    self.settle_carrier(node)
+                });
         if finalized.incomplete {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 verter_session_query::flow::policy::FlowGap::NominalRelation,
@@ -19955,10 +20099,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         if arms.len() < 2 {
             return parts;
         }
-        match self
-            .dispatch
-            .reduce_arms_to_supertypes(&arms, self.st.nullability)
-        {
+        let reduction =
+            self.dispatch
+                .reduce_arms_to_supertypes(&arms, self.st.nullability, &|node| {
+                    self.settle_carrier(node)
+                });
+        match reduction {
             ReunionReduction::Reduced(kept) => parts
                 .into_iter()
                 .filter(|part| kept.iter().any(|arm| arm.node == part.arm.node))
@@ -22048,15 +22194,31 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         }
     }
 
-    /// The shared identity-carrier unwrap of `node`
-    /// ([`ProjectSemanticDispatch::unwrap_identity_carrier_for_relation`]),
-    /// read once per evaluation: every guard of a chain over one subject
-    /// asks it again for each arm it passes over.
+    /// The shared identity-carrier unwrap of `node`, requested
+    /// ([`Self::settle_carrier`]) and read once per evaluation: every guard
+    /// of a chain over one subject asks it again for each arm it passes
+    /// over.
     fn carrier_unwrap(&self, node: SemanticNodeId) -> super::relation::IdentityCarrierUnwrap {
         let dispatch = self.dispatch;
+        let canonical = self.st.canonical;
         memo_read(&self.tables.carrier_unwraps, node, || {
-            dispatch.outside_inline_costs(|| dispatch.unwrap_identity_carrier_for_relation(node))
+            dispatch.outside_inline_costs(|| carrier_in_place(dispatch, canonical, node))
         })
+    }
+
+    /// The identity-carrier unwrap of `node` the relation engine reads
+    /// ([`ProjectSemanticDispatch::unwrap_identity_carrier_for_relation`]),
+    /// requested on this evaluation's body: each read the walk stands at
+    /// is answered at once ([`carrier_in_place`]).
+    fn settle_carrier(&self, node: SemanticNodeId) -> super::relation::IdentityCarrierUnwrap {
+        carrier_in_place(self.dispatch, self.st.canonical, node)
+    }
+
+    /// A reduction operand's view through its identity carrier
+    /// ([`ProjectSemanticDispatch::resolved_reduction_view`]), requested on
+    /// this evaluation's body ([`reduction_view_in_place`]).
+    fn reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
+        reduction_view_in_place(self.dispatch, self.st.canonical, view)
     }
 
     /// The CURRENT node of a narrowable reference: the binding's reaching
@@ -22323,7 +22485,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 continue;
             }
             seen.push(node);
-            let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+            let concrete = match self.settle_carrier(node) {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
                 super::relation::IdentityCarrierUnwrap::Unresolvable => {
                     all_required = false;
@@ -22419,7 +22581,8 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         a: SemanticNodeId,
         b: SemanticNodeId,
     ) -> super::relation::ComparabilityVerdict {
-        self.dispatch.nodes_comparable(a, b)
+        self.dispatch
+            .nodes_comparable(a, b, &|node| self.settle_carrier(node))
     }
 
     /// Apply a guard's facts for one branch (`positive` = the branch the
@@ -23304,7 +23467,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             // classifies by the structure it denotes, settled through the
             // same identity-carrier unwrap the truthiness and relation
             // readers use; one it cannot settle stays unclassified.
-            _ => match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+            _ => match self.settle_carrier(arm) {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete)
                     if concrete != arm
                         && !matches!(
@@ -23848,7 +24011,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         value: SemanticNodeId,
     ) -> Option<verter_session_query::flow::slice::SliceGuardLiteral> {
         use verter_session_query::flow::slice::SliceGuardLiteral;
-        let settled = match self.dispatch.unwrap_identity_carrier_for_relation(value) {
+        let settled = match self.settle_carrier(value) {
             super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
             super::relation::IdentityCarrierUnwrap::Unresolvable => return None,
         };
@@ -23903,7 +24066,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         }
         let mut values = Vec::new();
         for arm in self.enumerated_union_arms_or_self(value) {
-            let settled = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+            let settled = match self.settle_carrier(arm) {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
                 super::relation::IdentityCarrierUnwrap::Unresolvable => return None,
             };
@@ -24138,7 +24301,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     fn comparable_either_way(&mut self, a: SemanticNodeId, b: SemanticNodeId) -> Option<bool> {
         use super::relation::ComparabilityVerdict;
         let scalar = |this: &Self, node: SemanticNodeId| {
-            let settled = match this.dispatch.unwrap_identity_carrier_for_relation(node) {
+            let settled = match this.settle_carrier(node) {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
                 super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
             };
@@ -24163,7 +24326,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let b_arms = self.enumerated_union_arms_or_self(b);
         for a_arm in self.enumerated_union_arms_or_self(a) {
             for &b_arm in &b_arms {
-                let verdict = match self.dispatch.nodes_comparable(a_arm, b_arm) {
+                let comparable = self
+                    .dispatch
+                    .nodes_comparable(a_arm, b_arm, &|node| self.settle_carrier(node));
+                let verdict = match comparable {
                     ComparabilityVerdict::Disjoint(_) => Some(false),
                     ComparabilityVerdict::Undecided => None,
                     ComparabilityVerdict::Overlaps => {
@@ -24239,7 +24405,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             self.enumerated_union_arms_or_self(before)
                 .into_iter()
                 .any(|arm| {
-                    let arm = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+                    let arm = match self.settle_carrier(arm) {
                         super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
                         super::relation::IdentityCarrierUnwrap::Unresolvable => arm,
                     };
@@ -24754,7 +24920,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         target: SemanticNodeId,
     ) -> Option<bool> {
         let surface_of = |node: SemanticNodeId| -> Option<crate::semantic_query::SurfaceView> {
-            let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+            let concrete = match self.settle_carrier(node) {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
                 super::relation::IdentityCarrierUnwrap::Unresolvable => return None,
             };
@@ -24930,7 +25096,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                 Some(EqualityValueClass::Other)
             }
-            _ => match self.dispatch.unwrap_identity_carrier_for_relation(value) {
+            _ => match self.settle_carrier(value) {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete) if concrete != value => {
                     match self.equality_value_class(concrete)? {
                         // A named memberless declaration is not ANONYMOUS.
@@ -25089,7 +25255,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     fn is_literal_type(&self, node: SemanticNodeId) -> bool {
         let graph = self.dispatch.graph();
         let unit = |node: SemanticNodeId| {
-            let settled = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+            let settled = match self.settle_carrier(node) {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
                 super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
             };
@@ -25104,7 +25270,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 )
             )
         };
-        let settled = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+        let settled = match self.settle_carrier(node) {
             super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
             super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
         };
@@ -25605,7 +25771,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let arms: Vec<SemanticNodeId> = arms
             .into_iter()
             .flat_map(|arm| {
-                let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+                let concrete = match self.settle_carrier(arm) {
                     super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
                     super::relation::IdentityCarrierUnwrap::Unresolvable => arm,
                 };
@@ -25704,7 +25870,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let leaves: Vec<SemanticNodeId> = leaves
             .into_iter()
             .flat_map(|leaf| {
-                let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(leaf) {
+                let concrete = match self.settle_carrier(leaf) {
                     super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
                     super::relation::IdentityCarrierUnwrap::Unresolvable => leaf,
                 };
@@ -26661,12 +26827,14 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // (`(A | B) & C` is `(A & C) | (B & C)`), each arm reduced on its
         // own.
         if arms.len() > 1 {
-            if let Some(distributed) = self.dispatch.distribute_intersection(
+            let distributed = self.dispatch.distribute_intersection(
                 &[arms.clone(), vec![candidate]],
                 &[current, candidate],
                 self.st.nullability,
                 false,
-            ) {
+                &|node| self.settle_carrier(node),
+            );
+            if let Some(distributed) = distributed {
                 if distributed.undecided {
                     self.record_degradation(FlowReturnDegradation::FlowGap(
                         verter_session_query::flow::policy::FlowGap::NominalRelation,
