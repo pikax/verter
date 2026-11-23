@@ -80,11 +80,11 @@ last. A read-free in-place decision allocates no operation stack. Standalone
 genericness drives the same typed `GenericWalk` step directly, so a boolean
 query carries no full conditional decision or output. A decision starts that
 walk with native locals and retains its owned walk only after the first read;
-a read-free generic check creates no suspension box. The native
-driver answers a syntax branch inside the same operation and memoizes the
-callback result once per branch; no callback is retained by the decision. An
-external holder receives `Branch(bool)` and supplies the already-lowered node
-from its own branch memo. Abandonment releases deferred-evaluation cost scopes
+a read-free generic check creates no suspension box. A syntax branch is
+never lowered by the decision: its holder receives `Branch(bool)` and
+supplies the node from its own branch memo, and no callback enters or is
+retained by the decision. Only a materialized decision is driven in place,
+and it applies its own branches. Abandonment releases deferred-evaluation cost scopes
 and carrier walks from the inside out, discards held probes, and preserves
 non-discardable execution aborts.
 
@@ -150,9 +150,7 @@ The remaining synchronous boundary is one explicit `answer_in_place` call,
 keyed by `InPlaceRead::IntersectionWidth`: intersection width. Its owner does
 not yet expose an owned helper read. The relation's own compute and
 template construction during substitution remain their existing shared-owner
-boundaries. `build_conditional_from_lowering` is the in-place driver over the
-same operations; the type-lowering cursor does not yet hold a decision or yield
-its internal reads. The evaluator's composite read-past-gap predicate remains at
+boundaries. The evaluator's composite read-past-gap predicate remains at
 its existing call site and answers false because no tentative decision run
 exists; the separate flow-return pending probe is removed.
 
@@ -168,6 +166,105 @@ checker/receipt/width/depth pins and conditional_read_tests exercise both driver
 held reads, branch memoization and abandonment. The tests register in the
 architecture dependency and characterization products beside the lowering
 cursor's tests.
+
+### The type lowering holds the decision
+
+A conditional written in syntax is decided by the type lowering itself.
+Once its operand frames have lowered the check and the extends operand, the
+lowering pushes `LowerFrame::Decision` (`DecisionLowering` in
+`lower.rs`): one box holding the `ConditionalDecision` (begun with
+`DecisionBranches::Lowered` and always advanced with `HelperDrive::InPlace`),
+both branch expressions, the branch memo `lowered`, the `infer` binders the
+extends pattern declared, and the false branch's out-of-scope environment.
+`advance_decision_lowering` steps it:
+
+- `DecisionStep::Read(key)` is the lowering's own `LowerRead { key, shape:
+Whole }`; the frame waits as `LowerReadResume::Decision`. The cursor's
+  delivery is a closure (`Option<&mut dyn FnMut() -> LowerDelivery>`), and
+  `resume_lower_read` hands it to `advance_conditional_decision` narrowed to
+  a node read, so the read is made inside the operation that named it, under
+  that operation's held observations, as the native code made it. The
+  in-place drivers' closure is `|| answer_lower_read(request)`. A carrier
+  read's dispatch intent is counted when the read is named, as the in-place
+  decision driver counts it. The read carries `LowerRead.made_in_operation`.
+  A flow body holding the lowering requests such a read as
+  `ReadShape::Staged`: the root read or the in-place answerer hands it back
+  unread, and `FlowReadDriver::deliver_lowering` makes it inside the
+  delivery closure (`read_staged`), as `deliver_carrier` does for a carrier
+  walk. So its dependency facts are observed while the decision
+  operation's observation is on top, and its partiality and reuse evidence
+  land in that observation, never in the flow evaluation around it — an
+  operand preparation left incomplete by an unreadable arm then reaches
+  the written-arm proof, and the unused operand contributes only its reuse
+  evidence. A node or whole lowering read keeps its take-once answer.
+  Guarded by
+  `a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decision`;
+  its sibling
+  `an_eagerly_delivered_decision_read_leaves_its_evidence_outside_the_decision`
+  arms the per-host `TestKnobs::eager_lowering_decision_reads_for_tests`
+  knob (its only reader is the gated injection in `lowering_wait`, which then
+  requests the decision's read as `ReadShape::Whole`) and asserts the same
+  evidence check fails, so the guard rejects an eager delivery.
+- `DecisionStep::Branch(b)` is answered from `lowered` when that branch is
+  already lowered, and otherwise descends into it as the frame's child,
+  through the ordinary frame-owned environments (`LowerStep::Scoped`): the
+  true branch under the conditional's environment with an `InferRef` for each
+  declared binder, the false branch under the out-of-scope environment, or the
+  conditional's own environment when no binder is declared. Each branch lowers
+  at most once per conditional, whether the decision asks for it through
+  both-branch selection, the `any` row or several distributed members (whose
+  `Member` decisions pass their branch steps through to this memo), so no
+  substitution push repeats. A branch asked for after cancellation is answered
+  `opaque(Miss)` and not memoized.
+- `DecisionStep::Done(output)` deposits the operand self roots, folds the
+  output's partiality into the top build and yields its node.
+
+A branch lowers between two advances of the decision, so what it observes
+joins the enclosing lowering directly rather than through the operation
+that asked for it; adoption put it in the same place.
+
+Execution validity is the exception: the decision owns an abort raised
+while its branch lowers. The descent is `LowerStep::Branch`, and the cursor
+lowers the branch under a validity rail of its own (`BranchValidity`, one
+`HeldValidity` per waiting `LowerFrame::Decision`, innermost attached for
+each advance and detached between them, so an advance costs the same
+however deeply branches nest). When the branch's node returns, the rail
+ends without bubbling and its abort travels with the node as
+`DecisionDelivery::Branch { node, abort }`; the `Branch` operation observes
+it where the branch was asked for, inside the asking operation's (for
+example the `Winner`'s) observation, so the decision aborts and the
+conditional lowers to `opaque(Miss)` exactly as when the branch lowered
+inside that observation. Without the rail, a superseded read in a branch of
+a conditional lowered with no enclosing validity scope (the public
+construction wrapper installs none) would vanish, and the decision would
+resume over a branch built from the failed read. A memo hit carries no
+abort (its first delivery did). A decision that stops before the asking
+operation takes the delivery (a cancellation seen at its entry check or at
+any check on the way down its retained chain, or an abort raised there)
+leaves `advance_conditional_decision` through one exit,
+`DecisionDelivery::release`, which hands a carried branch abort to the
+enclosing build as a released held observation's abort goes; a distributed
+member's decision takes the same exit in its own advance. An outer branch's
+rail learns of an inner branch's abort through the inner decision, which
+observes it once the inner rail has ended and the outer one is attached
+again. Guarded by `a_superseded_branch_read_aborts_its_conditional` and
+`a_cancelled_decision_keeps_its_undelivered_branch_abort`.
+
+Connected demand: a decision standing at a structural-fact or deferred
+evaluation read keeps cost scopes open on the connected demand. A suspending
+holder of the lowering keeps the demand open for its whole extent
+(`LowerDemand::Held`). An in-place driver lends its slots
+(`LowerDemand::InPlace`): the outermost held decision enters the demand when
+it starts and leaves it with its answer, the span the native decision driver
+held, so its reads and its branch lowerings run inside it; a decision lowered
+inside one of its branches finds it open. The substitution slot an
+instantiation uses is unchanged. There is no callback entry: the in-place
+decision driver (`drive_conditional_in_place`) decides materialized
+conditionals only. Guards:
+`type_lowering_preserves_read_order_shapes_and_substitutions` (the decision's
+reads in the requested sequence),
+`stepped_conditional_lowering_does_the_work_of_in_place_lowering` and
+`a_lowered_conditional_lowers_each_branch_once`.
 
 ## Operands A Decision Relates
 

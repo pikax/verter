@@ -38,7 +38,7 @@ fn fixture(
     host: &crate::VerterHost,
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     case: &str,
-) -> (SemanticQueryKey, bool) {
+) -> SemanticQueryKey {
     let graph = dispatch.graph_arc();
     let primitive = |kind| graph.intern_node(SemanticNodeData::Primitive(kind));
     let number = primitive(PrimitiveKind::Number);
@@ -166,17 +166,14 @@ fn fixture(
         ),
         _ => panic!("unknown conditional fixture: {case}"),
     };
-    (
-        SemanticQueryKey::Conditional {
-            check,
-            extends,
-            true_branch,
-            false_branch,
-            distributive,
-            pending: None,
-        },
-        case == "distribution",
-    )
+    SemanticQueryKey::Conditional {
+        check,
+        extends,
+        true_branch,
+        false_branch,
+        distributive,
+        pending: None,
+    }
 }
 
 fn prepared_host() -> crate::VerterHost {
@@ -209,36 +206,22 @@ struct Observation {
     cold_partial: bool,
     suppressed: bool,
     diagnostics: Vec<String>,
-    descents: [usize; 2],
 }
 
 fn observe(case: &str, stepped: bool) -> Observation {
     let host = prepared_host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _construction = dispatch.enter_construction_scope();
-    let (key, lowered) = fixture(&host, &dispatch, case);
-    let SemanticQueryKey::Conditional {
-        check,
-        extends,
-        true_branch,
-        false_branch,
-        distributive,
-        ..
-    } = &key
-    else {
-        unreachable!()
-    };
+    let key = fixture(&host, &dispatch, case);
     let before = counters();
     let resumed_before = dispatch
         .graph_arc()
         .stats_snapshot()
         .continuation_stages_resumed;
     let completeness = ColdComputeCompletenessScope::enter();
-    let mut descents = [0; 2];
     let (output, requested) = if stepped {
-        dispatch.with_conditional_read_for_tests(&key, lowered, false, |read| {
+        dispatch.with_conditional_read_for_tests(&key, false, false, |read| {
             let mut requested = Vec::new();
-            let mut lowered = [None; 2];
             let mut step = dispatch.advance_conditional_read_for_tests(read, None, None);
             loop {
                 step = match step {
@@ -262,35 +245,12 @@ fn observe(case: &str, stepped: bool) -> Observation {
                             None,
                         )
                     }
-                    ConditionalProgressForTests::Branch(branch) => {
-                        let index = usize::from(branch);
-                        let node = *lowered[index].get_or_insert_with(|| {
-                            descents[index] += 1;
-                            if branch {
-                                *true_branch
-                            } else {
-                                *false_branch
-                            }
-                        });
-                        dispatch.advance_conditional_read_for_tests(read, None, Some(node))
+                    ConditionalProgressForTests::Branch(_) => {
+                        unreachable!("a materialized decision applies its own branches")
                     }
                 };
             }
         })
-    } else if lowered {
-        dispatch.trace_conditional_from_lowering_for_tests(
-            *check,
-            *extends,
-            *distributive,
-            &mut |branch| {
-                descents[usize::from(branch)] += 1;
-                if branch {
-                    *true_branch
-                } else {
-                    *false_branch
-                }
-            },
-        )
     } else {
         dispatch.trace_conditional_family_for_tests(&key)
     };
@@ -322,7 +282,6 @@ fn observe(case: &str, stepped: bool) -> Observation {
             .iter()
             .map(|diagnostic| format!("{diagnostic:?}"))
             .collect(),
-        descents,
     }
 }
 
@@ -356,40 +315,6 @@ fn stepped_conditional_reads_preserve_in_place_answers_order_and_work() {
 }
 
 #[test]
-fn lowered_branches_are_memoized_across_distributed_members_and_both_selection() {
-    let distributed = observe("distribution", false);
-    assert_eq!(distributed.descents, [0, 1]);
-    assert_eq!(distributed.work[2], 2);
-    assert_eq!(distributed.text, "1");
-    let host = prepared_host();
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    let _construction = dispatch.enter_construction_scope();
-    let (key, _) = fixture(&host, &dispatch, "both");
-    let SemanticQueryKey::Conditional {
-        check,
-        extends,
-        true_branch,
-        false_branch,
-        ..
-    } = key
-    else {
-        unreachable!()
-    };
-    let mut descents = [0; 2];
-    let output =
-        dispatch.conditional_build_from_lowering_for_tests(check, extends, false, &mut |branch| {
-            descents[usize::from(branch)] += 1;
-            if branch {
-                true_branch
-            } else {
-                false_branch
-            }
-        });
-    assert_eq!(descents, [1, 1]);
-    assert!(!output.result_is_partial());
-}
-
-#[test]
 fn abandoning_each_standing_conditional_operation_releases_accounting_and_observations() {
     let mut standing = std::collections::BTreeSet::new();
     for (case, framed) in CASES.iter().flat_map(|&case| [(case, false), (case, true)]) {
@@ -397,7 +322,7 @@ fn abandoning_each_standing_conditional_operation_releases_accounting_and_observ
             let host = prepared_host();
             let dispatch = ProjectSemanticDispatch::new(&host);
             let _construction = dispatch.enter_construction_scope();
-            let (key, _) = fixture(&host, &dispatch, case);
+            let key = fixture(&host, &dispatch, case);
             let SemanticQueryKey::Conditional {
                 true_branch,
                 false_branch,
@@ -559,7 +484,7 @@ fn a_held_declaration_read_suspends_the_decision_without_repeating_its_work() {
     let host = prepared_host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _construction = dispatch.enter_construction_scope();
-    let (key, _) = fixture(&host, &dispatch, "declared");
+    let key = fixture(&host, &dispatch, "declared");
     let SemanticQueryKey::Conditional { true_branch, .. } = &key else {
         unreachable!()
     };
@@ -634,7 +559,7 @@ fn literal_distribution_requests_no_conditional_member_reads() {
     let host = prepared_host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _construction = dispatch.enter_construction_scope();
-    let (key, _) = fixture(&host, &dispatch, "literal_distribution");
+    let key = fixture(&host, &dispatch, "literal_distribution");
     let SemanticQueryKey::Conditional { true_branch, .. } = &key else {
         unreachable!()
     };
@@ -666,7 +591,7 @@ fn a_refused_in_place_member_is_folded_and_normalized_like_a_member_query() {
         let host = prepared_host();
         let dispatch = ProjectSemanticDispatch::new(&host);
         let _construction = dispatch.enter_construction_scope();
-        let (key, _) = fixture(&host, &dispatch, "literal_distribution");
+        let key = fixture(&host, &dispatch, "literal_distribution");
         let _request = verter_type_engine::request_context::RequestContextGuard::install(
             verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
                 1,
@@ -726,7 +651,7 @@ fn synchronous_conditional_intents(case: &str, family: bool) -> (String, bool, [
     let host = prepared_host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _construction = dispatch.enter_construction_scope();
-    let (key, _) = fixture(&host, &dispatch, case);
+    let key = fixture(&host, &dispatch, case);
     let before = Dispatch::dispatch_intents_for_tests();
     let output = if family {
         dispatch.trace_conditional_family_for_tests(&key).0
@@ -819,7 +744,7 @@ fn a_keyof_check_distributes_over_a_key_set_the_decision_reads() {
     let host = prepared_host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _construction = dispatch.enter_construction_scope();
-    let (key, _) = fixture(&host, &dispatch, "keyof");
+    let key = fixture(&host, &dispatch, "keyof");
     dispatch.with_conditional_read_for_tests(&key, false, false, |read| {
         let mut step = dispatch.advance_conditional_read_for_tests(read, None, None);
         for _ in 0..16 {

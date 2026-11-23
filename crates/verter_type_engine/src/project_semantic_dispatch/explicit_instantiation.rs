@@ -195,14 +195,6 @@ pub(super) enum InstantiationDemand<'s, 'g> {
 }
 
 impl<'g> InstantiationDemand<'_, 'g> {
-    /// The same holder, for one more step.
-    pub(super) fn reborrow(&mut self) -> InstantiationDemand<'_, 'g> {
-        match self {
-            Self::Held => InstantiationDemand::Held,
-            Self::InPlace(slot) => InstantiationDemand::InPlace(slot),
-        }
-    }
-
     /// Before a substitution begins: an in-place driver's slot enters the
     /// demand unless an earlier substitution still holds it.
     fn enter<C: crate::resolver_core::ResolverCapabilities>(

@@ -3053,9 +3053,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The request a type lowering makes for the read it stands at, in that
     /// read's delivery shape, under the checking site the lowering runs in.
+    /// A read the held operation makes itself (a conditional decision's) is
+    /// staged: it is handed back unread and made inside that operation, so
+    /// what it observes lands in the operation's observation
+    /// ([`FlowReadDriver::deliver_lowering`]).
     fn lowering_wait(&self, request: super::lower::LowerRead) -> ReadWait {
+        let staged = request.made_in_operation;
+        #[cfg(any(test, feature = "test-support"))]
+        let staged = staged
+            && !self
+                .binding
+                .observers
+                .forcing
+                .eager_lowering_decision_reads_for_tests
+                .load(std::sync::atomic::Ordering::Relaxed);
         let shape = match request.shape {
-            super::lower::LowerReadShape::Node => ReadShape::Node,
+            super::lower::LowerReadShape::Whole if staged => ReadShape::Staged,
+            super::lower::LowerReadShape::Node => {
+                verter_debug_assert!(
+                    !request.made_in_operation,
+                    "an operation the lowering holds makes whole reads"
+                );
+                ReadShape::Node
+            }
             super::lower::LowerReadShape::Whole => ReadShape::Whole,
         };
         FlowReadDriver::request(self, request.key, shape, ReadOrigin::Lowering)
@@ -11156,11 +11176,14 @@ pub(super) trait FlowReadDriver {
         context: ProjectionReductionContext,
     ) -> LowerStart<'e>;
     /// Continue a lowering with the answer of the read it waited on: its
-    /// node, or the read it waits on next.
+    /// node, or the read it waits on next. A read the lowering's held
+    /// operation makes itself arrives staged and is made inside that
+    /// operation, for the body in `canonical`.
     fn deliver_lowering<'e>(
         &self,
         lowering: &mut FlowLowering<'e>,
         delivery: ReadDelivery,
+        canonical: &str,
     ) -> ReadStep<SemanticNodeId>;
     /// Answer a read the body requested and its root read answers.
     fn answer_read(&self, wait: ReadWait, canonical: &str) -> ReadDelivery;
@@ -11935,7 +11958,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
         let _type_node = self
             .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         let mut read = self.begin_type_lowering(expr, &binder.scope, context);
-        match self.advance_type_lowering(&binder.as_lowering(), &mut read, None) {
+        match self.advance_type_lowering(
+            &binder.as_lowering(),
+            &mut read,
+            None,
+            super::lower::LowerDemand::Held,
+        ) {
             super::lower::LowerProgress::Done(node) => LowerStart::Done(node),
             super::lower::LowerProgress::Read(request) => LowerStart::Wait(
                 Box::new(FlowLowering::Body(read, Arc::clone(binder))),
@@ -11959,8 +11987,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
             expr,
             context,
         );
-        match self.advance_type_lowering(&lowering.context.as_lowering(), &mut lowering.read, None)
-        {
+        match self.advance_type_lowering(
+            &lowering.context.as_lowering(),
+            &mut lowering.read,
+            None,
+            super::lower::LowerDemand::Held,
+        ) {
             super::lower::LowerProgress::Done(node) => LowerStart::Done(node),
             super::lower::LowerProgress::Read(request) => LowerStart::Wait(
                 Box::new(FlowLowering::Owner(lowering)),
@@ -11972,25 +12004,41 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
         &self,
         lowering: &mut FlowLowering<'e>,
         delivery: ReadDelivery,
+        canonical: &str,
     ) -> ReadStep<SemanticNodeId> {
         body_read_site!("deliver_lowering");
         let _type_node = self
             .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
-        let delivered = match delivery {
+        // The lowering consumes its delivery once, inside the operation that
+        // named the read. A staged read is made there, under the held
+        // operation's observation, as the in-place lowering makes it; a
+        // node or whole answer is taken as delivered.
+        let mut delivered = Some(delivery);
+        let mut deliver = || match delivered
+            .take()
+            .expect("a lowering consumes its delivery once")
+        {
             ReadDelivery::Node(read) => super::lower::LowerDelivery::Node(*read),
             ReadDelivery::Value(read) => super::lower::LowerDelivery::Whole(*read),
-            ReadDelivery::None | ReadDelivery::Staged(..) | ReadDelivery::Observed(_) => {
-                unreachable!("a lowering's read delivers its node read or its whole read")
+            ReadDelivery::Staged(wait, in_place) => {
+                super::lower::LowerDelivery::Whole(self.read_staged(*wait, canonical, in_place))
+            }
+            ReadDelivery::None | ReadDelivery::Observed(_) => {
+                unreachable!("a lowering's read delivers its node, whole or staged read")
             }
         };
         let progress = match lowering {
-            FlowLowering::Body(read, binder) => {
-                self.advance_type_lowering(&binder.as_lowering(), read, Some(delivered))
-            }
+            FlowLowering::Body(read, binder) => self.advance_type_lowering(
+                &binder.as_lowering(),
+                read,
+                Some(&mut deliver),
+                super::lower::LowerDemand::Held,
+            ),
             FlowLowering::Owner(owner) => self.advance_type_lowering(
                 &owner.context.as_lowering(),
                 &mut owner.read,
-                Some(delivered),
+                Some(&mut deliver),
+                super::lower::LowerDemand::Held,
             ),
         };
         match progress {
@@ -13163,8 +13211,9 @@ impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
         &self,
         lowering: &mut FlowLowering<'e>,
         delivery: ReadDelivery,
+        canonical: &str,
     ) -> ReadStep<SemanticNodeId> {
-        self.driver.deliver_lowering(lowering, delivery)
+        self.driver.deliver_lowering(lowering, delivery, canonical)
     }
     fn answer_read(&self, wait: ReadWait, canonical: &str) -> ReadDelivery {
         self.driver.answer_read(wait, canonical)

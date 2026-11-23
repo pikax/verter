@@ -84,6 +84,203 @@ fn imported(qualifier: &[&str], args: Vec<TypeExpr>) -> TypeExpr {
     }
 }
 
+/// The declarations the conditional fixtures name.
+const CONDITIONAL_DECLARATIONS: &str = concat!(
+    "export type Alias = number;\n",
+    "export type A = string;\n",
+    "export type B = string;\n",
+    "export type Bag = { value: string; other: number };\n",
+    "export type Open<T> = T extends number ? 1 : 2;\n",
+);
+
+fn conditional(
+    check: TypeExpr,
+    extends: TypeExpr,
+    true_type: TypeExpr,
+    false_type: TypeExpr,
+) -> TypeExpr {
+    TypeExpr::Conditional {
+        check: Arc::new(check),
+        extends: Arc::new(extends),
+        true_type: Arc::new(true_type),
+        false_type: Arc::new(false_type),
+    }
+}
+
+fn tuple(elements: Vec<TypeExpr>) -> TypeExpr {
+    TypeExpr::Tuple {
+        elements: elements
+            .into_iter()
+            .map(|ty| verter_type_expr::TupleElement {
+                label: None,
+                ty,
+                optional: false,
+                rest: false,
+            })
+            .collect(),
+        readonly: false,
+    }
+}
+
+fn infer(name: &str) -> TypeExpr {
+    TypeExpr::Infer {
+        name: name.into(),
+        constraint: None,
+    }
+}
+
+fn type_parameter(name: &str) -> TypeExpr {
+    TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: name.into(),
+        constraint: None,
+        default: None,
+        is_const: false,
+    })
+}
+
+fn number_template() -> TypeExpr {
+    TypeExpr::TemplateLiteral {
+        quasis: vec![String::new(), String::new()],
+        expressions: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::Number)]),
+    }
+}
+
+/// One conditional per source of the reads a decision makes: a `typeof`
+/// check and a named extends operand, declared tuple elements, a template
+/// tuple element, a generic alias application, a declared alias, an indexed
+/// check, a `keyof` check, a template extends operand, a nested conditional
+/// check, a written union arm, a repeated `infer`, an `any` check whose
+/// selection takes both branches, and a check bound to a union, which
+/// distributes.
+fn conditional_fixtures() -> Vec<(&'static str, TypeExpr)> {
+    let one = || TypeExpr::number_literal(1.0);
+    let two = || TypeExpr::number_literal(2.0);
+    let number = || TypeExpr::Primitive(PrimitiveName::Number);
+    let string = || TypeExpr::Primitive(PrimitiveName::String);
+    vec![
+        (
+            "conditional typeof check against an alias",
+            conditional(
+                value_type(&["x"], vec![]),
+                named("Alias", vec![]),
+                one(),
+                two(),
+            ),
+        ),
+        (
+            "conditional tuple operands",
+            conditional(
+                tuple(vec![named("A", vec![])]),
+                tuple(vec![named("B", vec![])]),
+                one(),
+                two(),
+            ),
+        ),
+        (
+            "conditional template tuple element",
+            conditional(
+                tuple(vec![number_template()]),
+                tuple(vec![string()]),
+                one(),
+                two(),
+            ),
+        ),
+        (
+            "conditional alias application",
+            conditional(
+                named("Open", vec![type_parameter("V")]),
+                number(),
+                one(),
+                two(),
+            ),
+        ),
+        (
+            "conditional declared alias",
+            conditional(named("Alias", vec![]), number(), one(), two()),
+        ),
+        (
+            "conditional indexed check",
+            conditional(
+                TypeExpr::IndexedAccess {
+                    object: Arc::new(named("Bag", vec![])),
+                    index: Arc::new(TypeExpr::string_literal("value")),
+                },
+                string(),
+                one(),
+                two(),
+            ),
+        ),
+        (
+            "conditional keyof check",
+            conditional(
+                TypeExpr::KeyOf(Arc::new(named("Bag", vec![]))),
+                string(),
+                one(),
+                two(),
+            ),
+        ),
+        (
+            "conditional template extends",
+            conditional(
+                TypeExpr::string_literal("5"),
+                number_template(),
+                one(),
+                two(),
+            ),
+        ),
+        (
+            "conditional nested check",
+            conditional(
+                TypeExpr::Parenthesized(Arc::new(conditional(
+                    string(),
+                    number(),
+                    string(),
+                    number(),
+                ))),
+                number(),
+                one(),
+                two(),
+            ),
+        ),
+        (
+            "conditional written arm",
+            conditional(
+                number(),
+                TypeExpr::union(vec![number(), named("Missing", vec![])]),
+                one(),
+                two(),
+            ),
+        ),
+        (
+            "conditional repeated infer",
+            conditional(
+                tuple(vec![one(), two()]),
+                tuple(vec![infer("U"), infer("U")]),
+                named("U", vec![]),
+                two(),
+            ),
+        ),
+        (
+            "conditional any check takes both branches",
+            conditional(
+                TypeExpr::Primitive(PrimitiveName::Any),
+                tuple(vec![infer("U")]),
+                tuple(vec![named("U", vec![])]),
+                two(),
+            ),
+        ),
+        (
+            "conditional distributes over a bound union",
+            conditional(
+                type_parameter("T"),
+                tuple(vec![infer("U")]),
+                tuple(vec![named("U", vec![])]),
+                two(),
+            ),
+        ),
+    ]
+}
+
 #[test]
 fn type_lowering_preserves_read_order_shapes_and_substitutions() {
     use LowerReadShape::{Node, Whole};
@@ -91,7 +288,7 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
     upsert_ts(
         &host,
         "/lower.ts",
-        concat!(
+        &[concat!(
             "export declare const x: number;\n",
             "export declare const y: string;\n",
             "export declare const obj: { a: string };\n",
@@ -101,7 +298,7 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
             "export declare const f: { tag: 'kept'; <T>(value: T): T; new<T>(value: T): { value: T } };\n",
             "export declare function overloaded<T>(value: T): T;\n",
             "export declare function overloaded<T>(value: T, second: T): T[];\n",
-        ),
+        ), CONDITIONAL_DECLARATIONS].concat(),
     );
     upsert_ts(
         &host,
@@ -395,7 +592,13 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
             vec![],
         ),
     ];
-    for (label, expr, expected_reads) in cases {
+    // A held decision's reads are the lowering's own whole reads, after
+    // its operands' reads, in the order the decision makes them.
+    let conditional_rows = conditional_fixtures()
+        .into_iter()
+        .map(|(label, expr)| (label, expr, conditional_reads(label).0));
+    let mut read_mismatches = Vec::new();
+    for (label, expr, expected_reads) in cases.into_iter().chain(conditional_rows) {
         // Inspect the mapped descriptor before key enumeration so its value
         // and remap bindings remain observable.
         let context = if matches!(
@@ -420,21 +623,7 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
         let requested: Vec<_> = trace
             .requested
             .iter()
-            .map(|(key, shape)| {
-                let family = match key {
-                    SemanticQueryKey::TypeOf { .. } => "TypeOf",
-                    SemanticQueryKey::ResolveDecl { .. } => "ResolveDecl",
-                    SemanticQueryKey::Instantiate { .. } => "Instantiate",
-                    SemanticQueryKey::KeyOf { .. } => "KeyOf",
-                    SemanticQueryKey::IndexedAccess { .. } => "IndexedAccess",
-                    SemanticQueryKey::MappedType { .. } => "MappedType",
-                    SemanticQueryKey::ProjectPath { .. } => "ProjectPath",
-                    SemanticQueryKey::SignaturesOfType { .. } => "SignaturesOfType",
-                    SemanticQueryKey::ReadSignatureResult(_) => "ReadSignatureResult",
-                    other => panic!("unexpected lowering read: {other:?}"),
-                };
-                (family, *shape)
-            })
+            .map(|(key, shape)| (format!("{:?}", key.tag()), *shape))
             .collect();
 
         let value_reads: Vec<_> = trace
@@ -473,12 +662,29 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
             );
         }
 
-        assert_eq!(requested, expected_reads, "{label}");
-        assert_eq!(
-            trace.first_advance_done,
-            expected_reads.is_empty(),
-            "{label}"
-        );
+        let expected: Vec<_> = expected_reads
+            .iter()
+            .map(|(family, shape)| ((*family).to_owned(), *shape))
+            .collect();
+        if requested != expected {
+            read_mismatches.push(format!("{label}: {requested:?}"));
+        }
+        if label.starts_with("conditional ") {
+            let decision: Vec<_> = trace
+                .requested
+                .iter()
+                .zip(&trace.from_decision)
+                .filter(|(_, from_decision)| **from_decision)
+                .map(|((key, shape), _)| {
+                    assert_eq!(*shape, Whole, "{label}: a decision reads whole answers");
+                    format!("{:?}", key.tag())
+                })
+                .collect();
+            if decision != conditional_reads(label).1 {
+                read_mismatches.push(format!("{label}: decision {decision:?}"));
+            }
+        }
+        assert_eq!(trace.first_advance_done, requested.is_empty(), "{label}");
         let mut substitutions = Vec::new();
         let inline = dispatch.shallow_lower_type_expr_with_context_for_tests(
             &expr,
@@ -676,6 +882,60 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
             );
         }
     }
+    assert!(
+        read_mismatches.is_empty(),
+        "requested reads differ: {read_mismatches:#?}"
+    );
+}
+
+/// The reads lowering each conditional fixture requests, in order: its
+/// operands' reads, then its decision's, as whole reads. The second list is
+/// the decision's own reads, in the order the decision makes them.
+#[allow(clippy::type_complexity)]
+fn conditional_reads(label: &str) -> (Vec<(&'static str, LowerReadShape)>, Vec<&'static str>) {
+    use LowerReadShape::{Node, Whole};
+    match label {
+        "conditional typeof check against an alias" => (
+            vec![
+                ("TypeOf", Node),
+                ("ResolveDecl", Whole),
+                ("Instantiate", Whole),
+            ],
+            vec!["ResolveDecl", "Instantiate"],
+        ),
+        "conditional tuple operands" => (
+            vec![
+                ("ResolveDecl", Whole),
+                ("Instantiate", Whole),
+                ("ResolveDecl", Whole),
+                ("Instantiate", Whole),
+            ],
+            vec!["ResolveDecl", "Instantiate", "ResolveDecl", "Instantiate"],
+        ),
+        "conditional template tuple element" => (
+            vec![("TemplateLiteralReduce", Whole); 3],
+            vec!["TemplateLiteralReduce"; 3],
+        ),
+        "conditional alias application" => (
+            vec![
+                ("Instantiate", Whole),
+                ("Instantiate", Whole),
+                ("Conditional", Whole),
+            ],
+            vec!["Instantiate", "Instantiate", "Conditional"],
+        ),
+        "conditional declared alias" => (
+            vec![("ResolveDecl", Whole), ("ResolveDecl", Whole)],
+            vec!["ResolveDecl", "ResolveDecl"],
+        ),
+        "conditional indexed check" => (vec![("IndexedAccess", Whole)], vec!["IndexedAccess"]),
+        "conditional keyof check" => (vec![("KeyOf", Node)], vec![]),
+        "conditional template extends" => (
+            vec![("TemplateLiteralReduce", Whole)],
+            vec!["TemplateLiteralReduce"],
+        ),
+        _ => (vec![], vec![]),
+    }
 }
 
 /// What one lowering of `[typeof C.make<'x'>; elements]` on a fresh host
@@ -845,4 +1105,522 @@ fn a_repeated_typeof_instantiation_reuses_its_published_substitution() {
         ((2, 1), (2, 1)),
         "both elements are the one instantiated signature"
     );
+}
+
+/// What lowering one conditional fixture on a fresh host produced and paid.
+#[derive(Debug, PartialEq, Eq)]
+struct LoweredConditional {
+    text: String,
+    /// The names the lowering bound, in push order.
+    substitutions: Vec<Arc<str>>,
+    /// Operand walk visits, operand preparations, distributed members and
+    /// branch selections.
+    work: [usize; 4],
+    /// The branches the lowering descended into, false then true.
+    descents: [usize; 2],
+    lookups: u64,
+}
+
+fn lower_conditional(label: &str, stepped: bool) -> LoweredConditional {
+    type Dispatch<'a> = ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>;
+    let host = host();
+    upsert_ts(
+        &host,
+        "/lower.ts",
+        &[
+            "export declare const x: number;\n",
+            CONDITIONAL_DECLARATIONS,
+        ]
+        .concat(),
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _construction = dispatch.enter_construction_scope();
+    let scope = file_scope(&dispatch, "/lower.ts");
+    let payload = dispatch
+        .ctx
+        .prepared_decl_bundle("/lower.ts")
+        .map(|bundle| {
+            DeclarationScopePayload::from_bundle(
+                &bundle,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            )
+        });
+    let shadowing = ScopeShadowing::from_scope_payload(payload.as_ref());
+    let names = FxHashMap::default();
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    // The distributive fixture's check is bound to `[1] | [2]`.
+    let members = TypeExpr::union(vec![
+        tuple(vec![TypeExpr::number_literal(1.0)]),
+        tuple(vec![TypeExpr::number_literal(2.0)]),
+    ]);
+    let mut ignored = Vec::new();
+    let union = dispatch.shallow_lower_type_expr_with_context_for_tests(
+        &members,
+        &FxHashMap::default(),
+        &scope,
+        &names,
+        payload.as_ref(),
+        &shadowing,
+        &mut ignored,
+        context,
+    );
+    let mut env = FxHashMap::default();
+    env.insert("T".to_owned(), union);
+    let expr = conditional_fixtures()
+        .into_iter()
+        .find_map(|(name, expr)| (name == label).then_some(expr))
+        .expect("a conditional fixture");
+    let work = || {
+        [
+            Dispatch::conditional_operand_walk_visits_for_tests(),
+            Dispatch::conditional_operand_preparations_for_tests(),
+            Dispatch::conditional_distributed_members_for_tests(),
+            Dispatch::conditional_branch_selections_for_tests(),
+        ]
+    };
+    let before = (
+        work(),
+        Dispatch::conditional_branch_descents_for_tests(),
+        dispatch.graph().stats_snapshot(),
+    );
+    let (node, substitutions) = if stepped {
+        let trace = dispatch.step_type_lowering_for_tests(
+            &expr,
+            &env,
+            &scope,
+            &names,
+            payload.as_ref(),
+            &shadowing,
+            context,
+        );
+        (trace.node, trace.substitutions)
+    } else {
+        let mut substitutions = Vec::new();
+        let node = dispatch.shallow_lower_type_expr_with_context_for_tests(
+            &expr,
+            &env,
+            &scope,
+            &names,
+            payload.as_ref(),
+            &shadowing,
+            &mut substitutions,
+            context,
+        );
+        (node, substitutions)
+    };
+    let after = (
+        work(),
+        Dispatch::conditional_branch_descents_for_tests(),
+        dispatch.graph().stats_snapshot(),
+    );
+    LoweredConditional {
+        text: crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+            &dispatch, node, 0,
+        ),
+        substitutions: substitutions.into_iter().map(|(name, _)| name).collect(),
+        work: std::array::from_fn(|i| after.0[i] - before.0[i]),
+        descents: std::array::from_fn(|i| after.1[i] - before.1[i]),
+        lookups: (after.2.hits + after.2.misses) - (before.2.hits + before.2.misses),
+    }
+}
+
+/// A conditional lowered stepped, its decision held in a lowering frame,
+/// does the work the in-place lowering does: the same answer, bindings,
+/// decision work, branch lowerings and lookups, for every source of the
+/// reads a decision makes.
+#[test]
+fn stepped_conditional_lowering_does_the_work_of_in_place_lowering() {
+    for (label, _) in conditional_fixtures() {
+        let in_place = lower_conditional(label, false);
+        assert!(
+            in_place.work[1] > 0,
+            "{label}: the decision prepares its operands"
+        );
+        assert_eq!(lower_conditional(label, true), in_place, "{label}");
+    }
+}
+
+/// A lowered conditional lowers each branch its decision asks for once,
+/// however often it asks: the `any` check's selection takes both branches,
+/// and each member of a distribution over a bound union takes the true
+/// branch. One descent per branch, one substitution per binder.
+#[test]
+fn a_lowered_conditional_lowers_each_branch_once() {
+    for stepped in [false, true] {
+        let both = lower_conditional("conditional any check takes both branches", stepped);
+        assert_eq!(both.descents, [1, 1], "both branches, each once: {both:?}");
+        assert_eq!(
+            both.substitutions,
+            [Arc::<str>::from("U")],
+            "the true branch binds `U` once: {both:?}"
+        );
+        let distributed = lower_conditional("conditional distributes over a bound union", stepped);
+        assert_eq!(
+            distributed.work[2], 2,
+            "each member is decided: {distributed:?}"
+        );
+        assert_eq!(
+            distributed.descents,
+            [0, 1],
+            "the members share one true branch: {distributed:?}"
+        );
+        assert_eq!(
+            distributed.substitutions,
+            [Arc::<str>::from("T"), Arc::from("U")],
+            "the check binds `T` and the true branch binds `U`, once each: {distributed:?}"
+        );
+    }
+}
+
+/// Which lowering entry lowers the conditional in
+/// [`lower_with_superseded_branch_read`].
+#[derive(Clone, Copy, Debug)]
+enum ConditionalEntry {
+    /// The in-place lowering every arm recurses through.
+    InPlace,
+    /// The public construction wrapper, which installs no validity scope.
+    Public,
+    /// The stepped lowering, its reads answered by a suspending holder.
+    Stepped,
+}
+
+/// What a conditional lowered while its branch's read was superseded
+/// produced.
+#[derive(Debug)]
+struct BranchAbortOutcome {
+    text: String,
+    /// The whole conditional lowered to `opaque(Miss)`: its decision aborted.
+    aborted: bool,
+    /// The read the plant targets ran cold, so the plant fired.
+    fired: bool,
+    /// The abort an enclosing validity scope saw, when one was entered.
+    enclosing: Option<verter_type_engine::semantic_query::ExecutionAbort>,
+    /// The file of the first cancellation poll that observed the request's
+    /// cancellation, when the request was cancelled.
+    cancel_observed_in: Option<String>,
+}
+
+/// Lower `number extends number ? [typeof x] : never` through `entry` on a
+/// fresh host. With `superseded`, the true branch's `typeof x` read finds
+/// its view superseded, as a concurrent edit makes it: the next cold build
+/// observes `ExecutionAbort::Superseded`. The same conditional with a
+/// literal true branch is lowered first, so every read the decision makes
+/// is warm and the first cold build is the branch's. With `enclosing`, the
+/// lowering runs inside a validity scope. With `cancel`, the request is
+/// cancelled once the decision has passed its entry check with the lowered
+/// branch in hand, before it resumes the operation that asked for it.
+fn lower_with_superseded_branch_read(
+    entry: ConditionalEntry,
+    superseded: bool,
+    enclosing: bool,
+    cancel: bool,
+) -> BranchAbortOutcome {
+    use verter_type_engine::semantic_query::{ExecutionAbort, QueryError};
+    let host = host();
+    upsert_ts(&host, "/lower.ts", "export declare const x: number;\n");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    // Every node this lowers stays rooted until it is rendered.
+    let _construction = dispatch.enter_construction_scope();
+    let scope = file_scope(&dispatch, "/lower.ts");
+    let payload = dispatch
+        .ctx
+        .prepared_decl_bundle("/lower.ts")
+        .map(|bundle| {
+            DeclarationScopePayload::from_bundle(
+                &bundle,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            )
+        });
+    let shadowing = ScopeShadowing::from_scope_payload(payload.as_ref());
+    let names = FxHashMap::default();
+    let env = FxHashMap::default();
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let with_true_branch = |true_type: TypeExpr| {
+        conditional(
+            TypeExpr::Primitive(PrimitiveName::Number),
+            TypeExpr::Primitive(PrimitiveName::Number),
+            true_type,
+            TypeExpr::Primitive(PrimitiveName::Never),
+        )
+    };
+    let lower = |expr: &TypeExpr| match entry {
+        ConditionalEntry::InPlace => dispatch.shallow_lower_type_expr_with_context_for_tests(
+            expr,
+            &env,
+            &scope,
+            &names,
+            payload.as_ref(),
+            &shadowing,
+            &mut Vec::new(),
+            context,
+        ),
+        ConditionalEntry::Public => dispatch
+            .lower_type_expr_in_scope_with_mode("/lower.ts", expr, ProjectionMode::Expanded)
+            .expect("the file's scope"),
+        ConditionalEntry::Stepped => {
+            dispatch
+                .step_type_lowering_for_tests(
+                    expr,
+                    &env,
+                    &scope,
+                    &names,
+                    payload.as_ref(),
+                    &shadowing,
+                    context,
+                )
+                .node
+        }
+    };
+    lower(&with_true_branch(TypeExpr::number_literal(1.0)));
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if superseded {
+        let fired = Arc::clone(&fired);
+        *host
+            .test_force
+            .engine
+            .semantic_operand_cold_build_seam
+            .0
+            .lock() = Some(Arc::new(move || {
+            fired.store(true, std::sync::atomic::Ordering::Relaxed);
+            verter_type_engine::request_context::observe_execution_abort(
+                ExecutionAbort::Superseded,
+            );
+        }));
+    }
+    let _job = cancel.then(|| {
+        let token = verter_execution::cancellation::CancellationToken::new();
+        let seam_token = token.clone();
+        *host
+            .test_force
+            .engine
+            .conditional_branch_delivery_seam
+            .0
+            .lock() = Some(Arc::new(move || seam_token.cancel()));
+        verter_execution::cancellation::JobCancellationGuard::install(token)
+    });
+    let validity =
+        enclosing.then(verter_type_engine::request_context::ExecutionValidityScope::enter);
+    let (node, trace) = verter_type_engine::cancel_trace::traced(|| {
+        lower(&with_true_branch(tuple(vec![value_type(&["x"], vec![])])))
+    });
+    let cancel_observed_in = trace.first_observed.map(|(site, _)| {
+        std::path::Path::new(site.file())
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+    });
+    let enclosing = validity.and_then(|validity| {
+        let abort = verter_type_engine::request_context::current_execution_abort();
+        drop(validity);
+        abort
+    });
+    BranchAbortOutcome {
+        text: crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+            &dispatch, node, 0,
+        ),
+        aborted: matches!(
+            dispatch.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::Miss))
+        ),
+        fired: fired.load(std::sync::atomic::Ordering::Relaxed),
+        enclosing,
+        cancel_observed_in,
+    }
+}
+
+/// A conditional branch lowers between two advances of the decision that
+/// asked for it, outside the asking operation's observation. When a read
+/// the branch makes is superseded, the decision still owns that abort and
+/// aborts: the whole conditional lowers to `opaque(Miss)`, not to a branch
+/// value built over the failed read, with no validity scope enclosing the
+/// lowering, through every lowering entry. Inside an enclosing scope the
+/// abort also reaches that scope. Unplanted, the branch value stands.
+#[test]
+fn a_superseded_branch_read_aborts_its_conditional() {
+    use verter_type_engine::semantic_query::ExecutionAbort;
+    use ConditionalEntry::{InPlace, Public, Stepped};
+    let sound = lower_with_superseded_branch_read(InPlace, false, false, false);
+    assert!(
+        !sound.aborted && !sound.fired && !sound.text.starts_with("Opaque"),
+        "unplanted, the branch value stands: {sound:?}"
+    );
+    let mut failures = Vec::new();
+    for entry in [InPlace, Public, Stepped] {
+        let outcome = lower_with_superseded_branch_read(entry, true, false, false);
+        assert!(
+            outcome.fired,
+            "{entry:?}: the branch's read ran cold: {outcome:?}"
+        );
+        if !outcome.aborted {
+            failures.push(format!("{entry:?}: {outcome:?}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a superseded branch read must abort its whole conditional:\n{}",
+        failures.join("\n")
+    );
+    for entry in [InPlace, Stepped] {
+        let outcome = lower_with_superseded_branch_read(entry, true, true, false);
+        assert!(
+            outcome.aborted && outcome.enclosing == Some(ExecutionAbort::Superseded),
+            "{entry:?}: the decision aborts and its abort reaches the enclosing build: {outcome:?}"
+        );
+    }
+}
+
+/// A decision can be cancelled after its entry check has passed with a
+/// lowered branch in hand, before the operation that asked for the branch
+/// consumes it. The decision then stops without that operation, but the
+/// abort the branch's superseded read raised is still the request's: the
+/// enclosing validity scope sees `Superseded`, and the conditional lowers
+/// to `opaque(Miss)`, through every lowering entry.
+#[test]
+fn a_cancelled_decision_keeps_its_undelivered_branch_abort() {
+    use verter_type_engine::semantic_query::ExecutionAbort;
+    use ConditionalEntry::{InPlace, Public, Stepped};
+    let mut failures = Vec::new();
+    for entry in [InPlace, Public, Stepped] {
+        let outcome = lower_with_superseded_branch_read(entry, true, true, true);
+        assert!(
+            outcome.fired,
+            "{entry:?}: the branch's read ran cold: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.cancel_observed_in.as_deref(),
+            Some("conditional_decision.rs"),
+            "{entry:?}: a check inside the decision is the first to see the cancellation: {outcome:?}"
+        );
+        if !(outcome.aborted && outcome.enclosing == Some(ExecutionAbort::Superseded)) {
+            failures.push(format!("{entry:?}: {outcome:?}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a cancelled decision must still hand its branch's abort to the enclosing build:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// An alias whose application no lane can read: the whole global object is
+/// a deferred `typeof globalThis` carrier, so the conditional stays
+/// undecided and a read of `Dom<1>` answers partial.
+const UNREADABLE_ARM_DECLARATION: &str =
+    "export type Dom<T> = typeof globalThis extends { window: unknown } ? T : never;\n";
+
+/// Lower `"a" extends string | Dom<1> ? 1 : 2` in the owner scope of a
+/// file declaring the unreadable `Dom`, driven by `driver`, with each read
+/// its held decision makes delivered eagerly (answered ahead of the
+/// decision and taken once) when `eager`, and render the node.
+fn lower_unreadable_arm_conditional(
+    driver: verter_type_engine::project_semantic_dispatch::lower::OwnerLoweringDriverForTests,
+    eager: bool,
+) -> (
+    String,
+    verter_type_engine::project_semantic_dispatch::lower::ObservedOwnerLoweringForTests,
+) {
+    let expr = conditional(
+        TypeExpr::string_literal("a"),
+        TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::String),
+            named("Dom", vec![TypeExpr::number_literal(1.0)]),
+        ]),
+        TypeExpr::number_literal(1.0),
+        TypeExpr::number_literal(2.0),
+    );
+    let host = host();
+    host.test_force
+        .engine
+        .eager_lowering_decision_reads_for_tests
+        .store(eager, std::sync::atomic::Ordering::Relaxed);
+    upsert_ts(&host, "/lower.ts", UNREADABLE_ARM_DECLARATION);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _construction = dispatch.enter_construction_scope();
+    let observed = dispatch.observed_owner_lowering_for_tests(
+        "/lower.ts",
+        &expr,
+        ProjectionReductionContext::structural_transit(),
+        driver,
+    );
+    let text = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+        &dispatch,
+        observed.node,
+        0,
+    );
+    (text, observed)
+}
+
+/// Whether every read the lowering's held decision made left its evidence
+/// in the decision's observation: some partial read turned that complete
+/// observation partial, every partial read observed its dependencies while
+/// the observation was on top and left it partial, and every non-reusable
+/// read left it non-reusable.
+fn decision_evidence_is_inside_the_decision(
+    observed: &verter_type_engine::project_semantic_dispatch::lower::ObservedOwnerLoweringForTests,
+) -> bool {
+    observed
+        .decision_reads
+        .iter()
+        .any(|read| read.partial && !read.observed_partial[0])
+        && observed.decision_reads.iter().all(|read| {
+            (!read.partial || !read.dependencies.is_empty())
+                && (!read.partial || read.observed_partial[1])
+                && (!read.suppressed || read.observed_suppressed[1])
+        })
+}
+
+/// A conditional held by a lowering that a flow body drives makes each
+/// read its decision names inside the decision operation that named it,
+/// whether the body suspends at the read (its root read answering the
+/// request) or answers it at once: the read's dependencies are observed
+/// while that operation's observation is on top, its partiality and reuse
+/// evidence land in that observation, and the decision decides with them.
+/// In `"a" extends string | Dom<1> ? 1 : 2` the partial `Dom<1>` read
+/// leaves the operand preparation incomplete, so the written
+/// `string` arm proves the true branch and the unused operands contribute
+/// only their reuse evidence: the flow-driven lowering answers what the
+/// native lowering answers, as completely.
+#[test]
+fn a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decision() {
+    use verter_type_engine::project_semantic_dispatch::lower::OwnerLoweringDriverForTests as Driver;
+    let (native_text, native) = lower_unreadable_arm_conditional(Driver::Native, false);
+    assert_eq!(
+        native.partial, None,
+        "the native lowering proves the true branch through the written arm: {native_text} {native:?}"
+    );
+    assert!(
+        native
+            .decision_reads
+            .iter()
+            .any(|read| read.partial && !read.dependencies.is_empty()),
+        "the native decision makes its partial read, with its dependencies, inside the decision: {native:?}"
+    );
+    for driver in [Driver::FlowRequested, Driver::FlowInPlace] {
+        let (text, flow) = lower_unreadable_arm_conditional(driver, false);
+        assert!(
+            decision_evidence_is_inside_the_decision(&flow),
+            "{driver:?}: each decision read observes its dependencies and lands its partiality and reuse evidence in the decision's observation, a partial one into an observation that was complete: {flow:?}"
+        );
+        assert_eq!(
+            (text.as_str(), flow.partial),
+            (native_text.as_str(), native.partial),
+            "{driver:?}: the flow-driven lowering answers what the native lowering answers, as completely: {flow:?}"
+        );
+    }
+}
+
+/// The same flow-driven lowering with each read its held decision makes
+/// delivered eagerly, answered ahead of the decision and taken once:
+/// the read's dependencies and partiality land in the enclosing build and
+/// none in the decision's observation, which the decision-evidence check
+/// rejects for both flow bodies.
+#[test]
+fn an_eagerly_delivered_decision_read_leaves_its_evidence_outside_the_decision() {
+    use verter_type_engine::project_semantic_dispatch::lower::OwnerLoweringDriverForTests as Driver;
+    for driver in [Driver::FlowRequested, Driver::FlowInPlace] {
+        let (_, eager) = lower_unreadable_arm_conditional(driver, true);
+        assert!(
+            !decision_evidence_is_inside_the_decision(&eager),
+            "{driver:?}: an eagerly delivered decision read leaves its dependencies or partiality outside the decision's observation: {eager:?}"
+        );
+    }
 }

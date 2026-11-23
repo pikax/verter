@@ -75,7 +75,7 @@ pub(super) fn lowering_in_place(
         LowerStart::Wait(mut lowering, wait) => settle_now(
             ReadStep::Wait(wait),
             |wait| dispatch.read_in_place(wait, canonical),
-            |delivery| dispatch.deliver_lowering(&mut lowering, delivery),
+            |delivery| dispatch.deliver_lowering(&mut lowering, delivery, canonical),
         ),
     }
 }
@@ -198,6 +198,71 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             completeness.is_partial().then(|| completeness.reasons()),
         )
     }
+
+    /// Lower `expr` in the ordinary owner scope of `canonical` under
+    /// `context`, inside an enclosing observation of the test's own, driven
+    /// by `driver`: natively, or through the flow read driver as a body
+    /// that suspends at each read the lowering waits on, its root read
+    /// answering the request, or as one that answers each at once. The
+    /// flow drivers keep the connected demand open for the lowering's
+    /// extent, as a suspending holder does.
+    pub fn observed_owner_lowering_for_tests(
+        &self,
+        canonical: &str,
+        expr: &verter_type_expr::TypeExpr,
+        context: crate::semantic_query::ProjectionReductionContext,
+        driver: super::super::lower::OwnerLoweringDriverForTests,
+    ) -> super::super::lower::ObservedOwnerLoweringForTests {
+        use super::super::lower::OwnerLoweringDriverForTests as Driver;
+        let ((node, completeness), decision_reads) =
+            super::super::lower::record_decision_reads_for_tests(|| {
+                let enclosing = ProjectSemanticDispatch::observe_read(self, || {
+                    if driver == Driver::Native {
+                        return self
+                            .lower_type_expr_in_scope_with_context(canonical, expr, context)
+                            .expect("an owner-scope lowering yields a node");
+                    }
+                    let _demand = self.enter_connected_demand(false).0;
+                    let start = FlowReadDriver::request_owner_lowering(
+                        self,
+                        (
+                            canonical,
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        ),
+                        expr,
+                        context,
+                    );
+                    if driver == Driver::FlowInPlace {
+                        return lowering_in_place(self, canonical, start);
+                    }
+                    match start {
+                        LowerStart::Done(node) => node,
+                        LowerStart::Wait(mut lowering, wait) => settle_now(
+                            ReadStep::Wait(wait),
+                            |wait| FlowReadDriver::answer_read(self, wait, canonical),
+                            |delivery| {
+                                FlowReadDriver::deliver_lowering(
+                                    self,
+                                    &mut lowering,
+                                    delivery,
+                                    canonical,
+                                )
+                            },
+                        ),
+                    }
+                });
+                let completeness = enclosing.result_completeness();
+                let node = enclosing
+                    .discard()
+                    .expect("the enclosing observation observes no abort");
+                (node, completeness)
+            });
+        super::super::lower::ObservedOwnerLoweringForTests {
+            node,
+            partial: completeness.is_partial().then(|| completeness.reasons()),
+            decision_reads,
+        }
+    }
 }
 
 /// A helper's own stack, kept at the read it requests.
@@ -274,21 +339,22 @@ impl ProvenanceFrame {
         }
     }
 
-    /// Hand the parked lowering its `delivery`, then request each planned
-    /// type's lowering in turn: `Done` keeps its node, `Wait` parks the
-    /// lowering at the read it requests.
+    /// Hand the parked lowering its `delivery`, made for the body in the
+    /// canonical file paired with it, then request each planned type's
+    /// lowering in turn: `Done` keeps its node, `Wait` parks the lowering at
+    /// the read it requests.
     fn advance(
         &mut self,
         dispatch: &impl FlowDemandDriver,
-        delivery: Option<ReadDelivery>,
+        delivery: Option<(ReadDelivery, &str)>,
     ) -> ReadStep<()> {
         let lowered = &mut self.lowered;
         self.plan.with_dependent_mut(|plan, parked| {
-            if let Some(delivery) = delivery {
+            if let Some((delivery, canonical)) = delivery {
                 let lowering = parked
                     .as_mut()
                     .expect("a delivered read answers the parked lowering");
-                match dispatch.deliver_lowering(lowering, delivery) {
+                match dispatch.deliver_lowering(lowering, delivery, canonical) {
                     ReadStep::Wait(wait) => return ReadStep::Wait(provenance_wait(wait)),
                     ReadStep::Ready(node) => {
                         *parked = None;
@@ -736,7 +802,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                     let delivery = delivered
                         .take()
                         .expect("the lowering receives its requested read");
-                    return match self.dispatch.deliver_lowering(&mut lowering, delivery) {
+                    return match self.dispatch.deliver_lowering(
+                        &mut lowering,
+                        delivery,
+                        self.st.canonical,
+                    ) {
                         ReadStep::Wait(wait) => {
                             run.frames.push(HelperFrame::Lower(lowering));
                             ReadStep::Wait(wait)
@@ -766,7 +836,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                 HelperFrame::Provenance(mut frame) => {
                     let step = match frame.wait.take() {
                         Some(wait) => ReadStep::Wait(wait),
-                        None => frame.advance(self.dispatch, delivered.take()),
+                        None => frame.advance(
+                            self.dispatch,
+                            delivered
+                                .take()
+                                .map(|delivery| (delivery, self.st.canonical)),
+                        ),
                     };
                     return match step {
                         ReadStep::Ready(()) => {

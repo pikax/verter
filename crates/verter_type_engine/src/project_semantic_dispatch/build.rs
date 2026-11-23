@@ -8563,6 +8563,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 read: super::lower::LowerRead {
                     key,
                     shape: super::lower::LowerReadShape::Whole,
+                    made_in_operation: false,
                 },
                 finish,
             }),

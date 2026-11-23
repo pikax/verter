@@ -54,6 +54,96 @@ pub struct TypeLoweringTrace {
     pub requested: Vec<(SemanticQueryKey, LowerReadShape)>,
     pub substitutions: Vec<(Arc<str>, SemanticNodeId)>,
     pub first_advance_done: bool,
+    /// Per requested read: whether a held conditional decision named it.
+    pub from_decision: Vec<bool>,
+}
+
+/// What one read a lowering's held conditional decision made left in the
+/// observation of the decision operation that named it: whether the answer
+/// is partial and whether it may be reused, and whether that observation
+/// held each of those just before the read was made (`[0]`) and just after
+/// it (`[1]`), and the dependency facts the read observed while that
+/// observation was on top. A read made inside the operation carries its own
+/// partiality, reuse and dependency evidence into the observation; one
+/// answered ahead of the operation brings none.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecisionReadEvidence {
+    pub partial: bool,
+    pub suppressed: bool,
+    pub observed_partial: [bool; 2],
+    pub observed_suppressed: [bool; 2],
+    /// The distinct dependency facts observed while the read was made, in
+    /// canonical order.
+    pub dependencies: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+}
+
+/// One decision read being recorded: the decision observation's state
+/// before the read, and a passive fact recorder installed for the read's
+/// extent. A recorder changes nothing the tracers observe; dropping the
+/// recording removes it, unwinding included.
+#[cfg(any(test, feature = "test-support"))]
+pub(super) struct DecisionReadRecording {
+    before: (bool, bool),
+    recorder: Box<crate::fact_tracing::tracing::FactReadRecorder>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for DecisionReadRecording {
+    fn drop(&mut self) {
+        crate::fact_tracing::tracing::forget_recorder(&*self.recorder);
+    }
+}
+
+/// Who drives an observed owner-scope lowering
+/// ([`ProjectSemanticDispatch::observed_owner_lowering_for_tests`]).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerLoweringDriverForTests {
+    /// The native lowering, answering each read in place.
+    Native,
+    /// A flow body that suspends at each read: the root read answers the
+    /// request and the next step delivers the answer.
+    FlowRequested,
+    /// A flow body that cannot suspend: each read is answered at once.
+    FlowInPlace,
+}
+
+/// An owner-scope lowering run inside an enclosing observation.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ObservedOwnerLoweringForTests {
+    pub node: SemanticNodeId,
+    /// The partial reasons the enclosing observation holds once the
+    /// lowering is done, `None` when it is complete.
+    pub partial: Option<crate::semantic_query::PartialReasonSet>,
+    /// Each read a held conditional decision made, in order.
+    pub decision_reads: Vec<DecisionReadEvidence>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    /// The decision reads recorded on this thread while a recording is
+    /// armed ([`record_decision_reads_for_tests`]).
+    static DECISION_READS: std::cell::RefCell<Option<Vec<DecisionReadEvidence>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `body`, recording what each read a lowering's held conditional
+/// decision makes on this thread leaves in the decision's observation.
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn record_decision_reads_for_tests<R>(
+    body: impl FnOnce() -> R,
+) -> (R, Vec<DecisionReadEvidence>) {
+    let outer = DECISION_READS.with(|reads| reads.replace(Some(Vec::new())));
+    let value = body();
+    let recorded = DECISION_READS
+        .with(|reads| reads.replace(outer))
+        .unwrap_or_default();
+    (value, recorded)
 }
 
 /// The lowering context the explicit-stack positions of
@@ -95,6 +185,16 @@ enum LowerStep<'e> {
         Arc<FxHashMap<String, SemanticNodeId>>,
     ),
     Read(LowerRead),
+    /// A conditional branch its decision asked for, under the branch's
+    /// environment (`None`: the conditional's own). The cursor lowers it
+    /// under a validity rail of its own, so an execution abort raised while
+    /// it lowers is delivered to the decision with the branch
+    /// ([`BranchValidity`]).
+    Branch(
+        &'e TypeExpr,
+        ProjectionReductionContext,
+        Option<Arc<FxHashMap<String, SemanticNodeId>>>,
+    ),
 }
 
 /// A node of the explicit-stack lowering waiting for a child's value:
@@ -103,6 +203,9 @@ enum LowerFrame<'e> {
     Function(FunctionLowering<'e>),
     Mapped(MappedLowering<'e>, MappedAwait),
     Conditional(ConditionalLowering<'e>, ConditionalAwait),
+    /// A conditional whose decision asked for a branch: the frame waits
+    /// for that branch's node.
+    Decision(Box<DecisionLowering<'e>>),
     ImportTail(super::carrier::QualifiedTail),
     Environment(Option<Arc<FxHashMap<String, SemanticNodeId>>>),
     Read(LowerReadResume<'e>),
@@ -202,6 +305,103 @@ impl<'e> ConditionalLowering<'e> {
     }
 }
 
+/// A conditional whose operands are lowered, holding its decision between
+/// the decision's reads and the branches it asks for.
+struct DecisionLowering<'e> {
+    decision: super::conditional_decision::ConditionalDecision,
+    true_type: &'e TypeExpr,
+    false_type: &'e TypeExpr,
+    context: ProjectionReductionContext,
+    /// Each branch once lowered, false then true. A branch the decision
+    /// asks for again (both branches, the `any` row, every distributed
+    /// member) is delivered from here, so it lowers at most once.
+    lowered: [Option<SemanticNodeId>; 2],
+    /// The `infer` binders the extends pattern declares: the true branch
+    /// lowers with a reference to each in its environment.
+    declarations: Vec<(Arc<str>, crate::semantic_query::InferBinderId)>,
+    /// The false branch's environment, in which those binders are out of
+    /// scope.
+    out_of_scope: Option<Arc<FxHashMap<String, SemanticNodeId>>>,
+    /// The branch this frame waits for while it is lowered, under the
+    /// cursor's innermost [`BranchValidity`] rail.
+    awaiting: bool,
+    /// Whether this decision entered the in-place driver's connected
+    /// demand, and so leaves it with its answer.
+    holds_demand: bool,
+}
+
+/// Who keeps the connected demand open while the lowering holds an
+/// operation across a read: a substitution walk standing at its template
+/// read, or a conditional decision standing at a read or a branch.
+pub(super) enum LowerDemand<'s, 'g> {
+    /// A suspending holder keeps it open for the lowering's whole extent.
+    Held,
+    /// An in-place driver's slots, each held over the span its native
+    /// counterpart holds it.
+    InPlace(&'s mut InPlaceLowerDemand<'g>),
+}
+
+/// An in-place lowering driver's connected-demand slots.
+#[derive(Default)]
+pub(super) struct InPlaceLowerDemand<'g> {
+    /// A substitution walk's, from its start to its answer
+    /// (`InstantiationDemand::InPlace`).
+    substitution: Option<super::connected_demand::ConnectedDemandGuard<'g>>,
+    /// The outermost held decision's, from its start to its answer, the
+    /// span the native decision driver holds it. A decision lowered in one
+    /// of its branches finds it open.
+    decision: Option<super::connected_demand::ConnectedDemandGuard<'g>>,
+}
+
+impl<'g> LowerDemand<'_, 'g> {
+    /// The same holder, for one more step.
+    fn reborrow(&mut self) -> LowerDemand<'_, 'g> {
+        match self {
+            Self::Held => LowerDemand::Held,
+            Self::InPlace(slots) => LowerDemand::InPlace(slots),
+        }
+    }
+
+    /// Who keeps the demand an instantiation's substitution records into.
+    fn instantiation(&mut self) -> super::explicit_instantiation::InstantiationDemand<'_, 'g> {
+        match self {
+            Self::Held => super::explicit_instantiation::InstantiationDemand::Held,
+            Self::InPlace(slots) => {
+                super::explicit_instantiation::InstantiationDemand::InPlace(&mut slots.substitution)
+            }
+        }
+    }
+
+    /// Before a decision starts: an in-place driver enters the demand
+    /// unless an enclosing decision holds it. Whether this one entered it.
+    fn enter_decision<C: crate::resolver_core::ResolverCapabilities>(
+        &mut self,
+        dispatch: &'g ProjectSemanticDispatch<'_, C>,
+    ) -> bool {
+        match self {
+            Self::InPlace(slots) if slots.decision.is_none() => {
+                slots.decision = Some(dispatch.enter_connected_demand(false).0);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Once the decision that entered the demand answers.
+    fn leave_decision(&mut self) {
+        if let Self::InPlace(slots) = self {
+            slots.decision = None;
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    /// The branches lowered conditionals descended into, false then true.
+    static CONDITIONAL_BRANCH_DESCENTS: std::cell::Cell<[usize; 2]> =
+        const { std::cell::Cell::new([0; 2]) };
+}
+
 enum MappedAwait {
     Source,
     Value,
@@ -281,6 +481,7 @@ struct TypeLowerCursor<'e> {
     frames: LowerFrames<'e>,
     next: Option<(&'e TypeExpr, ProjectionReductionContext)>,
     environment: Option<Arc<FxHashMap<String, SemanticNodeId>>>,
+    branches: BranchValidity,
 }
 
 impl<'e> TypeLowerCursor<'e> {
@@ -289,7 +490,70 @@ impl<'e> TypeLowerCursor<'e> {
             frames: LowerFrames::new(),
             next: Some((expr, context)),
             environment: None,
+            branches: BranchValidity::default(),
         }
+    }
+}
+
+/// The execution validity of the conditional branches a lowering is in,
+/// outermost first: one rail per `LowerFrame::Decision` waiting for its
+/// branch, in the same order as those frames.
+///
+/// A branch lowers between two advances of its decision, outside every
+/// observation the asking operation holds, so an abort raised while it
+/// lowers (a read it makes found its view superseded) would otherwise
+/// reach only whatever validity scope encloses the whole lowering, if any,
+/// and the decision would resume as though the branch were sound. The
+/// branch's rail records that abort instead, and the decision receives it
+/// as a value with the branch: the asking operation observes it where it
+/// would have had it lowered the branch itself, so the decision aborts.
+///
+/// Only the innermost rail is on the thread's validity stack while the
+/// lowering runs, attached for each advance and detached between them, so
+/// an advance costs the same however deeply branches nest. An outer rail
+/// learns of an inner branch's abort through the inner decision, which
+/// observes its own abort once its rail has ended and the outer one is
+/// attached again.
+#[derive(Default)]
+struct BranchValidity {
+    rails: Vec<crate::request_context::HeldValidity>,
+}
+
+impl BranchValidity {
+    /// An advance begins: the innermost branch's rail observes it.
+    fn attach(&mut self) {
+        if let Some(rail) = self.rails.last_mut() {
+            rail.attach();
+        }
+    }
+
+    /// An advance ends at a read or with the lowering's value.
+    fn detach(&mut self) {
+        if let Some(rail) = self.rails.last_mut() {
+            rail.detach();
+        }
+    }
+
+    /// A branch starts lowering: its rail inherits the abort of the
+    /// execution active now, the enclosing branch's included, and takes
+    /// that branch's place on the thread.
+    fn open(&mut self) {
+        let mut rail = crate::request_context::HeldValidity::open();
+        if let Some(enclosing) = self.rails.last_mut() {
+            enclosing.detach();
+        }
+        rail.attach();
+        self.rails.push(rail);
+    }
+
+    /// The branch is lowered: the abort raised while it lowered, for its
+    /// decision. The enclosing branch's rail observes what follows.
+    fn end(&mut self) -> Option<crate::semantic_query::ExecutionAbort> {
+        let abort = self.rails.pop().expect("a lowered branch's rail").end();
+        if let Some(enclosing) = self.rails.last_mut() {
+            enclosing.attach();
+        }
+        abort
     }
 }
 
@@ -301,9 +565,12 @@ impl<'e> TypeLowerCursor<'e> {
 /// substitution walk's template read with the walk's cost recordings open
 /// on that demand, and a root demand the read entered instead would clear
 /// them, so the completed substitution could not publish its priced memo
-/// entry. The read itself holds no guard. The in-place drivers instead hold
-/// it exactly around each substitution, where the public substitution entry
-/// does.
+/// entry. A conditional's decision likewise stands at its structural-fact
+/// and deferred-evaluation reads with their cost scopes open. The read
+/// itself holds no guard. The in-place drivers instead hold it exactly
+/// around each substitution, where the public substitution entry does, and
+/// around each held decision, from its start to its answer, where the native
+/// decision driver does ([`LowerDemand`]).
 pub(super) struct TypeLowerRead<'e> {
     cursor: TypeLowerCursor<'e>,
     infer_binders: crate::semantic_query::InferBinderFactory,
@@ -316,6 +583,13 @@ static_assertions::assert_not_impl_any!(TypeLowerRead<'_>: Clone, Copy);
 pub(super) struct LowerRead {
     pub(super) key: SemanticQueryKey,
     pub(super) shape: LowerReadShape,
+    /// The read is made inside the held operation that named it (a
+    /// conditional decision's), not answered ahead of it: a holder that
+    /// answers the lowering's reads hands it back unanswered and makes it
+    /// inside the delivery, so what answering it observes (its partiality
+    /// and its reuse evidence) lands in that operation's observation.
+    /// Every other read's answer is taken once, as delivered.
+    pub(super) made_in_operation: bool,
 }
 
 /// An answer to the last yielded read, retaining its original envelope.
@@ -359,6 +633,9 @@ enum LowerReadResume<'e> {
         arguments: &'e [TypeExpr],
         context: ProjectionReductionContext,
     },
+    /// A conditional whose decision named a read: the delivery is consumed
+    /// inside the decision's operation that named it.
+    Decision(Box<DecisionLowering<'e>>),
 }
 
 /// Owned scope data for a lowering whose caller did not supply a context.
@@ -1438,7 +1715,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let _demand = self.enter_connected_demand(false).0;
         let mut read = self.begin_type_lowering(expr, scope, reduction_context);
         let mut requested = Vec::new();
-        let mut progress = self.advance_type_lowering(&lowering, &mut read, None);
+        let mut from_decision = Vec::new();
+        let mut progress =
+            self.advance_type_lowering(&lowering, &mut read, None, LowerDemand::Held);
         let first_advance_done = matches!(progress, LowerProgress::Done(_));
         loop {
             match progress {
@@ -1448,15 +1727,90 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         requested,
                         substitutions: read.substitutions,
                         first_advance_done,
+                        from_decision,
                     }
                 }
                 LowerProgress::Read(request) => {
                     requested.push((request.key.clone(), request.shape));
-                    let delivered = self.answer_lower_read(request);
-                    progress = self.advance_type_lowering(&lowering, &mut read, Some(delivered));
+                    from_decision.push(request.made_in_operation);
+                    let mut request = Some(request);
+                    let mut answer =
+                        || self.answer_lower_read(request.take().expect("a read is answered once"));
+                    progress = self.advance_type_lowering(
+                        &lowering,
+                        &mut read,
+                        Some(&mut answer),
+                        LowerDemand::Held,
+                    );
                 }
             }
         }
+    }
+
+    /// The branches lowered conditionals on this thread descended into,
+    /// false then true.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn conditional_branch_descents_for_tests() -> [usize; 2] {
+        CONDITIONAL_BRANCH_DESCENTS.with(std::cell::Cell::get)
+    }
+
+    /// Whether the build-local frame on top (a held decision operation's
+    /// observation, while the operation makes a read) holds a partial
+    /// answer, and whether it holds a non-reusable one.
+    #[cfg(any(test, feature = "test-support"))]
+    fn decision_observation_for_tests(&self) -> (bool, bool) {
+        self.build_local_taint
+            .borrow()
+            .last()
+            .map_or((false, false), |top| {
+                (top.result_is_partial, top.cache_suppress)
+            })
+    }
+
+    /// Begin recording, while a recording is armed, the decision read about
+    /// to be made: the decision observation's state now, and a fact
+    /// recorder for the read's extent.
+    #[cfg(any(test, feature = "test-support"))]
+    fn begin_decision_read_for_tests(&self) -> Option<DecisionReadRecording> {
+        if DECISION_READS.with(|reads| reads.borrow().is_none()) {
+            return None;
+        }
+        let before = self.decision_observation_for_tests();
+        let recorder = Box::<crate::fact_tracing::tracing::FactReadRecorder>::default();
+        crate::fact_tracing::tracing::attach_recorder(&recorder);
+        Some(DecisionReadRecording { before, recorder })
+    }
+
+    /// Record what the decision read `read` left in the observation
+    /// `recording` began at, with the dependency facts observed meanwhile.
+    #[cfg(any(test, feature = "test-support"))]
+    fn record_decision_read_for_tests(
+        &self,
+        recording: Option<DecisionReadRecording>,
+        read: &crate::semantic_query::CacheRead<
+            QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
+    ) {
+        let Some(mut recording) = recording else {
+            return;
+        };
+        crate::fact_tracing::tracing::forget_recorder(&*recording.recorder);
+        let (dependencies, _) = std::mem::take(&mut *recording.recorder).into_parts();
+        let before = recording.before;
+        let after = self.decision_observation_for_tests();
+        let evidence = DecisionReadEvidence {
+            partial: read.result_is_partial(),
+            suppressed: read.cache_suppress,
+            observed_partial: [before.0, after.0],
+            observed_suppressed: [before.1, after.1],
+            dependencies,
+        };
+        DECISION_READS.with(|reads| {
+            if let Some(reads) = reads.borrow_mut().as_mut() {
+                reads.push(evidence);
+            }
+        });
     }
 
     construction_ordinal_seam! {
@@ -1508,8 +1862,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// delivered. Children are lowered in the order, and under the
     /// contexts, the node's own lowering demands them, so every intern,
     /// query and substitution happens in the same sequence as a recursive
-    /// descent would make it. Conditional decisions and branch callbacks stay
-    /// in place; other leaf forms use [`Self::lower_type_expr_leaf`].
+    /// descent would make it. A conditional holds its decision in a frame
+    /// (`LowerFrame::Decision`): the decision's reads are this lowering's
+    /// reads, and the branches it asks for are its children. Other leaf
+    /// forms use [`Self::lower_type_expr_leaf`].
+    ///
+    /// The caller lends the infer factory, so this driver advances the
+    /// cursor itself rather than through an owned [`TypeLowerRead`].
     #[allow(clippy::too_many_arguments)]
     pub(super) fn lower_type_expr_with_infer_factory(
         &self,
@@ -1531,19 +1890,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             shadowing,
         };
         let mut cursor = TypeLowerCursor::new(expr, reduction_context);
-        let mut delivered = None;
-        let mut demand = None;
+        let mut pending = None;
+        let mut demand = InPlaceLowerDemand::default();
         loop {
-            match self.advance_type_lowering_cursor(
-                &lowering,
-                infer_binders,
-                &mut cursor,
-                substitutions,
-                delivered.take(),
-                super::explicit_instantiation::InstantiationDemand::InPlace(&mut demand),
-            ) {
+            let progress = match pending.take() {
+                None => self.advance_type_lowering_cursor(
+                    &lowering,
+                    infer_binders,
+                    &mut cursor,
+                    substitutions,
+                    None,
+                    LowerDemand::InPlace(&mut demand),
+                ),
+                Some(request) => {
+                    let mut request = Some(request);
+                    let mut answer =
+                        || self.answer_lower_read(request.take().expect("a read is answered once"));
+                    self.advance_type_lowering_cursor(
+                        &lowering,
+                        infer_binders,
+                        &mut cursor,
+                        substitutions,
+                        Some(&mut answer),
+                        LowerDemand::InPlace(&mut demand),
+                    )
+                }
+            };
+            match progress {
                 LowerProgress::Done(node) => return node,
-                LowerProgress::Read(request) => delivered = Some(self.answer_lower_read(request)),
+                LowerProgress::Read(request) => pending = Some(request),
             }
         }
     }
@@ -1562,12 +1937,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Lend the context for one advance; no dispatcher borrow survives it.
-    /// The caller keeps the connected demand open for the lowering's extent.
-    pub(super) fn advance_type_lowering(
-        &self,
+    /// `delivered` answers the read the last advance yielded, called once
+    /// inside the operation that named it. `demand` says who keeps the
+    /// connected demand open across a held operation's reads: a suspending
+    /// holder keeps it open for the lowering's extent (`Held`), an in-place
+    /// driver lends its slots.
+    pub(super) fn advance_type_lowering<'g>(
+        &'g self,
         lowering: &TypeExprLowering<'_>,
         read: &mut TypeLowerRead<'_>,
-        delivered: Option<LowerDelivery>,
+        delivered: Option<&mut dyn FnMut() -> LowerDelivery>,
+        demand: LowerDemand<'_, 'g>,
     ) -> LowerProgress {
         self.advance_type_lowering_cursor(
             lowering,
@@ -1575,7 +1955,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &mut read.cursor,
             &mut read.substitutions,
             delivered,
-            super::explicit_instantiation::InstantiationDemand::Held,
+            demand,
         )
     }
 
@@ -1594,19 +1974,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         lowering: &TypeExprLowering<'_>,
         read: &mut TypeLowerRead<'_>,
     ) -> SemanticNodeId {
-        let mut delivered = None;
-        let mut demand = None;
+        let mut pending = None;
+        let mut demand = InPlaceLowerDemand::default();
         loop {
-            match self.advance_type_lowering_cursor(
-                lowering,
-                &read.infer_binders,
-                &mut read.cursor,
-                &mut read.substitutions,
-                delivered.take(),
-                super::explicit_instantiation::InstantiationDemand::InPlace(&mut demand),
-            ) {
+            let progress = match pending.take() {
+                None => self.advance_type_lowering(
+                    lowering,
+                    read,
+                    None,
+                    LowerDemand::InPlace(&mut demand),
+                ),
+                Some(request) => {
+                    let mut request = Some(request);
+                    let mut answer =
+                        || self.answer_lower_read(request.take().expect("a read is answered once"));
+                    self.advance_type_lowering(
+                        lowering,
+                        read,
+                        Some(&mut answer),
+                        LowerDemand::InPlace(&mut demand),
+                    )
+                }
+            };
+            match progress {
                 LowerProgress::Done(node) => return node,
-                LowerProgress::Read(request) => delivered = Some(self.answer_lower_read(request)),
+                LowerProgress::Read(request) => pending = Some(request),
             }
         }
     }
@@ -1617,10 +2009,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         infer_binders: &crate::semantic_query::InferBinderFactory,
         cursor: &mut TypeLowerCursor<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        delivered: Option<LowerDelivery>,
-        mut demand: super::explicit_instantiation::InstantiationDemand<'_, 'g>,
+        delivered: Option<&mut dyn FnMut() -> LowerDelivery>,
+        mut demand: LowerDemand<'_, 'g>,
     ) -> LowerProgress {
-        let mut step = if let Some(delivery) = delivered {
+        cursor.branches.attach();
+        let mut step = if let Some(deliver) = delivered {
             let Some(LowerFrame::Read(resume)) = cursor.frames.pop() else {
                 panic!("lowering received an answer without a pending read");
             };
@@ -1631,7 +2024,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.resume_lower_read(
                 &scoped,
                 resume,
-                delivery,
+                deliver,
                 &mut cursor.frames,
                 demand.reborrow(),
             )
@@ -1655,7 +2048,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         loop {
             match step {
-                LowerStep::Read(request) => return LowerProgress::Read(request),
+                LowerStep::Read(request) => {
+                    cursor.branches.detach();
+                    return LowerProgress::Read(request);
+                }
+                LowerStep::Branch(expr, context, env) => {
+                    cursor.branches.open();
+                    step = match env {
+                        Some(env) => LowerStep::Scoped(expr, context, env),
+                        None => LowerStep::Descend(expr, context),
+                    };
+                }
                 LowerStep::Scoped(expr, context, env) => {
                     let previous = cursor.environment.replace(env);
                     cursor.frames.push(LowerFrame::Environment(previous));
@@ -1677,6 +2080,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 LowerStep::Value(value) => {
                     let Some(frame) = cursor.frames.pop() else {
+                        verter_debug_assert!(
+                            cursor.branches.rails.is_empty(),
+                            "every branch rail ends with its branch"
+                        );
                         return LowerProgress::Done(value);
                     };
                     if let LowerFrame::Environment(previous) = frame {
@@ -1688,6 +2095,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         env: cursor.environment.as_deref().unwrap_or(lowering.env),
                         ..*lowering
                     };
+                    if let LowerFrame::Decision(mut state) = frame {
+                        // The branch is lowered: deliver it with the abort
+                        // its lowering raised, to the operation that asked.
+                        let abort = cursor.branches.end();
+                        state.lowered[usize::from(state.awaiting)] = Some(value);
+                        step = self.advance_decision_lowering(
+                            &scoped,
+                            state,
+                            Some(super::conditional_decision::DecisionDelivery::Branch {
+                                node: value,
+                                abort,
+                            }),
+                            &mut cursor.frames,
+                            demand.reborrow(),
+                        );
+                        continue;
+                    }
                     step = self.resume_type_expr_frame(
                         &scoped,
                         infer_binders,
@@ -1706,11 +2130,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &'g self,
         lowering: &TypeExprLowering<'_>,
         resume: LowerReadResume<'e>,
-        delivery: LowerDelivery,
+        deliver: &mut dyn FnMut() -> LowerDelivery,
         frames: &mut LowerFrames<'e>,
-        demand: super::explicit_instantiation::InstantiationDemand<'_, 'g>,
+        mut demand: LowerDemand<'_, 'g>,
     ) -> LowerStep<'e> {
-        match (resume, delivery) {
+        let resume = match resume {
+            // The decision makes the read inside its operation, under that
+            // operation's held observations.
+            LowerReadResume::Decision(state) => {
+                let mut answer = || {
+                    #[cfg(any(test, feature = "test-support"))]
+                    let recording = self.begin_decision_read_for_tests();
+                    let read = match deliver() {
+                        LowerDelivery::Whole(read) => read,
+                        LowerDelivery::Node(_) => panic!("a decision reads a whole answer"),
+                    };
+                    #[cfg(any(test, feature = "test-support"))]
+                    self.record_decision_read_for_tests(recording, &read);
+                    super::narrow_value_cache_read(read)
+                };
+                return self.advance_decision_lowering(
+                    lowering,
+                    state,
+                    Some(super::conditional_decision::DecisionDelivery::Read(
+                        &mut answer,
+                    )),
+                    frames,
+                    demand,
+                );
+            }
+            resume => resume,
+        };
+        match (resume, deliver()) {
             (
                 LowerReadResume::TypeofInstantiation {
                     mut instantiation,
@@ -1726,7 +2177,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         read.take()
                             .expect("an instantiation consumes its delivery once")
                     },
-                    demand,
+                    demand.instantiation(),
                 );
                 Self::lower_typeof_instantiation_step(instantiation, arguments, step, frames)
             }
@@ -1840,6 +2291,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 LowerStep::Read(LowerRead {
                     key,
                     shape: LowerReadShape::Whole,
+                    made_in_operation: false,
                 })
             }
         }
@@ -1859,6 +2311,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 LowerStep::Read(LowerRead {
                     key,
                     shape: LowerReadShape::Whole,
+                    made_in_operation: false,
                 })
             }
         }
@@ -1963,6 +2416,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         LowerStep::Read(LowerRead {
                             key,
                             shape: LowerReadShape::Whole,
+                            made_in_operation: false,
                         })
                     }
                 }
@@ -2013,6 +2467,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         LowerStep::Read(LowerRead {
                             key,
                             shape: LowerReadShape::Whole,
+                            made_in_operation: false,
                         })
                     }
                 }
@@ -2043,6 +2498,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 LowerStep::Read(LowerRead {
                     key,
                     shape: LowerReadShape::Node,
+                    made_in_operation: false,
                 })
             }
             TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => match arms.first() {
@@ -2200,14 +2656,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    fn resume_conditional_lowering<'e>(
-        &self,
+    fn resume_conditional_lowering<'e, 'g>(
+        &'g self,
         lowering: &TypeExprLowering<'_>,
         infer_binders: &crate::semantic_query::InferBinderFactory,
         pending: (ConditionalLowering<'e>, ConditionalAwait),
         value: SemanticNodeId,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         frames: &mut LowerFrames<'e>,
+        mut demand: LowerDemand<'_, 'g>,
     ) -> LowerStep<'e> {
         let (mut state, awaiting) = pending;
         let TypeExpr::Conditional { extends, .. } = state.expr else {
@@ -2242,13 +2698,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.commit_conditional_infer(lowering, &mut state, Some(value))
             }
             ConditionalAwait::Extends => {
-                return LowerStep::Value(self.finish_conditional_lowering(
+                let holds_demand = demand.enter_decision(self);
+                return self.begin_decision_lowering(
                     lowering,
-                    infer_binders,
                     state,
                     value,
-                    substitutions,
-                ))
+                    holds_demand,
+                    frames,
+                    demand,
+                );
             }
         }
         self.advance_conditional_extends(lowering, infer_binders, state, frames)
@@ -2312,14 +2770,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    fn finish_conditional_lowering(
-        &self,
+    /// After both operands are lowered, hold the conditional's decision in
+    /// this lowering and step it.
+    fn begin_decision_lowering<'e, 'g>(
+        &'g self,
         lowering: &TypeExprLowering<'_>,
-        infer_binders: &crate::semantic_query::InferBinderFactory,
-        state: ConditionalLowering<'_>,
+        state: ConditionalLowering<'e>,
         extends_id: SemanticNodeId,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-    ) -> SemanticNodeId {
+        holds_demand: bool,
+        frames: &mut LowerFrames<'e>,
+        demand: LowerDemand<'_, 'g>,
+    ) -> LowerStep<'e> {
         let TypeExpr::Conditional {
             check,
             true_type,
@@ -2329,80 +2790,143 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         else {
             unreachable!()
         };
-        let graph = self.graph();
-        let env = lowering.env;
-        let scope = lowering.scope;
-        let name_resolution = lowering.name_resolution;
-        let scope_payload = lowering.scope_payload;
-        let shadowing = lowering.shadowing;
         let check_id = state.check.expect("conditional check");
-        let reduction_context = state.context;
-        let declarations = state.declarations;
-        let out_of_scope_env = state.out_of_scope.as_deref();
-        let mut lowered = [None, None];
-        let output = self.build_conditional_from_lowering(
+        // A naked type parameter as the check type distributes it, an
+        // `infer` placeholder of an enclosing conditional among them
+        // (`X extends infer K ? K extends "a" ? 1 : 0 : 2` distributes over
+        // the `K` it binds).
+        let distributive = matches!(check.as_ref(), TypeExpr::TypeParameter(_))
+            || matches!(
+                self.graph().node_data(check_id).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::InferRef { .. })
+            );
+        let decision = self.begin_conditional_decision(
             check_id,
             extends_id,
-            // A naked type parameter as the check type distributes
-            // it, an `infer` placeholder of an enclosing conditional
-            // among them (`X extends infer K ? K extends "a" ? 1 : 0
-            // : 2` distributes over the `K` it binds).
-            matches!(check.as_ref(), TypeExpr::TypeParameter(_))
-                || matches!(
-                    graph.node_data(check_id).as_deref(),
-                    Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::InferRef { .. })
-                ),
-            &mut |take_true| {
-                let index = usize::from(take_true);
-                if let Some(node) = lowered[index] {
-                    return node;
-                }
-                if self.cancellation.is_cancelled() {
-                    return self.opaque(QueryError::Miss);
-                }
-                let mut true_env;
-                let branch_env = if take_true && !declarations.is_empty() {
-                    true_env = env.clone();
-                    for (name, binder) in &declarations {
-                        let reference = graph.intern_node_with_scope(
-                            SemanticNodeData::InferRef {
-                                name: OwnedStr::from(name),
-                                binder: binder.clone(),
-                            },
-                            scope.clone(),
-                        );
-                        true_env.insert(name.to_string(), reference);
+            distributive,
+            super::conditional_decision::DecisionBranches::Lowered,
+            super::helper_continuation::HelperDrive::InPlace,
+        );
+        let state = Box::new(DecisionLowering {
+            decision,
+            true_type,
+            false_type,
+            context: state.context,
+            lowered: [None; 2],
+            declarations: state.declarations,
+            out_of_scope: state.out_of_scope,
+            awaiting: false,
+            holds_demand,
+        });
+        self.advance_decision_lowering(lowering, state, None, frames, demand)
+    }
+
+    /// Advance the held decision with `delivered`. A read it names is this
+    /// lowering's own whole read, answered inside the operation that named
+    /// it. A branch it asks for is delivered from the branch memo, or
+    /// lowered as this frame's child under that branch's environment: the
+    /// true branch's binds each `infer` declaration of the extends pattern,
+    /// and the false branch's puts them out of scope. A lowered branch is
+    /// delivered with the execution abort raised while it lowered
+    /// ([`BranchValidity`]).
+    fn advance_decision_lowering<'e, 'g>(
+        &'g self,
+        lowering: &TypeExprLowering<'_>,
+        mut state: Box<DecisionLowering<'e>>,
+        mut delivered: Option<super::conditional_decision::DecisionDelivery<'_>>,
+        frames: &mut LowerFrames<'e>,
+        mut demand: LowerDemand<'_, 'g>,
+    ) -> LowerStep<'e> {
+        use super::conditional_decision::{DecisionDelivery, DecisionStep};
+        loop {
+            match self.advance_conditional_decision(&mut state.decision, delivered.take()) {
+                DecisionStep::Done(output) => {
+                    if state.holds_demand {
+                        demand.leave_decision();
                     }
-                    &true_env
-                } else if take_true {
-                    env
-                } else {
-                    out_of_scope_env.unwrap_or(env)
-                };
-                let node = self.lower_type_expr_with_infer_factory(
-                    infer_binders,
-                    if take_true { true_type } else { false_type },
-                    branch_env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    substitutions,
-                    reduction_context,
-                );
-                lowered[index] = Some(node);
-                node
-            },
-        );
-        self.deposit_operand_self_roots(&output.observed_self_roots);
-        self.fold_into_top_build_local_taint_with(
-            output.result_is_partial(),
-            output.cache_suppress,
-            output.partial_reasons(),
-        );
-        match output.result {
-            QueryResult::Value(node) => node,
-            _ => self.opaque(QueryError::Miss),
+                    self.deposit_operand_self_roots(&output.observed_self_roots);
+                    self.fold_into_top_build_local_taint_with(
+                        output.result_is_partial(),
+                        output.cache_suppress,
+                        output.partial_reasons(),
+                    );
+                    return LowerStep::Value(match output.result {
+                        QueryResult::Value(node) => node,
+                        _ => self.opaque(QueryError::Miss),
+                    });
+                }
+                DecisionStep::Read(key) => {
+                    // Counted where the decision names it, as the in-place
+                    // decision driver counts it, before the answer.
+                    if Self::decision_reads_for_carrier(&state.decision)
+                        && !matches!(*key, SemanticQueryKey::TypeOf { .. })
+                    {
+                        self.record_dispatch_intent_counters(&key);
+                    }
+                    #[cfg(any(test, feature = "test-support"))]
+                    super::raise::DISPATCH_TRACE.with(|trace| {
+                        trace
+                            .borrow_mut()
+                            .push(super::raise::query_key_discriminant(&key))
+                    });
+                    frames.push(LowerFrame::Read(LowerReadResume::Decision(state)));
+                    return LowerStep::Read(LowerRead {
+                        key: *key,
+                        shape: LowerReadShape::Whole,
+                        made_in_operation: true,
+                    });
+                }
+                DecisionStep::Branch(take_true) => {
+                    let index = usize::from(take_true);
+                    if let Some(node) = state.lowered[index] {
+                        // The abort its lowering raised went with its
+                        // first delivery.
+                        delivered = Some(DecisionDelivery::Branch { node, abort: None });
+                        continue;
+                    }
+                    if self.cancellation.is_cancelled() {
+                        // Answered, never memoized.
+                        delivered = Some(DecisionDelivery::Branch {
+                            node: self.opaque(QueryError::Miss),
+                            abort: None,
+                        });
+                        continue;
+                    }
+                    #[cfg(any(test, feature = "test-support"))]
+                    CONDITIONAL_BRANCH_DESCENTS.with(|descents| {
+                        let mut counted = descents.get();
+                        counted[index] += 1;
+                        descents.set(counted);
+                    });
+                    state.awaiting = take_true;
+                    let branch = if take_true {
+                        state.true_type
+                    } else {
+                        state.false_type
+                    };
+                    let context = state.context;
+                    let environment = if !take_true {
+                        state.out_of_scope.clone()
+                    } else if state.declarations.is_empty() {
+                        None
+                    } else {
+                        let mut bound = lowering.env.clone();
+                        for (name, binder) in &state.declarations {
+                            let reference = self.graph().intern_node_with_scope(
+                                SemanticNodeData::InferRef {
+                                    name: OwnedStr::from(name),
+                                    binder: binder.clone(),
+                                },
+                                lowering.scope.clone(),
+                            );
+                            bound.insert(name.to_string(), reference);
+                        }
+                        Some(Arc::new(bound))
+                    };
+                    frames.push(LowerFrame::Decision(state));
+                    return LowerStep::Branch(branch, context, environment);
+                }
+            }
         }
     }
 
@@ -2575,6 +3099,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         return LowerStep::Read(LowerRead {
                             key,
                             shape: LowerReadShape::Node,
+                            made_in_operation: false,
                         });
                     } else {
                         state.key_space = Some(match graph.node_data(value).as_deref() {
@@ -2756,6 +3281,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 context: reduction_context,
             },
             shape: LowerReadShape::Node,
+            made_in_operation: false,
         })
     }
 
@@ -3181,7 +3707,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         value: SemanticNodeId,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         frames: &mut LowerFrames<'e>,
-        demand: super::explicit_instantiation::InstantiationDemand<'_, 'g>,
+        mut demand: LowerDemand<'_, 'g>,
     ) -> LowerStep<'e> {
         let graph = self.graph();
         match frame {
@@ -3197,9 +3723,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 infer_binders,
                 (state, awaiting),
                 value,
-                substitutions,
                 frames,
+                demand,
             ),
+            LowerFrame::Decision(_) => {
+                unreachable!("the cursor delivers a branch with its validity")
+            }
             LowerFrame::ImportTail(tail) => {
                 let key = tail.key(value);
                 self.record_carrier_resolution_read_intent(&key);
@@ -3208,6 +3737,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 LowerStep::Read(LowerRead {
                     key,
                     shape: LowerReadShape::Whole,
+                    made_in_operation: false,
                 })
             }
             LowerFrame::Read(_) => unreachable!("a query frame needs a shaped delivery"),
@@ -3235,7 +3765,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &mut instantiation,
                             base,
                             &lowered,
-                            demand,
+                            demand.instantiation(),
                         );
                         Self::lower_typeof_instantiation_step(instantiation, lowered, step, frames)
                     }
@@ -3789,6 +4319,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     context: reduction_context,
                 },
                 shape: LowerReadShape::Node,
+                made_in_operation: false,
             })
         } else {
             LowerStep::Value(match graph.node_data(base_id).as_deref() {
@@ -3862,6 +4393,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             LowerStep::Read(LowerRead {
                 key,
                 shape: LowerReadShape::Node,
+                made_in_operation: false,
             })
         }
     }
