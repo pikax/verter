@@ -1507,6 +1507,67 @@ fn a_cancelled_decision_keeps_its_undelivered_branch_abort() {
 const UNREADABLE_ARM_DECLARATION: &str =
     "export type Dom<T> = typeof globalThis extends { window: unknown } ? T : never;\n";
 
+/// Lower `"a" extends string | Dom<1> ? 1 : 2` in the owner scope of a
+/// file declaring the unreadable `Dom`, driven by `driver`, with each read
+/// its held decision makes delivered eagerly (answered ahead of the
+/// decision and taken once) when `eager`, and render the node.
+fn lower_unreadable_arm_conditional(
+    driver: verter_type_engine::project_semantic_dispatch::lower::OwnerLoweringDriverForTests,
+    eager: bool,
+) -> (
+    String,
+    verter_type_engine::project_semantic_dispatch::lower::ObservedOwnerLoweringForTests,
+) {
+    let expr = conditional(
+        TypeExpr::string_literal("a"),
+        TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::String),
+            named("Dom", vec![TypeExpr::number_literal(1.0)]),
+        ]),
+        TypeExpr::number_literal(1.0),
+        TypeExpr::number_literal(2.0),
+    );
+    let host = host();
+    host.test_force
+        .engine
+        .eager_lowering_decision_reads_for_tests
+        .store(eager, std::sync::atomic::Ordering::Relaxed);
+    upsert_ts(&host, "/lower.ts", UNREADABLE_ARM_DECLARATION);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _construction = dispatch.enter_construction_scope();
+    let observed = dispatch.observed_owner_lowering_for_tests(
+        "/lower.ts",
+        &expr,
+        ProjectionReductionContext::structural_transit(),
+        driver,
+    );
+    let text = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+        &dispatch,
+        observed.node,
+        0,
+    );
+    (text, observed)
+}
+
+/// Whether every read the lowering's held decision made left its evidence
+/// in the decision's observation: some partial read turned that complete
+/// observation partial, every partial read observed its dependencies while
+/// the observation was on top and left it partial, and every non-reusable
+/// read left it non-reusable.
+fn decision_evidence_is_inside_the_decision(
+    observed: &verter_type_engine::project_semantic_dispatch::lower::ObservedOwnerLoweringForTests,
+) -> bool {
+    observed
+        .decision_reads
+        .iter()
+        .any(|read| read.partial && !read.observed_partial[0])
+        && observed.decision_reads.iter().all(|read| {
+            (!read.partial || !read.dependencies.is_empty())
+                && (!read.partial || read.observed_partial[1])
+                && (!read.suppressed || read.observed_suppressed[1])
+        })
+}
+
 /// A conditional held by a lowering that a flow body drives makes each
 /// read its decision names inside the decision operation that named it,
 /// whether the body suspends at the read (its root read answering the
@@ -1517,41 +1578,11 @@ const UNREADABLE_ARM_DECLARATION: &str =
 /// leaves the operand preparation incomplete, so the written
 /// `string` arm proves the true branch and the unused operands contribute
 /// only their reuse evidence: the flow-driven lowering answers what the
-/// native lowering answers, as completely. A read answered ahead of the
-/// decision instead lands its dependencies and partiality in the enclosing
-/// build and none in the decision's observation: the same flow lowering
-/// driven that way fails the per-read assertions.
+/// native lowering answers, as completely.
 #[test]
 fn a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decision() {
     use verter_type_engine::project_semantic_dispatch::lower::OwnerLoweringDriverForTests as Driver;
-    let expr = conditional(
-        TypeExpr::string_literal("a"),
-        TypeExpr::union(vec![
-            TypeExpr::Primitive(PrimitiveName::String),
-            named("Dom", vec![TypeExpr::number_literal(1.0)]),
-        ]),
-        TypeExpr::number_literal(1.0),
-        TypeExpr::number_literal(2.0),
-    );
-    let lower = |driver: Driver| {
-        let host = host();
-        upsert_ts(&host, "/lower.ts", UNREADABLE_ARM_DECLARATION);
-        let dispatch = ProjectSemanticDispatch::new(&host);
-        let _construction = dispatch.enter_construction_scope();
-        let observed = dispatch.observed_owner_lowering_for_tests(
-            "/lower.ts",
-            &expr,
-            ProjectionReductionContext::structural_transit(),
-            driver,
-        );
-        let text = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
-            &dispatch,
-            observed.node,
-            0,
-        );
-        (text, observed)
-    };
-    let (native_text, native) = lower(Driver::Native);
+    let (native_text, native) = lower_unreadable_arm_conditional(Driver::Native, false);
     assert_eq!(
         native.partial, None,
         "the native lowering proves the true branch through the written arm: {native_text} {native:?}"
@@ -1564,43 +1595,32 @@ fn a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decisi
         "the native decision makes its partial read, with its dependencies, inside the decision: {native:?}"
     );
     for driver in [Driver::FlowRequested, Driver::FlowInPlace] {
-        let (text, flow) = lower(driver);
+        let (text, flow) = lower_unreadable_arm_conditional(driver, false);
         assert!(
-            flow.decision_reads
-                .iter()
-                .any(|read| read.partial && !read.observed_partial[0]),
-            "{driver:?}: the decision reads a partial answer into an observation that was complete: {flow:?}"
+            decision_evidence_is_inside_the_decision(&flow),
+            "{driver:?}: each decision read observes its dependencies and lands its partiality and reuse evidence in the decision's observation, a partial one into an observation that was complete: {flow:?}"
         );
-        for read in &flow.decision_reads {
-            assert!(
-                !read.partial || !read.dependencies.is_empty(),
-                "{driver:?}: a partial decision read observes its dependencies while the decision's observation is on top: {read:?}"
-            );
-            assert!(
-                !read.partial || read.observed_partial[1],
-                "{driver:?}: a partial decision read is partial in the decision's observation: {read:?}"
-            );
-            assert!(
-                !read.suppressed || read.observed_suppressed[1],
-                "{driver:?}: a non-reusable decision read is non-reusable in the decision's observation: {read:?}"
-            );
-        }
         assert_eq!(
             (text.as_str(), flow.partial),
             (native_text.as_str(), native.partial),
             "{driver:?}: the flow-driven lowering answers what the native lowering answers, as completely: {flow:?}"
         );
     }
-    // The same flow lowering with each decision read answered ahead of the
-    // decision and taken once as delivered: a partial read's dependencies
-    // or partiality miss the decision's observation, which the per-read
-    // assertions above reject.
-    for driver in [Driver::FlowRequestedAhead, Driver::FlowInPlaceAhead] {
-        let (_, ahead) = lower(driver);
+}
+
+/// The same flow-driven lowering with each read its held decision makes
+/// delivered eagerly, answered ahead of the decision and taken once:
+/// the read's dependencies and partiality land in the enclosing build and
+/// none in the decision's observation, which the decision-evidence check
+/// rejects for both flow bodies.
+#[test]
+fn an_eagerly_delivered_decision_read_leaves_its_evidence_outside_the_decision() {
+    use verter_type_engine::project_semantic_dispatch::lower::OwnerLoweringDriverForTests as Driver;
+    for driver in [Driver::FlowRequested, Driver::FlowInPlace] {
+        let (_, eager) = lower_unreadable_arm_conditional(driver, true);
         assert!(
-            ahead.decision_reads.iter().any(|read| read.partial
-                && (read.dependencies.is_empty() || !read.observed_partial[1])),
-            "{driver:?}: a decision read answered ahead of the decision leaves its dependencies or partiality outside the decision's observation: {ahead:?}"
+            !decision_evidence_is_inside_the_decision(&eager),
+            "{driver:?}: an eagerly delivered decision read leaves its dependencies or partiality outside the decision's observation: {eager:?}"
         );
     }
 }
