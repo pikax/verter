@@ -11676,9 +11676,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         super::lower::LowerRead {
                             key,
                             shape: super::lower::LowerReadShape::Whole,
+                            // A class member walk is never a held decision.
+                            made_in_operation: false,
                         },
                         frame,
-                    )
+                    );
                 }
                 // A shape whose read cannot be named lowers as one that
                 // answered no value.
