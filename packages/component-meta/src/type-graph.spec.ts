@@ -373,6 +373,25 @@ describe("decodeComponentMetaPayload", () => {
     ]);
   });
 
+  it("keeps a caller's edit to a projected descriptor out of later projections", () => {
+    const native = decodeComponentMetaPayload(
+      encodeTestComponentMetaPayload({
+        filePath: "/project/src/Label.vue",
+        props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
+      }),
+    );
+
+    const edited = nativeComponentMetaToComponentMeta(native).props?.[0]?.type as {
+      name: string;
+    };
+    edited.name = "number";
+
+    expect(nativeComponentMetaToComponentMeta(native).props?.[0]?.type).toEqual({
+      kind: "primitive",
+      name: "string",
+    });
+  });
+
   it("does not leak descriptor memoization across payload instances", () => {
     const stringPayload = encodeTestComponentMetaPayload({
       filePath: "/project/src/Node.vue",

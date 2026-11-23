@@ -352,7 +352,11 @@ function nativeMemberStringName(member: NativeObjectMember): string | undefined 
  * JS type IR consumed by adapters (Storybook, Zod, JSON Schema, etc.).
  */
 export function typeExprToDescriptor(expr: NativeTypeExprLike): TypeDescriptor {
-  return transcribeTypeExpr(expr, new Set());
+  const descriptor = transcribeTypeExpr(expr, new Set());
+  // Graph-backed descriptors are memoized on the shared decoded graph. Hand
+  // callers a detached tree so an edit to a returned descriptor never reaches
+  // a later projection of the same graph.
+  return isGraphTypeExprRef(expr) ? structuredClone(descriptor) : descriptor;
 }
 
 function transcribeTypeExpr(expr: NativeTypeExprLike, graphVisiting: Set<number>): TypeDescriptor {
