@@ -2,6 +2,7 @@
 use super::attribute_operations::{project_attribute_operations, AttributeOperationsProjection};
 use super::branches::{project_template_branches, TemplateBranchProjection};
 use super::builtins::{project_builtins, BuiltinProjection, CarrierShape};
+use super::checking_fragment::CheckingPiece;
 use super::component_resolution::{project_component_resolution, ComponentResolutionProjection};
 use super::component_use::project_component_uses;
 use super::fallthrough::*;
@@ -100,6 +101,20 @@ impl Inputs {
         );
         text
     }
+}
+
+/// The synthesized text of the statements a product places in the template
+/// block.
+fn statement_text(product: &FallthroughProjection) -> String {
+    product
+        .statements()
+        .iter()
+        .flat_map(|statement| statement.fragment.pieces.iter())
+        .filter_map(|piece| match piece {
+            CheckingPiece::Synth(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -253,11 +268,15 @@ fn fallthrough_does_not_emit_module_references_to_setup_local_components() {
         "<Child/>",
     );
     let product = inputs.project();
-    assert!(!product.complete);
-    assert_eq!(
-        product.declaration_extras(),
-        PublicDeclarationExtras::default()
-    );
+    assert!(product.complete, "{product:?}");
+    // The public declaration reads the setup scope's return, never the
+    // setup-local binding; only the in-scope statement names the instance.
+    let props = product.declaration_extras().props_intersection.unwrap();
+    assert!(!props.contains("Child"), "{props}");
+    assert!(props.contains("__verterRootArm"), "{props}");
+    let statement = statement_text(&product);
+    assert!(statement.contains("__VerterUse_"), "{statement}");
+    inputs.declaration();
 }
 
 #[test]
@@ -266,9 +285,17 @@ fn fallthrough_consumed_component_keys_use_the_runtime_consumer_authority() {
         "import Child from './Child.vue';",
         "<Child :real-prop=\"42\"/>",
     );
-    let props = inputs.project().fallthrough.props_type.unwrap();
-    assert!(props.contains("__VerterUseDrop<"), "{props}");
-    assert!(props.contains("\"realProp\" | \"real-prop\""), "{props}");
+    let product = inputs.project();
+    let props = product.fallthrough.props_type.as_ref().unwrap();
+    assert!(props.contains("__verterRootArm"), "{props}");
+    // The arm's consumed keys leave its instance's props where the witness
+    // is in scope.
+    let statement = statement_text(&product);
+    assert!(statement.contains("__VerterUseDrop<"), "{statement}");
+    assert!(
+        statement.contains("\"realProp\" | \"real-prop\""),
+        "{statement}"
+    );
 }
 
 #[test]
@@ -287,16 +314,18 @@ fn fallthrough_unresolved_conditional_arms_withhold_the_whole_widening() {
 
 #[test]
 fn fallthrough_consumes_model_value_listener_and_modifier_keys() {
-    for (tag, expected, complete) in [
+    // A component arm drops the keys from its instance's props inside the
+    // template block; a native arm drops them in the declaration.
+    for (tag, expected, in_statement) in [
         (
             "Child",
-            "__VerterUseDrop<__VerterUseComponentProps<__VerterUseContract<typeof Child>>, \"title\" | \"onUpdate:title\" | \"titleModifiers\">",
-            false,
+            "[\"$props\"], \"title\" | \"onUpdate:title\" | \"titleModifiers\">",
+            true,
         ),
         (
             "div",
             "__VerterNativeKey<\"title\"> | __VerterNativeKey<\"onUpdate:title\"> | __VerterNativeKey<\"titleModifiers\">",
-            true,
+            false,
         ),
     ] {
         let inputs = Inputs::new(
@@ -304,17 +333,14 @@ fn fallthrough_consumes_model_value_listener_and_modifier_keys() {
             &format!("<{tag} v-model:title.trim=\"title\"/>"),
         );
         let product = inputs.project();
-        assert_eq!(product.complete, complete, "{product:?}");
-        let props = product.fallthrough.props_type.as_ref().unwrap();
-        assert!(props.contains(expected), "{props}");
-        if complete {
-            inputs.declaration();
+        assert!(product.complete, "{product:?}");
+        let text = if in_statement {
+            statement_text(&product)
         } else {
-            assert_eq!(
-                product.declaration_extras(),
-                PublicDeclarationExtras::default()
-            );
-        }
+            product.fallthrough.props_type.clone().unwrap()
+        };
+        assert!(text.contains(expected), "{text}");
+        inputs.declaration();
     }
 }
 
