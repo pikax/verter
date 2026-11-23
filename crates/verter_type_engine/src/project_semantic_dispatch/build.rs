@@ -10665,7 +10665,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             authored_resolution_debt,
             self_value: self_value.as_ref(),
         };
-        match self.drain_located_body_lowering(&mut lowering, &inputs, substitutions, None) {
+        self.finish_inline_body_lowering(&mut lowering, &inputs, substitutions)
+    }
+
+    /// Carry an inline located body lowering to its node: an inline
+    /// projection evaluates the instantiations it reaches, so it never stops.
+    fn finish_inline_body_lowering(
+        &self,
+        lowering: &mut BodyLowering,
+        inputs: &crate::project_semantic_dispatch::locator_view::LocatorViewInputs<'_>,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+    ) -> SemanticNodeId {
+        match self.drain_located_body_lowering(lowering, inputs, substitutions, None) {
             BodyPoll::Done(node, _) => node,
             BodyPoll::Need(_) => {
                 unreachable!("an inline body lowering evaluates the instantiations it reaches")
@@ -10722,12 +10733,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         // 1. Fetch the fixed authored shape (one reusable body-shape family
         //    per locator/source-env).
-        let Some(shape) = self.fetch_located_shape(locator) else {
-            return BodyLowering::Ready(self.opaque(QueryError::Miss));
-        };
-        self.begin_shape_lowering(
-            shape,
+        let fetched = self.fetch_located_shape(locator);
+        self.begin_fetched_body_lowering(
+            fetched,
             &owner_symbol,
+            augmentation.as_ref(),
             decl_kind,
             type_parameters,
             env,
@@ -10736,7 +10746,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             context,
             vue_ignored_heritage,
             seam,
-            augmentation.as_ref(),
+        )
+    }
+
+    /// Begin lowering a located body whose authored shape read answered
+    /// `fetched`: `None` when it answered no value, which lowers to the
+    /// miss sentinel.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_fetched_body_lowering(
+        &self,
+        fetched: Option<SemanticNodeId>,
+        owner_symbol: &verter_type_expr::OwnedStr,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+        decl_kind: verter_session_query::declarations::TypeDeclKind,
+        type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+        vue_ignored_heritage: &[verter_type_expr::facts::VueIgnoredHeritageFact],
+        seam: crate::project_semantic_dispatch::locator_view_worklist::ProjectionSeam,
+    ) -> BodyLowering {
+        let Some(shape) = fetched else {
+            return BodyLowering::Ready(self.opaque(QueryError::Miss));
+        };
+        self.begin_shape_lowering(
+            shape,
+            owner_symbol,
+            decl_kind,
+            type_parameters,
+            env,
+            scope,
+            substitutions,
+            context,
+            vue_ignored_heritage,
+            seam,
+            augmentation,
         )
     }
 
@@ -11050,6 +11095,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// A base the selective route cannot serve (a value-only base, a merged
     /// class) or one the path already followed (a circular chain) is read
     /// through the previous class's `extends` arm whole.
+    ///
+    /// The in-place driver of [`Self::begin_class_member_read`]: each read
+    /// the walk names is made where the walk stands
+    /// ([`Self::answer_class_member_read`]), over the same steps, with the
+    /// walk's state on the stack.
     pub(super) fn class_member_source(
         &self,
         canonical: &str,
@@ -11058,47 +11108,178 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         name: &str,
     ) -> Option<SemanticNodeId> {
-        let mut followed: FxHashSet<(
-            verter_type_expr::OwnedStr,
-            verter_type_expr::TopLevelOwnerId,
-            verter_type_expr::OwnedStr,
-        )> = FxHashSet::default();
-        let mut at: (
-            Arc<str>,
-            verter_type_expr::TopLevelOwnerId,
-            Arc<str>,
-            Vec<SemanticNodeId>,
-        ) = (
-            std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from(canonical)),
-            owner,
-            std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from(class)),
-            args.to_vec(),
-        );
-        // The `extends` arm of the class last followed: what the read
-        // answers with when the next class cannot answer selectively.
-        let mut through: Option<SemanticNodeId> = None;
+        self.drive_class_member_in_place(canonical, owner, class, args, name, |request| {
+            self.answer_class_member_read(request)
+        })
+    }
+
+    /// [`Self::class_member_source`] with each read the walk names answered
+    /// by `answer`.
+    fn drive_class_member_in_place(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+        mut answer: impl FnMut(super::lower::LowerRead) -> super::lower::LowerDelivery,
+    ) -> Option<SemanticNodeId> {
+        let mut read = ClassMemberRead::new(name);
+        let mut advance = self.class_member_opened(&mut read, canonical, owner, class, args);
         loop {
-            let (canonical, owner, class, args) = at;
-            if !followed.insert((
-                verter_type_expr::OwnedStr::from(canonical.clone()),
-                owner,
-                verter_type_expr::OwnedStr::from(class.clone()),
-            )) {
-                return through;
+            match advance {
+                ClassMemberAdvance::Done(source) => return source,
+                ClassMemberAdvance::Read(request) => {
+                    let delivered = answer(request);
+                    advance = self.class_member_delivered(&mut read, delivered);
+                }
             }
-            match self.class_member_step(&canonical, owner, &class, &args, name) {
-                None => return through,
-                Some(ClassMemberStep::Declared(node)) => return Some(node),
+        }
+    }
+
+    /// The first stage of [`Self::class_member_source`] as a read its
+    /// consumer holds ([`ClassMemberRead`]): the walk standing at the first
+    /// read it names, which it does not make. Reaching it reads only the
+    /// retained declarations of the classes on the path; each authored
+    /// shape the walk lowers (a declaring member's value, an `extends` arm)
+    /// is a `LowerLocator` query the consumer answers whole.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn begin_class_member_read(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> ClassMemberReadStep {
+        let mut read = Box::new(ClassMemberRead::new(name));
+        let advance = self.class_member_opened(&mut read, canonical, owner, class, args);
+        Self::class_member_read_step(read, advance)
+    }
+
+    /// The next stage of a member read standing at a read it named, given
+    /// `delivered`, that read's whole answer: the walk lowers the shape at
+    /// the class it stands at and carries on up the inheritance path, to
+    /// where the member reads from or to the next read it names.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn resume_class_member_read(
+        &self,
+        mut read: Box<ClassMemberRead>,
+        delivered: super::lower::LowerDelivery,
+    ) -> ClassMemberReadStep {
+        let advance = self.class_member_delivered(&mut read, delivered);
+        Self::class_member_read_step(read, advance)
+    }
+
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    fn class_member_read_step(
+        read: Box<ClassMemberRead>,
+        advance: ClassMemberAdvance,
+    ) -> ClassMemberReadStep {
+        match advance {
+            ClassMemberAdvance::Done(source) => ClassMemberReadStep::Done(source),
+            ClassMemberAdvance::Read(request) => ClassMemberReadStep::Read(request, read),
+        }
+    }
+
+    /// Release a member read standing at a read it named. Between reads the
+    /// walk holds only the classes it followed, the class it stands at and
+    /// node ids: no recording, cost scope or observation stays open.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn abandon_class_member_read(&self, read: Box<ClassMemberRead>) {
+        drop(read);
+    }
+
+    /// Make a read a member walk names where the walk stands: an authored
+    /// shape read is answered whole, as the in-place locator lowering makes
+    /// it.
+    pub(super) fn answer_class_member_read(
+        &self,
+        request: super::lower::LowerRead,
+    ) -> super::lower::LowerDelivery {
+        match request.shape {
+            super::lower::LowerReadShape::Whole => {
+                super::lower::LowerDelivery::Whole(self.answer_locator_shape_read(request.key))
+            }
+            super::lower::LowerReadShape::Node => self.answer_lower_read(request),
+        }
+    }
+
+    /// Open the reading class of a member walk and carry the walk on.
+    fn class_member_opened(
+        &self,
+        read: &mut ClassMemberRead,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+    ) -> ClassMemberAdvance {
+        read.follow(canonical, owner, class);
+        let name = read.name.clone();
+        let stage = self.open_class_member_frame(canonical, owner, class, args, &name);
+        self.class_member_settled(read, stage)
+    }
+
+    /// The read a member walk stood at answered `delivered`: the class it
+    /// stands at lowers that shape and carries the walk on.
+    fn class_member_delivered(
+        &self,
+        read: &mut ClassMemberRead,
+        delivered: super::lower::LowerDelivery,
+    ) -> ClassMemberAdvance {
+        let frame = read
+            .at
+            .take()
+            .expect("a member walk is answered at the class it stands at");
+        let stage = self.class_member_frame_delivered(frame, delivered);
+        self.class_member_settled(read, stage)
+    }
+
+    /// Carry a member walk on from what the class it stands at decided. A
+    /// class that names a read leaves the walk standing there. A class
+    /// declaring the member answers the walk; a class that does not hands on
+    /// its `extends` arm, which answers the walk when the arm names no class
+    /// declaration, or when the class it names was already followed (a
+    /// circular chain), and otherwise opens that base next, applied to the
+    /// clause's arguments. A class the selective route cannot serve answers
+    /// with the `extends` arm last handed on.
+    fn class_member_settled(
+        &self,
+        read: &mut ClassMemberRead,
+        mut stage: ClassMemberStage,
+    ) -> ClassMemberAdvance {
+        loop {
+            let step = match stage {
+                ClassMemberStage::Read(request, frame) => {
+                    read.at = Some(frame);
+                    return ClassMemberAdvance::Read(request);
+                }
+                ClassMemberStage::Answered(step) => step,
+            };
+            match step {
+                None => return ClassMemberAdvance::Done(read.through),
+                Some(ClassMemberStep::Declared(node)) => {
+                    return ClassMemberAdvance::Done(Some(node))
+                }
                 Some(ClassMemberStep::Inherited { heritage, base }) => {
-                    through = Some(heritage);
+                    read.through = Some(heritage);
                     let Some((base, base_args)) = base else {
-                        return through;
+                        return ClassMemberAdvance::Done(read.through);
                     };
-                    at = (
-                        std::sync::Arc::<str>::from(base.canonical_id.as_str()),
+                    if !read.follow(
+                        base.canonical_id.as_str(),
                         base.owner,
-                        std::sync::Arc::<str>::from(base.decl_name.as_str()),
-                        base_args,
+                        base.decl_name.as_str(),
+                    ) {
+                        return ClassMemberAdvance::Done(read.through);
+                    }
+                    let name = read.name.clone();
+                    stage = self.open_class_member_frame(
+                        base.canonical_id.as_str(),
+                        base.owner,
+                        base.decl_name.as_str(),
+                        &base_args,
+                        &name,
                     );
                 }
             }
@@ -11185,8 +11366,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// One class of the inheritance path a [`Self::class_member_source`]
-    /// read follows: the class's own members named `name`, else its
-    /// `extends` arm and the class declaration that arm references.
+    /// read follows, its reads made in place: the class's own members named
+    /// `name`, else its `extends` arm and the class declaration that arm
+    /// references.
     fn class_member_step(
         &self,
         canonical: &str,
@@ -11195,6 +11377,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         name: &str,
     ) -> Option<ClassMemberStep> {
+        let name = Arc::<str>::from(name);
+        let mut stage = self.open_class_member_frame(canonical, owner, class, args, &name);
+        loop {
+            match stage {
+                ClassMemberStage::Answered(step) => return step,
+                ClassMemberStage::Read(request, frame) => {
+                    let delivered = self.answer_class_member_read(request);
+                    stage = self.class_member_frame_delivered(frame, delivered);
+                }
+            }
+        }
+    }
+
+    /// Open one class of the inheritance path a member walk follows: the
+    /// exact member read answers when it can; otherwise the class's own
+    /// members named `name` are selected from its retained declaration, and
+    /// the class stands at the first authored shape it lowers. Nothing but
+    /// the class's retained declaration is read before that read is named.
+    fn open_class_member_frame(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &Arc<str>,
+    ) -> ClassMemberStage {
         let takes_augmentation = self.class_takes_module_augmentation(canonical, class);
         if !takes_augmentation {
             if let Some(input) = self.ctx.class_member_input(canonical, owner, class, name) {
@@ -11209,19 +11417,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         members,
                         &input.name_resolution,
                     ) {
-                        return Some(ClassMemberStep::Declared(node));
+                        return ClassMemberStage::Answered(Some(ClassMemberStep::Declared(node)));
                     }
                 }
             }
         }
-        let prepared = self
+        let Some(prepared) = self
             .ctx
-            .prepared_type_decl_return_only(canonical, owner, class)?;
+            .prepared_type_decl_return_only(canonical, owner, class)
+        else {
+            return ClassMemberStage::Answered(None);
+        };
         if prepared.kind != verter_session_query::declarations::TypeDeclKind::Class {
-            return None;
+            return ClassMemberStage::Answered(None);
         }
         let body_slot = prepared.body_facts.body_slot.clone();
-        let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
+        let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical) else {
+            return ClassMemberStage::Answered(None);
+        };
         let members_step = verter_type_expr::locators::TypeBodyPathStep::ClassMembersNamed {
             name_hash: verter_type_expr::locators::class_member_name_hash(name),
         };
@@ -11232,9 +11445,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The demanded members, selected from the retained parse; a class
         // the selective route cannot serve (a merged declaration) is no
         // source.
-        let members = super::raise::deref_slot_body(self.ctx, &member_slot)?;
+        let Some(members) = super::raise::deref_slot_body(self.ctx, &member_slot) else {
+            return ClassMemberStage::Answered(None);
+        };
         let TypeExpr::Object(ref members) = members else {
-            return None;
+            return ClassMemberStage::Answered(None);
         };
         let scope = NodeScopeId::File {
             canonical_id: verter_type_expr::OwnedStr::from(canonical),
@@ -11256,132 +11471,257 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .zip(args.iter())
             .map(|(param, arg)| (param.name.to_string(), *arg))
             .collect();
-        let key = crate::semantic_query::PropertyKey::identifier(Arc::from(name));
+        let key = crate::semantic_query::PropertyKey::identifier(Arc::clone(name));
         let context = crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Navigate,
         )
         .into_structural_provenance();
-        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        let lower_at =
-            |path: Vec<verter_type_expr::locators::TypeBodyPathStep>,
-             substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-             context: crate::semantic_query::ProjectionReductionContext| {
-                self.lower_located_body_with_resolution_debt(
-                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                        verter_type_expr::locators::TypeBodySlot {
-                            anchor: body_slot.anchor.clone(),
-                            path: verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
-                        },
+        // The class elements declaring the name, in source order; the frame
+        // lowers them one at a time from the back of the reversed list.
+        let mut declaring: Vec<ClassMemberDeclaring> = Vec::new();
+        for (raw_index, member) in members.properties.iter().enumerate() {
+            let (member_key, optional, readonly, method_kind, has_implementation_body, visibility) =
+                match member {
+                    ObjectMember::Property(property) => (
+                        property.key.cloned_known(),
+                        property.optional,
+                        property.readonly,
+                        None,
+                        false,
+                        property.visibility,
                     ),
-                    prepared.kind,
-                    &prepared.type_parameters,
-                    &prepared.name_resolution,
-                    &env,
-                    &scope,
-                    scope_payload.as_ref(),
-                    &shadowing,
-                    substitutions,
-                    context,
-                    None,
-                )
-            };
-        let mut own: Vec<SurfaceEntry> = Vec::new();
-        {
-            for (raw_index, member) in members.properties.iter().enumerate() {
-                let (member_key, optional, readonly, method_kind, has_body, visibility) =
-                    match member {
-                        ObjectMember::Property(property) => (
-                            property.key.cloned_known(),
-                            property.optional,
-                            property.readonly,
-                            None,
-                            false,
-                            property.visibility,
-                        ),
-                        ObjectMember::Method(method) => (
-                            method.key.cloned_known(),
-                            method.optional,
-                            false,
-                            Some(method.method_kind),
-                            method.has_implementation_body,
-                            method.visibility,
-                        ),
-                        _ => continue,
-                    };
-                if member_key.as_ref() != Some(&key) {
-                    continue;
+                    ObjectMember::Method(method) => (
+                        method.key.cloned_known(),
+                        method.optional,
+                        false,
+                        Some(method.method_kind),
+                        method.has_implementation_body,
+                        method.visibility,
+                    ),
+                    _ => continue,
+                };
+            if member_key.as_ref() != Some(&key) {
+                continue;
+            }
+            declaring.push(ClassMemberDeclaring {
+                ordinal: u32::try_from(raw_index).unwrap_or(u32::MAX),
+                optional,
+                readonly,
+                method_kind,
+                has_implementation_body,
+                visibility,
+            });
+        }
+        declaring.reverse();
+        let frame = Box::new(ClassMemberFrame {
+            canonical: verter_type_expr::OwnedStr::from(canonical),
+            takes_augmentation,
+            prepared,
+            body_slot,
+            members_step,
+            scope,
+            scope_payload,
+            shadowing,
+            env,
+            key,
+            context,
+            declaring,
+            substitutions: Vec::new(),
+            own: Vec::new(),
+            waiting: None,
+        });
+        self.advance_class_member_frame(frame, None)
+    }
+
+    /// The authored shape read a class frame stood at answered `delivered`.
+    fn class_member_frame_delivered(
+        &self,
+        frame: Box<ClassMemberFrame>,
+        delivered: super::lower::LowerDelivery,
+    ) -> ClassMemberStage {
+        let super::lower::LowerDelivery::Whole(read) = delivered else {
+            unreachable!("a class member walk's shape read is answered whole");
+        };
+        let shape = match self.finish_locator_shape_read(read) {
+            QueryResult::Value(node) => Some(node),
+            QueryResult::Recursive(_) | QueryResult::Error(_) => None,
+        };
+        self.advance_class_member_frame(frame, Some(shape))
+    }
+
+    /// Carry a class frame on. `fetched` is the authored shape the read it
+    /// stood at answered (`None` inside when it answered no value), which it
+    /// lowers where it stands: a declaring member's value, which it keeps,
+    /// or its `extends` arm, which answers the class. The frame then names
+    /// the next declaring member's shape read, else answers with its own
+    /// members, else names its `extends` arm's shape read. A class another
+    /// module augments answers nothing past its own members, as does a class
+    /// with no `extends` arm.
+    fn advance_class_member_frame(
+        &self,
+        mut frame: Box<ClassMemberFrame>,
+        mut fetched: Option<Option<SemanticNodeId>>,
+    ) -> ClassMemberStage {
+        loop {
+            if let Some(shape) = fetched.take() {
+                let waiting = frame
+                    .waiting
+                    .take()
+                    .expect("a class frame is answered at the read it named");
+                let context = match waiting {
+                    ClassMemberWaiting::Member(_) => frame
+                        .context
+                        .with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                    ClassMemberWaiting::Heritage => frame.context,
+                };
+                let value = self.lower_fetched_class_body(&mut frame, shape, context);
+                match waiting {
+                    ClassMemberWaiting::Member(member) => {
+                        let value = self.normalize_inferred_initializer_type(
+                            value,
+                            self.nullability_for(&frame.canonical),
+                        );
+                        let entry = SurfaceEntry::Member(SurfaceMember {
+                            key: crate::semantic_query::AuthoredPropertyKey::from_known(
+                                frame.key.clone(),
+                            ),
+                            value,
+                            optional: member.optional,
+                            readonly: member.readonly,
+                            method_kind: member.method_kind,
+                            has_implementation_body: member.has_implementation_body,
+                            visibility: member.visibility,
+                            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                            spans: verter_type_expr::MemberSpans::default(),
+                            declaration_origin: Some(frame.canonical.clone()),
+                            declared_in_macro_type_arg:
+                                crate::semantic_query::MacroOwnBodyStamp::default(),
+                            merge_role: frame
+                                .context
+                                .stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                        });
+                        frame.own.push(entry);
+                    }
+                    ClassMemberWaiting::Heritage => {
+                        // A base that is itself a class declaration answers
+                        // through its own member position; the walk follows
+                        // it.
+                        let base = match self.graph().node_data(value).as_deref() {
+                            Some(SemanticNodeData::DeclRef { identity }) => {
+                                Some((identity.clone(), Vec::new()))
+                            }
+                            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                                Some((base.clone(), args.to_vec()))
+                            }
+                            _ => None,
+                        };
+                        return ClassMemberStage::Answered(Some(ClassMemberStep::Inherited {
+                            heritage: value,
+                            base,
+                        }));
+                    }
                 }
+            }
+            let (waiting, path) = if let Some(member) = frame.declaring.pop() {
                 let path = vec![
-                    members_step,
+                    frame.members_step,
                     verter_type_expr::locators::TypeBodyPathStep::Member {
-                        ordinal: u32::try_from(raw_index).unwrap_or(u32::MAX),
+                        ordinal: member.ordinal,
                     },
                     verter_type_expr::locators::TypeBodyPathStep::MemberValue,
                 ];
-                let value = lower_at(
-                    path,
-                    &mut substitutions,
-                    context.with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
-                );
-                let value = self
-                    .normalize_inferred_initializer_type(value, self.nullability_for(canonical));
-                own.push(SurfaceEntry::Member(SurfaceMember {
-                    key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
-                    value,
-                    optional,
-                    readonly,
-                    method_kind,
-                    has_implementation_body: has_body,
-                    visibility,
-                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                    spans: verter_type_expr::MemberSpans::default(),
-                    declaration_origin: Some(verter_type_expr::OwnedStr::from(canonical)),
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
-                    merge_role: context.stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
-                }));
+                (ClassMemberWaiting::Member(member), path)
+            } else {
+                if !frame.own.is_empty() {
+                    let own = std::mem::take(&mut frame.own);
+                    return ClassMemberStage::Answered(Some(ClassMemberStep::Declared(
+                        self.graph().intern_node_with_scope(
+                            SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
+                            frame.scope.clone(),
+                        ),
+                    )));
+                }
+                // A class another module augments (`declare module "./c" {
+                // interface C { … } }`) declares members its own body does
+                // not, so a read its own body does not answer and that is
+                // about to follow `extends` decides it: only the whole
+                // declaration, which merges the augmentations, answers.
+                if frame.takes_augmentation {
+                    return ClassMemberStage::Answered(None);
+                }
+                // An inherited member reads off the base the class extends:
+                // its `extends` arm lowers to a lazy reference, which binds
+                // no `this`, so the member keeps the polymorphic `this` the
+                // reading receiver binds.
+                let path = vec![verter_type_expr::locators::TypeBodyPathStep::ClassHeritage];
+                let heritage_slot = verter_type_expr::locators::TypeBodySlot {
+                    anchor: frame.body_slot.anchor.clone(),
+                    path: verter_type_expr::OwnedSlice::from(path.clone().into_boxed_slice()),
+                };
+                if super::raise::deref_slot_body(self.ctx, &heritage_slot).is_none() {
+                    return ClassMemberStage::Answered(None);
+                }
+                (ClassMemberWaiting::Heritage, path)
+            };
+            frame.waiting = Some(waiting);
+            let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                verter_type_expr::locators::TypeBodySlot {
+                    anchor: frame.body_slot.anchor.clone(),
+                    path: verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
+                },
+            );
+            match self.locator_shape_key(locator) {
+                Ok(key) => {
+                    return ClassMemberStage::Read(
+                        super::lower::LowerRead {
+                            key,
+                            shape: super::lower::LowerReadShape::Whole,
+                        },
+                        frame,
+                    )
+                }
+                // A shape whose read cannot be named lowers as one that
+                // answered no value.
+                Err(_) => fetched = Some(None),
             }
         }
-        if !own.is_empty() {
-            return Some(ClassMemberStep::Declared(
-                self.graph().intern_node_with_scope(
-                    SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
-                    scope,
-                ),
-            ));
-        }
-        // A class another module augments (`declare module "./c" {
-        // interface C { … } }`) declares members its own body does not, so a read its own body
-        // does not answer and that is about to follow `extends` decides it: only
-        // the whole declaration, which merges the augmentations, answers.
-        if takes_augmentation {
-            return None;
-        }
-        // An inherited member reads off the base the class extends: its
-        // `extends` arm lowers to a lazy reference, which binds no `this`, so
-        // the member keeps the polymorphic `this` the reading receiver binds.
-        let heritage_slot = verter_type_expr::locators::TypeBodySlot {
-            anchor: body_slot.anchor.clone(),
-            path: verter_type_expr::OwnedSlice::from(
-                vec![verter_type_expr::locators::TypeBodyPathStep::ClassHeritage]
-                    .into_boxed_slice(),
-            ),
-        };
-        super::raise::deref_slot_body(self.ctx, &heritage_slot)?;
-        let heritage = lower_at(
-            vec![verter_type_expr::locators::TypeBodyPathStep::ClassHeritage],
-            &mut substitutions,
+    }
+
+    /// Lower a class body position whose authored shape read answered
+    /// `shape`, under the class frame's bindings and scope, as the in-place
+    /// located body lowering does after its own shape read.
+    fn lower_fetched_class_body(
+        &self,
+        frame: &mut ClassMemberFrame,
+        shape: Option<SemanticNodeId>,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let anchor = frame.body_slot.anchor.clone();
+        let self_value = (anchor.space == verter_type_expr::locators::LocatorSymbolSpace::Value)
+            .then(|| anchor.clone());
+        let mut lowering = self.begin_fetched_body_lowering(
+            shape,
+            &anchor.symbol,
+            None,
+            frame.prepared.kind,
+            &frame.prepared.type_parameters,
+            &frame.env,
+            &frame.scope,
+            &mut frame.substitutions,
             context,
+            &[],
+            crate::project_semantic_dispatch::locator_view_worklist::ProjectionSeam::inline(),
         );
-        // A base that is itself a class declaration answers through its own
-        // member position; the caller follows it.
-        let base = match self.graph().node_data(heritage).as_deref() {
-            Some(SemanticNodeData::DeclRef { identity }) => Some((identity.clone(), Vec::new())),
-            Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                Some((base.clone(), args.to_vec()))
-            }
-            _ => None,
+        let inputs = crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
+            env: &frame.env,
+            scope: &frame.scope,
+            name_resolution: &frame.prepared.name_resolution,
+            scope_payload: frame.scope_payload.as_ref(),
+            shadowing: &frame.shadowing,
+            authored_resolution_debt: None,
+            self_value: self_value.as_ref(),
         };
-        Some(ClassMemberStep::Inherited { heritage, base })
+        self.finish_inline_body_lowering(&mut lowering, &inputs, &mut frame.substitutions)
     }
 
     /// Observe the content version of every imported head the precise
@@ -22768,6 +23108,113 @@ enum ClassMemberStep {
     },
 }
 
+/// A member read ([`ProjectSemanticDispatch::class_member_source`]) between
+/// two of the reads it names: the demanded name, every class the walk has
+/// followed up the inheritance path, the `extends` arm of the class last
+/// followed, which answers the walk when the next class cannot answer
+/// selectively, and the class it stands at. Each read the walk names is the
+/// `LowerLocator` query of an authored shape a class lowers, answered whole;
+/// the delivery is consumed by the class it stands at, which lowers the
+/// shape and either answers, names its next read, or hands the walk on to
+/// its base, recorded in `followed`.
+pub(super) struct ClassMemberRead {
+    name: Arc<str>,
+    followed: FxHashSet<(Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>)>,
+    through: Option<SemanticNodeId>,
+    at: Option<Box<ClassMemberFrame>>,
+}
+
+impl ClassMemberRead {
+    /// A walk of member `name` that has followed no class yet.
+    fn new(name: &str) -> Self {
+        Self {
+            name: Arc::<str>::from(name),
+            followed: FxHashSet::default(),
+            through: None,
+            at: None,
+        }
+    }
+
+    /// Record the class as followed; `false` when the path already followed
+    /// it.
+    fn follow(
+        &mut self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+    ) -> bool {
+        self.followed
+            .insert((Arc::<str>::from(canonical), owner, Arc::<str>::from(class)))
+    }
+}
+
+/// One class of a member walk's inheritance path, standing at an authored
+/// shape read it named: what it selected from its retained declaration, the
+/// bindings its lowerings share, its own members of the name lowered so far,
+/// and the position whose shape it waits for.
+struct ClassMemberFrame {
+    canonical: verter_type_expr::OwnedStr,
+    takes_augmentation: bool,
+    prepared: verter_retention::heap_size::OwnedValue<PreparedTypeDecl>,
+    body_slot: verter_type_expr::locators::TypeBodySlot,
+    members_step: verter_type_expr::locators::TypeBodyPathStep,
+    scope: NodeScopeId,
+    scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+    shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
+    env: FxHashMap<String, SemanticNodeId>,
+    key: crate::semantic_query::PropertyKey,
+    context: crate::semantic_query::ProjectionReductionContext,
+    /// The class elements declaring the name not yet lowered, the next one
+    /// last.
+    declaring: Vec<ClassMemberDeclaring>,
+    substitutions: Vec<(Arc<str>, SemanticNodeId)>,
+    own: Vec<SurfaceEntry>,
+    waiting: Option<ClassMemberWaiting>,
+}
+
+/// One class element declaring the demanded name, as its own body records it.
+struct ClassMemberDeclaring {
+    ordinal: u32,
+    optional: bool,
+    readonly: bool,
+    method_kind: Option<verter_type_expr::ObjectMethodKind>,
+    has_implementation_body: bool,
+    visibility: verter_type_expr::MemberVisibility,
+}
+
+/// The position whose authored shape a class frame waits for.
+enum ClassMemberWaiting {
+    /// A declaring element's value.
+    Member(ClassMemberDeclaring),
+    /// The class's `extends` arm.
+    Heritage,
+}
+
+/// Where one class of a member walk stands after its latest stage.
+enum ClassMemberStage {
+    /// What the class decided for the walk.
+    Answered(Option<ClassMemberStep>),
+    /// The class lowers this authored shape next.
+    Read(super::lower::LowerRead, Box<ClassMemberFrame>),
+}
+
+/// Where a member read stands after its latest stage.
+pub(super) enum ClassMemberReadStep {
+    /// Where the member reads from; `None` when no class on the path
+    /// answers it.
+    Done(Option<SemanticNodeId>),
+    /// The walk reads this query next, answered whole, holding everything
+    /// it computed.
+    Read(super::lower::LowerRead, Box<ClassMemberRead>),
+}
+
+/// What one stage of a member walk decided.
+enum ClassMemberAdvance {
+    Done(Option<SemanticNodeId>),
+    /// The walk reads this query next.
+    Read(super::lower::LowerRead),
+}
+
 /// The lib conditional's recursion on one evaluation path, counted the way
 /// the checker counts it.
 #[derive(Debug)]
@@ -23911,5 +24358,199 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             cache_suppress: frame.cache_suppress,
             partial_reasons: frame.partial_reasons,
         }
+    }
+}
+
+/// One member read as a test observes it
+/// ([`ProjectSemanticDispatch::trace_class_member_read_for_tests`]).
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClassMemberTraceForTests {
+    /// Where the member reads from.
+    pub source: Option<SemanticNodeId>,
+    /// Every read the walk named, in order.
+    pub requested: Vec<ClassMemberRequestForTests>,
+    pub observations_complete: bool,
+    pub cache_suppress: bool,
+    pub partial_reasons: crate::semantic_query::PartialReasonSet,
+    /// The reads the walk's own stages made, by family, as the census of a
+    /// root flow read's body counts them: every dispatcher read made where
+    /// the walk stands rather than answered for it.
+    pub made_in_place: Vec<String>,
+}
+
+/// One read a member walk named, as a test observes it.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassMemberRequestForTests {
+    /// The query family read (`"LowerLocator"`).
+    pub family: &'static str,
+    /// How the read is answered: `"whole"` or `"node"`.
+    pub shape: &'static str,
+    /// The class whose body the read lowers.
+    pub class: String,
+    /// The position it lowers: `"heritage"` (the `extends` arm) or
+    /// `"member"` (a declaring element's value).
+    pub position: &'static str,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ClassMemberRequestForTests {
+    fn of(request: &super::lower::LowerRead) -> Self {
+        let (class, position) = match &request.key {
+            SemanticQueryKey::LowerLocator { key } => {
+                let heritage = matches!(
+                    key.locator(),
+                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)
+                        if slot.path.first()
+                            == Some(&verter_type_expr::locators::TypeBodyPathStep::ClassHeritage)
+                );
+                (
+                    str::to_owned(&key.slot().merged_symbol_name),
+                    if heritage { "heritage" } else { "member" },
+                )
+            }
+            _ => (String::new(), "other"),
+        };
+        Self {
+            family: super::raise::query_key_discriminant(&request.key),
+            shape: match request.shape {
+                super::lower::LowerReadShape::Whole => "whole",
+                super::lower::LowerReadShape::Node => "node",
+            },
+            class,
+            position,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Open the census of a root flow read's body around `body`: the
+    /// dispatcher reads `body` makes at this depth, except those made inside
+    /// an answer to a request, by family.
+    fn census_class_member_body_for_tests<R>(&self, body: impl FnOnce() -> R) -> (R, Vec<String>) {
+        use super::flow_return::body_reads;
+        let _ = body_reads::take();
+        let extent = self
+            .dispatch_txn
+            .try_borrow()
+            .ok()
+            .map(|txn| body_reads::open_body(&txn))
+            .expect("the census opens outside any held transaction borrow");
+        let result = body();
+        drop(extent);
+        let counted = body_reads::take()
+            .into_iter()
+            .flat_map(|((_, _, family), count)| (0..count).map(move |_| format!("{family:?}")))
+            .collect();
+        (result, counted)
+    }
+
+    /// Where member `name` of the ordinary-file class `class` (applied to
+    /// `args`) reads from, through the stepped read
+    /// ([`Self::begin_class_member_read`] / [`Self::resume_class_member_read`]),
+    /// whose holder answers each read the walk names, or through the
+    /// in-place driver [`Self::class_member_source`] drives, which makes
+    /// them where the walk stands. Each read is recorded, and the census of
+    /// the walk's own reads is taken. The in-place run also checks
+    /// [`Self::class_member_source`] answers what the traced driver
+    /// answered.
+    pub fn trace_class_member_read_for_tests(
+        &self,
+        canonical: &str,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+        stepped: bool,
+    ) -> ClassMemberTraceForTests {
+        use super::flow_return::body_reads;
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let (_connected, _) = self.enter_connected_demand(false);
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let mut requested = Vec::new();
+        let (source, made_in_place) = self.census_class_member_body_for_tests(|| {
+            let mut record = |request: &super::lower::LowerRead| {
+                requested.push(ClassMemberRequestForTests::of(request));
+                assert!(
+                    requested.len() <= 32,
+                    "a member walk reads each class on its path once"
+                );
+            };
+            if stepped {
+                let mut step = {
+                    let _site = body_reads::enter_site("class_member_read");
+                    self.begin_class_member_read(canonical, owner, class, args, name)
+                };
+                loop {
+                    match step {
+                        ClassMemberReadStep::Done(source) => break source,
+                        ClassMemberReadStep::Read(request, read) => {
+                            record(&request);
+                            let delivered = {
+                                let _answer = body_reads::enter_request_answer();
+                                self.answer_class_member_read(request)
+                            };
+                            let _site = body_reads::enter_site("class_member_read");
+                            step = self.resume_class_member_read(read, delivered);
+                        }
+                    }
+                }
+            } else {
+                let _site = body_reads::enter_site("class_member_source");
+                self.drive_class_member_in_place(canonical, owner, class, args, name, |request| {
+                    record(&request);
+                    self.answer_class_member_read(request)
+                })
+            }
+        });
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        let frame = frame.finish();
+        scope.discard();
+        if !stepped {
+            assert_eq!(
+                self.class_member_source(canonical, owner, class, args, name),
+                source,
+                "the in-place entry uses the traced driver"
+            );
+        }
+        ClassMemberTraceForTests {
+            source,
+            requested,
+            observations_complete: !completeness.is_partial() && !frame.result_is_partial,
+            cache_suppress: frame.cache_suppress,
+            partial_reasons: frame.partial_reasons,
+            made_in_place,
+        }
+    }
+
+    /// The read a member read of `name` on the ordinary-file class `class`
+    /// names first, taken from the walk's first stage alone, and the census
+    /// of the reads that stage made itself; the read is then abandoned
+    /// unanswered. `None` when that stage already answers.
+    pub fn begin_class_member_read_for_tests(
+        &self,
+        canonical: &str,
+        class: &str,
+        name: &str,
+    ) -> (Option<ClassMemberRequestForTests>, Vec<String>) {
+        let (_connected, _) = self.enter_connected_demand(false);
+        self.census_class_member_body_for_tests(|| {
+            let _site = super::flow_return::body_reads::enter_site("class_member_read");
+            match self.begin_class_member_read(
+                canonical,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                class,
+                &[],
+                name,
+            ) {
+                ClassMemberReadStep::Done(_) => None,
+                ClassMemberReadStep::Read(request, read) => {
+                    self.abandon_class_member_read(read);
+                    Some(ClassMemberRequestForTests::of(&request))
+                }
+            }
+        })
     }
 }
