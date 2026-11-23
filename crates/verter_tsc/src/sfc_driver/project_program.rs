@@ -397,6 +397,14 @@ struct ProgramInputs<'a> {
     surfaces: Option<&'a dyn ForeignSurfaceSource>,
 }
 
+/// What admitting one carrier a program reached by import does.
+enum ReachedImport {
+    /// Served under the importing project's options.
+    Serve(String),
+    /// Warned about: its companion path holds a real file.
+    Conflict(String),
+}
+
 impl ProgramInputs<'_> {
     fn check(
         &self,
@@ -608,6 +616,22 @@ impl ProgramInputs<'_> {
         let (tsconfig_path, tsconfig_bytes) =
             project_config_bytes(&inputs, driver.workspace.as_ref());
         let mut overlay = project_overlay(&inputs);
+        let open = |live: &mut LiveProgram, overlay: &[OverlayFile]| {
+            if let Some(previous) = live.session.take() {
+                previous.close();
+            }
+            live.certified = None;
+            live.session = Some(EngineSession::open(TypecheckInputs {
+                engine: &engine.path,
+                cwd: &project.root,
+                tsconfig_path: tsconfig_path.clone(),
+                tsconfig_bytes: tsconfig_bytes.clone(),
+                files: overlay.to_vec(),
+            })?);
+            live.sessions_opened += 1;
+            Ok::<(), TypecheckError>(())
+        };
+        let mut advanced = false;
         match (&mut live.session, changes) {
             (Some(session), Some(changes)) => {
                 reprojected.extend(changes.paths.iter().cloned());
@@ -618,21 +642,9 @@ impl ProgramInputs<'_> {
                     live.certified = None;
                     return Err(error);
                 }
+                advanced = true;
             }
-            (session, _) => {
-                if let Some(previous) = session.take() {
-                    previous.close();
-                }
-                live.certified = None;
-                *session = Some(EngineSession::open(TypecheckInputs {
-                    engine: &engine.path,
-                    cwd: &project.root,
-                    tsconfig_path,
-                    tsconfig_bytes: tsconfig_bytes.clone(),
-                    files: overlay.clone(),
-                })?);
-                live.sessions_opened += 1;
-            }
+            _ => open(&mut *live, &overlay)?,
         }
         // A carrier outside the membership is reached when the program
         // resolves an import of it: the engine looks for its checking module
@@ -651,7 +663,21 @@ impl ProgramInputs<'_> {
                     (!driver.workspace.file_exists(&read)).then_some(carrier)
                 })
                 .collect::<Vec<_>>();
-            let reached = self.admit_imported(&handle, &resolver, id, candidates, check);
+            let reached = self.reached_imports(&resolver, id, candidates, check);
+            if reached.is_empty() {
+                break;
+            }
+            // An advanced session keeps every lookup it ever made, so one of
+            // these may name a carrier only an import since removed looked
+            // for. Only a session opened on the current state tells which
+            // carriers the program reaches now.
+            if advanced {
+                open(&mut *live, &overlay)?;
+                advanced = false;
+                continue;
+            }
+            let session = live.session.as_mut().expect("the engine session is open");
+            let reached = self.admit_imported(&handle, reached, check);
             if reached.is_empty() {
                 break;
             }
@@ -714,19 +740,18 @@ impl ProgramInputs<'_> {
         }
     }
 
-    /// The `candidates` the program reached by import that it does not serve
-    /// yet, in order, each projected for this project. A carrier that no
-    /// longer exists is not served, a member is served as one or was refused
-    /// as one, and a carrier whose companion path holds a real file keeps
-    /// that file and is warned about, as a member is.
-    fn admit_imported(
+    /// What admitting the `candidates` the program reached by import would
+    /// do, in order, without doing it: each carrier it does not serve yet is
+    /// served, or warned about when its companion path holds a real file, as
+    /// a member is. A carrier that no longer exists is not served, and a
+    /// member is served as one or was refused as one.
+    fn reached_imports(
         &self,
-        handle: &MapperProjectHandle,
         resolver: &WorkspaceProjectResolver<'_>,
         id: ProjectId,
         candidates: impl IntoIterator<Item = String>,
-        check: &mut ProjectCheck,
-    ) -> Vec<CarrierProjection> {
+        check: &ProjectCheck,
+    ) -> Vec<ReachedImport> {
         let Self {
             driver, project, ..
         } = *self;
@@ -754,20 +779,38 @@ impl ProgramInputs<'_> {
             if !workspace.file_exists(&carrier) || !served.insert(InjectedPathKey::new(&carrier)) {
                 continue;
             }
-            if let CarrierOwnershipResolution::Ambiguous { .. } =
-                resolver.resolve_in_project(id, &carrier)
-            {
-                check.diagnostics.push(path_conflict_warning(carrier));
-                continue;
-            }
-            reached.push(project_carrier(
-                &driver.mapper,
-                handle,
-                Path::new(&carrier),
-                workspace,
-            ));
+            reached.push(match resolver.resolve_in_project(id, &carrier) {
+                CarrierOwnershipResolution::Ambiguous { .. } => ReachedImport::Conflict(carrier),
+                _ => ReachedImport::Serve(carrier),
+            });
         }
         reached
+    }
+
+    /// Admit what [`Self::reached_imports`] found: warn about each conflict
+    /// and return the other carriers, each projected for this project.
+    fn admit_imported(
+        &self,
+        handle: &MapperProjectHandle,
+        reached: Vec<ReachedImport>,
+        check: &mut ProjectCheck,
+    ) -> Vec<CarrierProjection> {
+        let workspace = self.driver.workspace.as_ref();
+        let mut served = Vec::new();
+        for reached in reached {
+            match reached {
+                ReachedImport::Conflict(carrier) => {
+                    check.diagnostics.push(path_conflict_warning(carrier));
+                }
+                ReachedImport::Serve(carrier) => served.push(project_carrier(
+                    &self.driver.mapper,
+                    handle,
+                    Path::new(&carrier),
+                    workspace,
+                )),
+            }
+        }
+        served
     }
 
     /// Bind the certified program, record the carriers' revisions, then

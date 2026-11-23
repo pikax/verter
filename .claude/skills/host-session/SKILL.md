@@ -1065,8 +1065,11 @@ program is opened anew on its next check instead of advanced (the `advance` gate
 diagnostics, are exactly those a fresh run reaches. A program that served no imported
 carrier still advances in place, even when the engine looked for a member's checking
 module at another dialect's path (a `lang="tsx"` or plain JS member is probed at
-`C.vue.ts` first) or for a carrier that does not exist; a carrier created since is
-reached by the discovery loop after the update. A watch session counts the imported
+`C.vue.ts` first) or for a carrier that does not exist. An advanced session still
+holds lookups made for imports since removed, so when discovery in an advanced session
+would serve or warn about any carrier, that session is closed and one is opened on the
+current state before discovery runs again: a carrier created after its import was
+removed is never served, and one created while its import stands is. A watch session counts the imported
 carriers, and the carrier of every checking module the engine looked for, among the
 project's program reads, so an edit to an imported carrier, or the creation of one an
 import names, rechecks the importing project.
