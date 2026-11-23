@@ -144,18 +144,21 @@ fn setup_temp_project() -> (tempfile::TempDir, PathBuf) {
     (temp, temp_path)
 }
 
-/// `file(line,col): error TSxxxx: message` → the `.vue` basename.
+/// `file(line,col): error TSxxxx: message`, or `file: error TSxxxx: message`
+/// for a diagnostic in generated code with no authored position → the
+/// `.vue` basename.
 fn error_files(stdout: &str) -> Vec<String> {
     let mut files = Vec::new();
     for line in stdout.lines() {
-        let Some(paren) = line.find('(') else {
+        let Some(error) = line.find(": error TS") else {
             continue;
         };
-        let rest = &line[paren..];
-        if !rest.contains("): error TS") {
-            continue;
-        }
-        let file = line[..paren].replace('\\', "/");
+        let head = &line[..error];
+        let head = match head.strip_suffix(')').and_then(|head| head.rfind('(')) {
+            Some(paren) => &head[..paren],
+            None => head,
+        };
+        let file = head.replace('\\', "/");
         if let Some(name) = file.rsplit('/').next() {
             files.push(name.to_string());
         }
@@ -454,10 +457,24 @@ const MATRIX: &[(&str, bool, &str)] = &[
 /// `Reject*` file keeps erroring.
 #[test]
 fn fallthrough_attrs_accepted_only_where_they_reach_the_dom() {
+    run_fallthrough_matrix(false);
+}
+
+#[cfg(feature = "projection-route-qualification")]
+#[test]
+fn fallthrough_projection_attrs_accepted_only_where_they_reach_the_dom() {
+    run_fallthrough_matrix(true);
+}
+
+fn run_fallthrough_matrix(projection: bool) {
     let (temp_dir, temp_path) = setup_temp_project();
 
     let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
-    let output = Command::new(bin)
+    let mut command = Command::new(bin);
+    if projection {
+        command.arg("--projection-route");
+    }
+    let output = command
         .arg("--noEmit")
         .arg("-p")
         .arg(temp_path.join("tsconfig.json"))
@@ -467,6 +484,12 @@ fn fallthrough_attrs_accepted_only_where_they_reach_the_dom() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let failing = error_files(&stdout);
+    if projection {
+        assert!(
+            !stdout.contains("VTER1009") && !stderr.contains("VTER1009"),
+            "every fallthrough fixture must be fully checked\n{stdout}\n{stderr}"
+        );
+    }
 
     // The CHILD's exit status is evidence, not decoration. `verter-tsc` exits
     // 0 when the project checks clean, 1 when it reported type errors, and 2
@@ -521,6 +544,26 @@ fn fallthrough_attrs_accepted_only_where_they_reach_the_dom() {
         wrong.join("\n  "),
         failing
     );
+
+    // A Reject* file must fail for the right reason: its attribute or prop is
+    // not assignable to the surface it reaches. Any other error (a module
+    // without a declaration, a circular generated type, a config error) would
+    // satisfy the matrix above by accident.
+    if projection {
+        let unrelated: Vec<&str> = stdout
+            .lines()
+            .filter(|line| {
+                line.split_once(": error TS")
+                    .and_then(|(_, rest)| rest.split(':').next())
+                    .and_then(|code| code.parse::<u32>().ok())
+                    .is_some_and(|code| !matches!(code, 2322 | 2345 | 2353 | 2769))
+            })
+            .collect();
+        assert!(
+            unrelated.is_empty(),
+            "every error must be an assignability rejection: {unrelated:#?}\n{stdout}"
+        );
+    }
 
     // The child components themselves must type-check cleanly — a widened
     // stub that broke its own component would show up here.

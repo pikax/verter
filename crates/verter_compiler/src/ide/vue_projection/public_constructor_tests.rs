@@ -802,6 +802,7 @@ fn declaration_over_applies_the_extras_of_other_products() {
     let extras = PublicDeclarationExtras {
         props_intersection: Some("{ title?: string }".to_string()),
         attrs_type: Some("{ title?: string }".to_string()),
+        reads_setup_return: false,
     };
     let rendered = picker()
         .declaration_over(EXPOSE_PROVIDER, &extras)
@@ -885,6 +886,7 @@ fn authored_default_declaration_extras_reach_both_public_props_sites() {
             "Omit<import(\"vue\").AnchorHTMLAttributes, \"title\">".to_string(),
         ),
         attrs_type: Some("{ href?: string }".to_string()),
+        reads_setup_return: false,
     };
     let output = contract.declaration_over("__Scope", &extras).unwrap();
     assert!(output.contains("AnchorHTMLAttributes"), "{output}");

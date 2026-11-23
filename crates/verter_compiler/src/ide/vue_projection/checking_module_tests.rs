@@ -2863,7 +2863,7 @@ fn fallthrough_declarations_follow_runtime_roots() {
 }
 
 #[test]
-fn fallthrough_component_roots_withhold_extras_without_widening_numeric_props() {
+fn fallthrough_component_roots_publish_extras_without_widening_numeric_props() {
     let module = composed(
         r#"<script setup lang="ts">
 import Child from './Child.vue';
@@ -2872,7 +2872,7 @@ defineProps<{ value: number }>();
     );
     let text = module.checking_text();
     assert!(
-        module
+        !module
             .withheld
             .iter()
             .any(|product| product.family == ObligationFamily::Fallthrough),
@@ -2884,10 +2884,49 @@ defineProps<{ value: number }>();
         .find(|line| line.starts_with("type __VerterPublicProps ="))
         .unwrap();
     assert!(props.contains("({ value: number })"), "{props}");
-    assert!(!props.contains("__VerterFallthrough"), "{props}");
+    assert!(props.contains("__VerterFallthrough"), "{props}");
+    assert!(
+        props.contains("Extract<ReturnType<typeof __VerterSetupScope>"),
+        "{props}"
+    );
+    assert!(
+        text.contains("if (__VerterRootProbe) return __VerterRootArm"),
+        "{text}"
+    );
+    assert!(
+        text.contains("readonly $attrs: Record<string, unknown>"),
+        "{text}"
+    );
     assert!(
         !text.contains("format: (value: unknown) => string"),
         "{text}"
+    );
+    // The setup scope's return is inferred from the template context, so
+    // the context reads the declared props and an instance without that
+    // return; otherwise TypeScript sees the return depend on itself.
+    assert!(
+        text.contains("null! as __VerterTemplateInstance & __VerterTemplateProps"),
+        "{text}"
+    );
+    let template_props = text
+        .lines()
+        .find(|line| line.starts_with("type __VerterTemplateProps ="))
+        .unwrap();
+    assert!(!template_props.contains("ReturnType"), "{template_props}");
+    let template_instance = text
+        .split("type __VerterTemplateInstance =")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(
+                ";
+",
+            )
+            .next()
+        })
+        .unwrap();
+    assert!(
+        !template_instance.contains("__VerterSetupScope"),
+        "{template_instance}"
     );
     assert!(
         !text.contains("__VerterUseContract<typeof Child>"),
@@ -3406,4 +3445,235 @@ fn an_asserted_model_target_maps_its_parentheses_to_the_authored_target() {
         let region = mapping.projected_at(at).expect("mapped");
         assert_eq!(region.carrier.map(|c| c.start), Some(authored), "{output}");
     }
+}
+
+#[test]
+fn fallthrough_component_root_attrs_and_expose_do_not_read_the_bridge() {
+    let module = composed(
+        r#"<script setup lang="ts" generic="T">
+import Child from './Child.vue';
+import { useAttrs } from 'vue';
+const attrs = useAttrs();
+const props = defineProps<{ value: T }>();
+defineExpose({ value: props.value });
+</script><template><Child :value="value" v-bind="$attrs"/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(
+        !module
+            .withheld
+            .iter()
+            .any(|p| p.family == ObligationFamily::Fallthrough),
+        "{text}"
+    );
+    assert!(
+        text.contains("readonly $attrs: Record<string, unknown>"),
+        "{text}"
+    );
+    assert!(text.contains("Exclude<ReturnType<typeof __VerterSetupScope<T>>, { readonly __verterRootArm: unknown }>"), "{text}");
+    // The exposed surface is the setup scope's return, so the template
+    // context reads neither it nor the bridge.
+    assert!(
+        text.contains("null! as __VerterTemplateInstance<T> & __VerterTemplateProps<T>"),
+        "{text}"
+    );
+    let template_instance = text
+        .split("type __VerterTemplateInstance<")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(
+                ";
+",
+            )
+            .next()
+        })
+        .unwrap();
+    assert!(
+        !template_instance.contains("__VerterSetupScope"),
+        "{template_instance}"
+    );
+    assert!(
+        text.contains("if (__VerterRootProbe) return __VerterRootArm"),
+        "{text}"
+    );
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, text, oxc_span::SourceType::ts()).parse();
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "{:?}\n{text}",
+        parsed.diagnostics
+    );
+}
+
+#[test]
+fn fallthrough_component_root_fixtures_are_fully_checked() {
+    macro_rules! fixture {
+        ($path:literal) => {
+            (
+                $path,
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../verter_tsc/tests/cases/fixtures/",
+                    $path
+                )),
+            )
+        };
+    }
+    for (path, source) in [
+        fixture!("fallthrough/src/AcceptChildPropThroughComponentRoot.vue"),
+        fixture!("fallthrough/src/AcceptCollidingPropThroughComponentRoot.vue"),
+        fixture!("fallthrough/src/AcceptLeafPropThroughNoInheritRoot.vue"),
+        fixture!("fallthrough/src/AcceptNumberTitleOnMixedConditionalRoot.vue"),
+        fixture!("fallthrough/src/AcceptStringTitleOnMixedConditionalRoot.vue"),
+        fixture!("fallthrough/src/AcceptThroughComponentRoot.vue"),
+        fixture!("fallthrough/src/ChildWrapsComp.vue"),
+        fixture!("fallthrough/src/MixedConditionalRoot.vue"),
+        fixture!("fallthrough/src/WrapsCollidingChild.vue"),
+        fixture!("fallthrough/src/WrapsNoInheritLeaf.vue"),
+        fixture!("fallthrough/src/WrapsTypedChild.vue"),
+        fixture!("js_carrier/src/TsParent.vue"),
+        fixture!("js_carrier/src/TsParentArity.vue"),
+    ] {
+        let source = source.replace("\r\n", "\n");
+        let module = composed(&source);
+        assert!(module.is_complete(), "{path}: {:?}", module.withheld);
+    }
+}
+
+#[test]
+fn fallthrough_native_roots_declare_no_root_arm_or_filter() {
+    let module = composed(
+        r#"<script setup lang="ts">
+defineProps<{ value: number }>();
+defineExpose({ focus() {} });
+</script><template><a/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(!text.contains("__VerterRootProbe"), "{text}");
+    assert!(!text.contains("__VerterRootArm"), "{text}");
+    assert!(!text.contains("__verterRootArm"), "{text}");
+    assert!(!text.contains("__VerterTemplateInstance"), "{text}");
+}
+
+#[test]
+fn fallthrough_component_root_scope_returns_on_every_path_and_reads_its_template_aliases() {
+    let module = composed(
+        r#"<script setup lang="ts">
+import Child from './Child.vue';
+</script><template><Child/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(
+        text.contains("if (__VerterRootProbe) return __VerterRootArm"),
+        "{text}"
+    );
+    // Under `noImplicitReturns` the probe's return needs a fallback.
+    assert!(text.contains("return undefined;\n}"), "{text}");
+    // A static root reads no context, yet the context statement keeps the
+    // template aliases read under `noUnusedLocals`.
+    assert!(
+        text.contains("null! as __VerterTemplateInstance & __VerterTemplateProps"),
+        "{text}"
+    );
+}
+
+#[test]
+fn fallthrough_component_root_standalone_declaration_reads_no_setup_scope() {
+    let module = composed_declaring(
+        r#"<script setup lang="ts">
+import Child from './Child.vue';
+defineProps<{ value: number }>();
+</script><template><Child :value="value"/></template>"#,
+    );
+    assert!(
+        module
+            .checking_text()
+            .contains("Extract<ReturnType<typeof __VerterSetupScope>"),
+        "{}",
+        module.checking_text()
+    );
+    let product = module
+        .declarations
+        .as_ref()
+        .expect("a clean carrier carries its declaration product");
+    assert!(product.is_publishable(), "{:?}", product.diagnostics);
+    let declaration = &product.declaration_source;
+    assert!(!declaration.contains("__VerterSetupScope"), "{declaration}");
+    assert!(!declaration.contains("__verterRootArm"), "{declaration}");
+}
+
+#[test]
+fn fallthrough_self_imported_root_arm_never_reads_its_own_props() {
+    let module = composed(
+        r#"<script setup lang="ts">
+import Self from './Comp.vue';
+defineProps<{ depth: number }>();
+</script><template><Self v-if="depth > 0" :depth="depth - 1"/><div v-else/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(!text.contains("if (__VerterRootProbe)"), "{text}");
+    assert!(!text.contains("__verterRootArm"), "{text}");
+    // A different module with the same basename is an ordinary child.
+    let module = composed(
+        r#"<script setup lang="ts">
+import Other from './nested/Comp.vue';
+defineProps<{ depth: number }>();
+</script><template><Other v-if="depth > 0" :depth="depth - 1"/><div v-else/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(
+        text.contains("if (__VerterRootProbe) return __VerterRootArm"),
+        "{text}"
+    );
+}
+
+#[test]
+fn fallthrough_named_import_from_the_carrier_is_an_ordinary_root() {
+    // Only the default import is this carrier's constructor; a named export
+    // it re-exports is another component.
+    let module = composed(
+        r#"<script setup lang="ts">
+import { Anchor as Root } from './Comp.vue';
+</script><template><Root/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(
+        text.contains("if (__VerterRootProbe) return __VerterRootArm"),
+        "{text}"
+    );
+}
+
+#[test]
+fn fallthrough_self_default_import_is_recursive_from_either_script_block() {
+    for source in [
+        r#"<script lang="ts">
+import Self from './Comp.vue';
+</script><script setup lang="ts">
+defineProps<{ depth: number }>();
+</script><template><Self v-if="depth > 0" :depth="depth - 1"/><div v-else/></template>"#,
+        r#"<script setup lang="ts">
+import { default as Self } from './Comp.vue';
+defineProps<{ depth: number }>();
+</script><template><Self v-if="depth > 0" :depth="depth - 1"/><div v-else/></template>"#,
+    ] {
+        let module = composed(source);
+        let text = module.checking_text();
+        assert!(!text.contains("if (__VerterRootProbe)"), "{text}");
+        assert!(!text.contains("__verterRootArm"), "{text}");
+    }
+}
+
+#[test]
+fn fallthrough_component_root_arm_reads_props_only_from_an_instance_that_has_them() {
+    let module = composed(
+        r#"<script setup lang="ts">
+import Child from './Child.vue';
+</script><template><Child/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(
+        text.contains("extends { readonly $props: infer P } ? P : {})"),
+        "{text}"
+    );
 }

@@ -79,6 +79,9 @@ pub struct ComponentResolutionObservation {
     pub authored_non_pascal: Option<String>,
     /// The witness with its resolved component expression.
     pub witness: ComponentUseWitness,
+    /// A local binding the carrier imports from its own module
+    /// (`import Self from './Self.vue'`): its instance is this carrier's.
+    pub imports_carrier: bool,
 }
 
 /// A dynamic use and any recoverable component/props choice correlation.
@@ -185,8 +188,58 @@ impl ComponentResolutionProjection {
     }
 }
 
+/// The default imports, from either script block, whose relative specifier
+/// resolves to the carrier itself: each names this carrier's own constructor,
+/// unless a setup declaration shadows a normal-script import.
+fn self_imported_names<'a>(
+    script: &'a ScriptProjectionFacts,
+    canonical_id: &str,
+) -> FxHashSet<&'a str> {
+    let declared_in_setup = |name: &str| {
+        script.setup.iter().any(|setup| {
+            setup.statements.iter().any(|statement| {
+                matches!(&statement.kind, SetupStatementKind::Declaration { names }
+                    if names.iter().any(|declared| declared == name))
+            })
+        })
+    };
+    script
+        .module
+        .imports
+        .iter()
+        .filter(|import| specifier_names(&import.source, canonical_id))
+        .filter_map(|import| {
+            let name = import.default_name.as_deref()?;
+            (import.from_setup || !declared_in_setup(name)).then_some(name)
+        })
+        .collect()
+}
+
+/// Whether a relative module `specifier`, read from `canonical_id`'s
+/// directory, names `canonical_id`.
+fn specifier_names(specifier: &str, canonical_id: &str) -> bool {
+    if !(specifier.starts_with("./") || specifier.starts_with("../")) {
+        return false;
+    }
+    let Some((directory, _)) = canonical_id.rsplit_once('/') else {
+        return false;
+    };
+    let mut parts: Vec<&str> = directory.split('/').collect();
+    for segment in specifier.split('/') {
+        match segment {
+            "." | "" => {}
+            ".." => {
+                parts.pop();
+            }
+            segment => parts.push(segment),
+        }
+    }
+    parts.join("/") == canonical_id
+}
+
 /// Resolve names using the already-owned plan and script binding inventory.
-/// `canonical_id` is used solely for Vue's filename-based self reference.
+/// `canonical_id` names the carrier for Vue's filename-based self reference and a
+/// self import.
 #[must_use]
 pub fn project_component_resolution(
     plan: &ProjectionPlan,
@@ -196,6 +249,7 @@ pub fn project_component_resolution(
     custom_elements: Option<&[String]>,
 ) -> ComponentResolutionProjection {
     let self_name = sanitize_js_identifier(canonical_id);
+    let self_imports = self_imported_names(script, canonical_id);
     let mut known: FxHashSet<&str> = script
         .module
         .normal_script_bindings
@@ -286,6 +340,8 @@ pub fn project_component_resolution(
                 props_key: choice.as_ref().map(|choice| choice.props_key.clone()),
             });
         }
+        let imports_carrier =
+            source == ComponentSource::Local && self_imports.contains(expression.as_str());
         observations.push(ComponentResolutionObservation {
             use_id: use_.id.clone(),
             authored_expression: use_.component_expression.clone(),
@@ -294,6 +350,7 @@ pub fn project_component_resolution(
             expression,
             global_name,
             authored_non_pascal,
+            imports_carrier,
             witness,
         });
     }

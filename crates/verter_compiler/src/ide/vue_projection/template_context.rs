@@ -5,7 +5,7 @@ use verter_parser::types::BindingType;
 
 use crate::ide::vue_projection::checking_fragment::{CheckingFragment, PreludeDeclaration};
 use crate::ide::vue_projection::public_constructor::{
-    VuePublicConstructorContract, PUBLIC_INSTANCE, PUBLIC_PROPS,
+    VuePublicConstructorContract, PUBLIC_INSTANCE, PUBLIC_PROPS, TEMPLATE_INSTANCE, TEMPLATE_PROPS,
 };
 use crate::ide::vue_projection::script_setup::{ScriptProjectionFacts, SetupStatementKind};
 
@@ -93,13 +93,16 @@ impl TemplateContextView {
 ///
 /// A referenced name is listed when the setup scope or the normal script
 /// binds it; every other name is read from the instance half, which holds
-/// the props and the public instance members.
+/// the props and the public instance members. When `reads_setup_return`,
+/// the public props read the setup scope's return, which is inferred from
+/// this context, so the instance half is the template aliases instead.
 #[must_use]
 pub fn project_template_context(
     script: &ScriptProjectionFacts,
     public: &VuePublicConstructorContract,
     referenced: &[String],
     kinds: &[(String, BindingType)],
+    reads_setup_return: bool,
 ) -> TemplateContextView {
     let setup_names = script.setup.iter().flat_map(|setup| {
         setup
@@ -142,6 +145,10 @@ pub fn project_template_context(
     };
     TemplateContextView {
         bindings,
-        instance_type: format!("{PUBLIC_INSTANCE}{args} & {PUBLIC_PROPS}{args}"),
+        instance_type: if reads_setup_return {
+            format!("{TEMPLATE_INSTANCE}{args} & {TEMPLATE_PROPS}{args}")
+        } else {
+            format!("{PUBLIC_INSTANCE}{args} & {PUBLIC_PROPS}{args}")
+        },
     }
 }

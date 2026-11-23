@@ -6,9 +6,9 @@
     "moduleResolution": "bundler",
     "jsx": "preserve",
     "skipLibCheck": true,
-    "baseUrl": ".",
+    "allowJs": true,
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src"]

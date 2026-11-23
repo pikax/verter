@@ -31,8 +31,8 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrowFunctionExpression, AwaitExpression, BindingPattern, CallExpression, Class, ClassElement,
-    Declaration, Expression, ForOfStatement, Function, ImportDeclarationSpecifier, Program,
-    PropertyKey, Statement, VariableDeclarator,
+    Declaration, Expression, ForOfStatement, Function, ImportDeclaration,
+    ImportDeclarationSpecifier, Program, PropertyKey, Statement, VariableDeclarator,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_semantic::{Scoping, SemanticBuilder, SymbolFlags};
@@ -183,6 +183,9 @@ pub struct ModuleImport {
     pub source: String,
     /// True when the import came from `<script setup>`.
     pub from_setup: bool,
+    /// The local name of the runtime default import, when there is one
+    /// (`import X from` or `import { default as X } from`).
+    pub default_name: Option<String>,
 }
 
 /// Module-scope facts shared by both blocks.
@@ -591,6 +594,28 @@ fn project_normal(
         .transpose()
 }
 
+/// The local name a runtime import binds to the module's default export.
+fn default_import_name(import: &ImportDeclaration<'_>) -> Option<String> {
+    if import.import_kind.is_type() {
+        return None;
+    }
+    import
+        .specifiers
+        .as_ref()?
+        .iter()
+        .find_map(|specifier| match specifier {
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(spec) => {
+                Some(spec.local.name.to_string())
+            }
+            ImportDeclarationSpecifier::ImportSpecifier(spec)
+                if !spec.import_kind.is_type() && spec.imported.name().as_str() == "default" =>
+            {
+                Some(spec.local.name.to_string())
+            }
+            _ => None,
+        })
+}
+
 fn collect_imports<'a>(
     program: &Program<'a>,
     block: ScriptBlockInput<'a>,
@@ -605,6 +630,7 @@ fn collect_imports<'a>(
                 span: range(import.span, block.content_start),
                 source: import.source.value.to_string(),
                 from_setup,
+                default_name: default_import_name(import),
             });
             if let Some(verter_parser::utils::oxc::vue::ScriptItem::Import(import)) =
                 try_process_import(statement, &ctx)
