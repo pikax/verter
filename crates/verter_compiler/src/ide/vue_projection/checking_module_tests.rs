@@ -3627,3 +3627,19 @@ defineProps<{ depth: number }>();
         "{text}"
     );
 }
+
+#[test]
+fn fallthrough_named_import_from_the_carrier_is_an_ordinary_root() {
+    // Only the default import is this carrier's constructor; a named export
+    // it re-exports is another component.
+    let module = composed(
+        r#"<script setup lang="ts">
+import { Anchor as Root } from './Comp.vue';
+</script><template><Root/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(
+        text.contains("if (__VerterRootProbe) return __VerterRootArm"),
+        "{text}"
+    );
+}

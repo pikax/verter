@@ -145,6 +145,8 @@ pub enum SetupStatementKind {
     Import {
         /// Imported local names.
         names: Vec<String>,
+        /// The local name of the default import, when there is one.
+        default_name: Option<String>,
     },
     /// Type-only declaration (`type`, `interface`); hoists to module scope
     /// when nothing it reads is bound only in the setup scope.
@@ -694,6 +696,24 @@ fn project_setup(
 fn classify(statement: &Statement<'_>, base: u32) -> SetupStatementKind {
     match statement {
         Statement::ImportDeclaration(import) => SetupStatementKind::Import {
+            default_name: import
+                .specifiers
+                .as_ref()
+                .filter(|_| !import.import_kind.is_type())
+                .and_then(|specifiers| {
+                    specifiers.iter().find_map(|specifier| match specifier {
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(spec) => {
+                            Some(spec.local.name.to_string())
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(spec)
+                            if !spec.import_kind.is_type()
+                                && spec.imported.name().as_str() == "default" =>
+                        {
+                            Some(spec.local.name.to_string())
+                        }
+                        _ => None,
+                    })
+                }),
             names: if import.import_kind.is_type() {
                 Vec::new()
             } else {

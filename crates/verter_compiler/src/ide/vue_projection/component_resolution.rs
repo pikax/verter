@@ -188,8 +188,8 @@ impl ComponentResolutionProjection {
     }
 }
 
-/// The setup-imported names whose relative specifier resolves to the
-/// carrier itself.
+/// The setup default imports whose relative specifier resolves to the
+/// carrier itself: each names this carrier's own constructor.
 fn self_imported_names<'a>(
     script: &'a ScriptProjectionFacts,
     canonical_id: &str,
@@ -199,14 +199,18 @@ fn self_imported_names<'a>(
         return names;
     };
     for statement in &setup.statements {
-        let SetupStatementKind::Import { names: imported } = &statement.kind else {
+        let SetupStatementKind::Import {
+            default_name: Some(name),
+            ..
+        } = &statement.kind
+        else {
             continue;
         };
         let imports_carrier = script.module.imports.iter().any(|import| {
             import.span == statement.span && specifier_names(&import.source, canonical_id)
         });
         if imports_carrier {
-            names.extend(imported.iter().map(String::as_str));
+            names.insert(name.as_str());
         }
     }
     names
@@ -256,7 +260,7 @@ pub fn project_component_resolution(
     if let Some(setup) = &script.setup {
         for statement in &setup.statements {
             match &statement.kind {
-                SetupStatementKind::Import { names }
+                SetupStatementKind::Import { names, .. }
                 | SetupStatementKind::Declaration { names } => {
                     known.extend(names.iter().map(String::as_str));
                 }

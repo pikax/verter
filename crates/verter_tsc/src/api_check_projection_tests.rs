@@ -604,7 +604,7 @@ new Div({ title: 'native', 'data-test': 1 });
 new Anchor({ href: '/target' });
 new Numeric({ title: 42 });
 new Wrapper({});
-new Wrapper({ realProp: 42 });
+new Wrapper({ optProp: 42 });
 new NumericWrapper({ value: 42 });
 const exposed = new AttrsWrapper<number>({ value: 42, format: n => n.toFixed() });
 exposed.value.toFixed();
@@ -639,7 +639,7 @@ new Disabled({ title: 'disabled' });
 // @ts-expect-error Declared numeric title takes precedence over HTML title.
 new Numeric({ title: 'wrong' });
 // @ts-expect-error The child prop remains numeric.
-new Wrapper({ realProp: 'wrong' });
+new Wrapper({ optProp: 'wrong' });
 // @ts-expect-error The Options default also has a finite root contract.
 new Options({ invented: true });
 // @ts-expect-error Neither conditional arm accepts this key.

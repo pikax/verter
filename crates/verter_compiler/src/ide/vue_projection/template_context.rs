@@ -109,7 +109,7 @@ pub fn project_template_context(
             .statements
             .iter()
             .flat_map(|statement| match &statement.kind {
-                SetupStatementKind::Import { names }
+                SetupStatementKind::Import { names, .. }
                 | SetupStatementKind::Declaration { names } => names.as_slice(),
                 SetupStatementKind::TypeDeclaration { .. } | SetupStatementKind::Other => &[],
             })

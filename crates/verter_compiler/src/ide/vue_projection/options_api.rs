@@ -197,7 +197,7 @@ impl OptionsTemplateBindingView {
             for statement in &setup.statements {
                 match &statement.kind {
                     SetupStatementKind::Declaration { names }
-                    | SetupStatementKind::Import { names } => {
+                    | SetupStatementKind::Import { names, .. } => {
                         for name in names {
                             bindings.push(TemplateBinding {
                                 name: name.clone(),
