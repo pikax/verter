@@ -15,6 +15,14 @@ function resolvedTypeRow(display: string) {
       provenance: { kind: "resolved", value: "semanticEvaluator" },
     } as const,
     terminalDisplay: { text: display },
+    ...(display === "string"
+      ? {
+          typeFact: {
+            kind: "complete" as const,
+            value: { kind: "primitive" as const, name: "string" },
+          },
+        }
+      : {}),
   };
 }
 
@@ -116,13 +124,6 @@ function createMockSession(baseFiles: Map<string, string>): NativeMetaSession {
     getComponentMeta(id: string) {
       const overlay = overlays.get(id);
       if (overlay === null) return null; // tombstoned
-      const source = overlay ?? baseFiles.get(id);
-      if (!source) return null;
-      return JSON.stringify(nativeMetaPayload(id));
-    },
-    getResolvedComponentMeta(id: string) {
-      const overlay = overlays.get(id);
-      if (overlay === null) return null;
       const source = overlay ?? baseFiles.get(id);
       if (!source) return null;
       return JSON.stringify(nativeMetaPayload(id));
@@ -807,7 +808,7 @@ describe("ComponentMetaSession public API", () => {
     expect(nativeMeta?.typeRegistry?.[0]?.declaration?.canonicalSource).toBe("/test/types.ts");
   });
 
-  it("routes public project queries through canonical metadata and native project queries through resolved metadata", async () => {
+  it("routes native and compat project queries through canonical metadata", async () => {
     const getComponentMeta = vi.fn(() => nativeMetaPayload("/test/Button.vue"));
     const getResolvedComponentMeta = vi.fn(() => ({
       ...nativeMetaPayload("/test/Button.vue"),
@@ -839,13 +840,13 @@ describe("ComponentMetaSession public API", () => {
     const compatMeta = await project.getComponentMeta("Button.vue");
     const nativeMeta = await project.getNativeComponentMeta("Button.vue");
 
-    expect(getComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getComponentMeta).toHaveBeenCalledTimes(2);
+    expect(getResolvedComponentMeta).not.toHaveBeenCalled();
     expect(compatMeta.props.map((prop) => prop.name)).toEqual(["label"]);
-    expect(nativeMeta?.resolution?.mode).toBe("expanded");
+    expect(nativeMeta).toEqual(nativeMetaPayload("/test/Button.vue"));
   });
 
-  it("does not downgrade native project queries when resolved metadata is unavailable", async () => {
+  it("serves native project queries without a separate resolved method", async () => {
     const getComponentMeta = vi.fn(() => nativeMetaPayload("/test/Button.vue"));
     const session = {
       closed: false,
@@ -866,10 +867,10 @@ describe("ComponentMetaSession public API", () => {
     };
     const project = new ComponentMetaSession(session as any, "/test");
 
-    await expect(project.getNativeComponentMeta("Button.vue")).rejects.toThrow(
-      /resolved component-meta query/i,
+    await expect(project.getNativeComponentMeta("Button.vue")).resolves.toEqual(
+      nativeMetaPayload("/test/Button.vue"),
     );
-    expect(getComponentMeta).not.toHaveBeenCalled();
+    expect(getComponentMeta).toHaveBeenCalledOnce();
   });
 
   it("keeps public-instance members off the public session API compat exposed surface", async () => {

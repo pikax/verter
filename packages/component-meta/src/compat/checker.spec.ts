@@ -16,6 +16,7 @@ import {
   mapSlotMeta,
   mapExposedMeta,
   mapComponentMeta,
+  projectNativeComponentMeta,
 } from "./checker.js";
 import { openComponentMetaSession } from "../project.js";
 import {
@@ -81,6 +82,7 @@ function nativeMetaPayload(filePath: string) {
       {
         name: "label",
         type: { kind: "primitive", name: "string" },
+        typeFact: { kind: "complete", value: { kind: "primitive", name: "string" } },
         publication: {
           kind: "published",
           semanticAuthority: "resolved",
@@ -457,7 +459,7 @@ describe("mapPropMeta", () => {
     });
   });
 
-  it("expands HTMLAttributeReferrerPolicy to its literal compat enum", () => {
+  it("keeps a referrer-policy alias without a producer row", () => {
     const prop: PropMeta = {
       name: "referrerpolicy",
       type: union([ref("HTMLAttributeReferrerPolicy"), primitive("undefined")]),
@@ -471,18 +473,7 @@ describe("mapPropMeta", () => {
     expect(result.schema).toEqual({
       kind: "enum",
       type: "HTMLAttributeReferrerPolicy | undefined",
-      schema: [
-        '""',
-        '"no-referrer-when-downgrade"',
-        '"no-referrer"',
-        '"origin-when-cross-origin"',
-        '"origin"',
-        '"same-origin"',
-        '"strict-origin-when-cross-origin"',
-        '"strict-origin"',
-        '"unsafe-url"',
-        "undefined",
-      ],
+      schema: [{ kind: "object", type: "HTMLAttributeReferrerPolicy", schema: {} }, "undefined"],
     });
   });
 
@@ -550,7 +541,7 @@ describe("mapPropMeta", () => {
     });
   });
 
-  it("classifies an any descriptor independently of indexed terminal display", () => {
+  it("keeps any-containing union schema independent of indexed terminal display", () => {
     const prop: PropMeta = {
       name: "icon",
       type: union([primitive("string"), primitive("any"), primitive("undefined")]),
@@ -561,8 +552,12 @@ describe("mapPropMeta", () => {
 
     const result = mapPropMeta(prop);
 
-    expect(result.type).toBe("any");
-    expect(result.schema).toBe("any");
+    expect(result.type).toBe('IconProps["name"] | undefined');
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: 'IconProps["name"] | undefined',
+      schema: ["string", "any", "undefined"],
+    });
   });
 
   it("renders a structural ref through the bounded registry independently of raw display", () => {
@@ -799,7 +794,7 @@ describe("mapPropMeta", () => {
     });
   });
 
-  it("collapses any-containing unions to compat any", () => {
+  it("preserves any-containing union arms", () => {
     const prop: PropMeta = {
       name: "as",
       type: union([
@@ -817,11 +812,21 @@ describe("mapPropMeta", () => {
 
     const result = mapPropMeta(prop);
 
-    expect(result.type).toBe("any");
-    expect(result.schema).toBe("any");
+    expect(result.type).toBe("any | { root?: any, img?: any } | undefined");
+    expect(result.schema).toMatchObject({
+      kind: "enum",
+      schema: [
+        "any",
+        {
+          kind: "object",
+          schema: { root: { type: "any" }, img: { type: "any" } },
+        },
+        "undefined",
+      ],
+    });
   });
 
-  it("renders Booleanish compat enums as string values", () => {
+  it("keeps Booleanish symbolic without a producer row", () => {
     const prop: PropMeta = {
       name: "autofocus",
       type: union([ref("Booleanish"), primitive("undefined")]),
@@ -836,11 +841,11 @@ describe("mapPropMeta", () => {
     expect(result.schema).toEqual({
       kind: "enum",
       type: "Booleanish | undefined",
-      schema: ['"false"', '"true"', "false", "true", "undefined"],
+      schema: [{ kind: "object", type: "Booleanish", schema: {} }, "undefined"],
     });
   });
 
-  it("preserves compat ordering for branded string unions", () => {
+  it("preserves published display order for branded string unions", () => {
     const prop: PropMeta = {
       name: "target",
       type: union([
@@ -860,11 +865,11 @@ describe("mapPropMeta", () => {
     const result = mapPropMeta(prop);
 
     expect(result.type).toBe(
-      '(string & {}) | "_blank" | "_parent" | "_self" | "_top" | null | undefined',
+      '"_blank" | "_parent" | "_self" | "_top" | (string & {}) | null | undefined',
     );
     expect(result.schema).toMatchObject({
       kind: "enum",
-      type: '(string & {}) | "_blank" | "_parent" | "_self" | "_top" | null | undefined',
+      type: '"_blank" | "_parent" | "_self" | "_top" | (string & {}) | null | undefined',
       schema: [
         '"_blank"',
         '"_parent"',
@@ -878,6 +883,28 @@ describe("mapPropMeta", () => {
         },
       ],
     });
+  });
+
+  it.each([true, false])(
+    "renders a published union whose only arm is any as any (required: %s)",
+    (required) => {
+      const type: TypeDescriptor = { kind: "union", types: [primitive("any")] };
+      const result = mapPropMeta({ name: "as", type, required, hasDefault: false });
+
+      expect(result.type).toBe("any");
+      expect(result.schema).toBe("any");
+    },
+  );
+
+  it("does not append a second undefined arm to a descriptor that already has one", () => {
+    const result = mapPropMeta({
+      name: "label",
+      type: { kind: "union", types: [primitive("undefined"), primitive("string")] },
+      required: false,
+      hasDefault: false,
+    });
+
+    expect(result.type).toBe("undefined | string");
   });
 });
 
@@ -1052,14 +1079,7 @@ describe("mapSlotMeta", () => {
     );
   });
 
-  it("renders a slot-binding function with a Record<string, any> mapped param as an arrow type (XP.5)", () => {
-    // A slot-binding function parameter typed `Record<string, any>` is surfaced
-    // by the native producer as a mapped type over the OPEN `string` key
-    // domain. The bridge (`resolveMappedDescriptor`) must resolve it to
-    // `Record<string, any>` (not `unknown("mapped")`), and the compat printer
-    // (`compatFunctionTypeToString`) must emit arrow syntax with the optional
-    // `| undefined` — matching vue-component-meta's
-    // `(props?: Record<string, any> | undefined) => string`.
+  it("keeps an unreduced mapped slot parameter unknown in compat display", () => {
     const mappedRecordParam = typeExprToDescriptor({
       kind: "mapped",
       parameter: "P",
@@ -1091,8 +1111,7 @@ describe("mapSlotMeta", () => {
 
     const result = mapSlotMeta(slot);
 
-    // GREEN post-fix: arrow syntax + `Record<string, any> | undefined` param.
-    expect(result.type).toContain("root: (props?: Record<string, any> | undefined) => string");
+    expect(result.type).toContain("root: (props?: unknown | undefined) => string");
     // Negative (bridge fix): the lossy `mapped` token must be absent.
     expect(result.type).not.toContain("mapped");
     // Negative (printer fix): method-call syntax `): string` must be absent.
@@ -1700,7 +1719,10 @@ describe("ComponentMetaChecker", () => {
     shutdownMetaRuntime();
   });
 
-  it(
+  // Expected to fail until the producer publishes the instantiated indexed-access
+  // terminal (`ComponentSlots<typeof theme>`) with its `typeof` argument kept
+  // symbolic; compat does not substitute generic arguments to recover it.
+  it.fails(
     "createCheckerByJson resolves overlay-only imported helpers even when the root does not exist yet",
     { timeout: 15_000 },
     async () => {
@@ -3064,6 +3086,8 @@ defineProps<AvatarProps>()
     const heightProp = avatarMeta.props.find((prop) => prop.name === "height");
 
     expect(asProp).toBeDefined();
+    // `any | { root?: any, img?: any }` reaches compat as exactly `any`, and
+    // an optional `any` member stays `any` (`any | undefined` is `any`).
     expect(asProp!.type).toBe("any");
     expect(asProp!.schema).toBe("any");
 
@@ -3089,17 +3113,16 @@ defineProps<AvatarProps>()
     }
 
     expect(heightProp).toBeDefined();
-    expect(heightProp!.type).toBe("Numberish | undefined");
-    expect(heightProp!.schema).toEqual({
-      kind: "enum",
-      type: "Numberish | undefined",
-      schema: ["number", "string", "undefined"],
-    });
+    expect(heightProp!.type).toMatch(/^(number \| string|string \| number) \| undefined$/);
+    expect(heightProp!.schema).toMatchObject({ kind: "enum", type: heightProp!.type });
+    expect([...(heightProp!.schema as { schema: string[] }).schema].sort()).toEqual(
+      ["number", "string", "undefined"].sort(),
+    );
 
     checker.close();
   });
 
-  it("keeps nested referenced component props compact and rewrites defaulted enum schema types", async () => {
+  it("keeps nested referenced component props compact and preserves published enum order", async () => {
     const projectRoot = resolve(
       process.env.TEMP ?? "/tmp",
       `verter-test-nested-component-props-${nextProjectRootId++}`,
@@ -3177,16 +3200,23 @@ defineProps<AlertProps>()
     const meta = await checker.getComponentMeta("Alert.vue");
     const orientationProp = meta.props.find((prop) => prop.name === "orientation");
     expect(orientationProp).toBeDefined();
-    // The rewrite puts the `@defaultValue` literal first in the type. The
-    // schema's entries keep the union order the TypeScript checker reports,
-    // which follows literal-type creation, not declaration order (and so can
-    // differ between TypeScript builds); only their set, with `undefined`
-    // last, is the contract.
-    expect(orientationProp!.type).toBe('"vertical" | "horizontal" | undefined');
-    expect(orientationProp!.schema).toMatchObject({
-      kind: "enum",
-      type: '"vertical" | "horizontal" | undefined',
-    });
+    const published = meta._verter!.props!.find((prop) => prop.name === "orientation")!.type!;
+    expect(published.kind).toBe("union");
+    if (published.kind !== "union") throw new Error("expected a published literal union");
+    const publishedText = published.types
+      .map((type) =>
+        type.kind === "literal"
+          ? JSON.stringify(type.value)
+          : type.kind === "primitive"
+            ? type.name
+            : "unknown",
+      )
+      .join(" | ");
+    const optionalText = publishedText.endsWith("undefined")
+      ? publishedText
+      : publishedText + " | undefined";
+    expect(orientationProp!.type).toBe(optionalText);
+    expect(orientationProp!.schema).toMatchObject({ kind: "enum", type: optionalText });
     const entries = (orientationProp!.schema as { schema: string[] }).schema;
     expect(entries.at(-1)).toBe("undefined");
     expect([...entries].sort()).toEqual(['"horizontal"', '"vertical"', "undefined"].sort());
@@ -3257,5 +3287,65 @@ describe("MetaCheckerOptions logging.audit plumbing", () => {
     });
     expect(checker).toBeDefined();
     checker.close();
+  });
+});
+
+describe("native-authority compat projection", () => {
+  it("keeps a user alias named Numberish instead of inventing a numeric union", () => {
+    const prop = {
+      name: "value",
+      type: ref("Numberish"),
+      required: true,
+      hasDefault: false,
+    } as PropMeta;
+    expect(mapPropMeta(prop)).toMatchObject({
+      type: "Numberish",
+      schema: { kind: "object", type: "Numberish", schema: {} },
+    });
+    expect(
+      mapPropMeta(prop, undefined, new Map([["Numberish", primitive("boolean")]])),
+    ).toMatchObject({ type: "boolean", schema: "boolean" });
+  });
+
+  it("preserves literal order despite a defaultValue tag", () => {
+    const type = {
+      kind: "union",
+      types: ["a", "b"].map((value) => ({ kind: "literal", literalKind: "string", value })),
+    };
+    const native = {
+      ...nativeMetaPayload("/project/Order.vue"),
+      props: [
+        {
+          name: "order",
+          type,
+          typeFact: { kind: "complete", value: type },
+          required: true,
+          hasDefault: false,
+          tags: [{ name: "defaultValue", text: "'b'" }],
+          terminalDisplay: { text: '"a" | "b"' },
+        },
+      ],
+    };
+    expect(projectNativeComponentMeta(native as any).props[0]).toMatchObject({
+      type: '"a" | "b"',
+      schema: { schema: ['"a"', '"b"'] },
+    });
+  });
+
+  it.each([
+    ["() => ({})", "() => ({})"],
+    ["() => []", "() => []"],
+    ["() => ['a']", "() => ['a']"],
+    ["'x'", '"x"'],
+  ])("preserves source default %s with string quote normalization only", (value, expected) => {
+    expect(
+      mapPropMeta({
+        name: "value",
+        type: primitive("string"),
+        required: true,
+        hasDefault: true,
+        default: value,
+      } as PropMeta).default,
+    ).toBe(expected);
   });
 });

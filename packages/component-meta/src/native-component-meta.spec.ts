@@ -1223,11 +1223,9 @@ describe("nativeComponentMetaToComponentMeta", () => {
     native.typeRegistry[0].declaration = typeDeclaration("/project/src/Link.vue", "NuxtLinkProps");
     const local = nativeComponentMetaToComponentMeta(native);
     expect(local.props[0]?.type).toEqual({
-      kind: "union",
-      types: [
-        { kind: "ref", name: "RouteLocationRaw" },
-        { kind: "primitive", name: "undefined" },
-      ],
+      kind: "indexedAccess",
+      objectType: { kind: "ref", name: "NuxtLinkProps" },
+      indexType: { kind: "literal", value: "to" },
     });
   });
 

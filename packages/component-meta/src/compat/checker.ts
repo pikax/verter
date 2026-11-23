@@ -40,6 +40,7 @@ import type {
 } from "./types.js";
 import {
   flattenSchemaEnumEntries,
+  joinRegistryRef,
   typeDescriptorToSchema,
   typeDescriptorToString,
 } from "./schema.js";
@@ -61,22 +62,6 @@ import type {
   ProjectSession,
 } from "../runtime/index.js";
 
-/** Maximum depth for recursive registry ref resolution in compat display.
- *  Kept at 1 to preserve the shallow-resolution invariant. */
-const COMPAT_MAX_REGISTRY_DISPLAY_DEPTH = 1;
-
-const COMPAT_REFERRER_POLICY_LITERALS = [
-  '""',
-  '"no-referrer-when-downgrade"',
-  '"no-referrer"',
-  '"origin-when-cross-origin"',
-  '"origin"',
-  '"same-origin"',
-  '"strict-origin-when-cross-origin"',
-  '"strict-origin"',
-  '"unsafe-url"',
-] as const;
-
 function isCompatVisibleSlot(slot: SlotMeta): boolean {
   return compatSlotSurvives(slot.name, slot.declaredInMacroTypeArg === true);
 }
@@ -88,17 +73,19 @@ function isCompatVisibleSlot(slot: SlotMeta): boolean {
  */
 const unionArms = (t: TypeDescriptor): TypeDescriptor[] => (t.kind === "union" ? t.types : [t]);
 
-/**
- * Returns the intersection arms of a `TypeDescriptor`, or the descriptor
- * wrapped in a single-element array if it is not an intersection. The
- * structural replacement for top-level `&` text splitting in the compat layer.
- */
-const intersectionArms = (t: TypeDescriptor): TypeDescriptor[] =>
-  t.kind === "intersection" ? t.types : [t];
-
 /** Structural predicate matching `primitive("undefined")`. */
 const isUndefinedPrimitive = (t: TypeDescriptor): boolean =>
   t.kind === "primitive" && t.name === "undefined";
+
+/** Structural predicate matching `primitive("any")`. */
+const isAnyPrimitive = (t: TypeDescriptor): boolean => t.kind === "primitive" && t.name === "any";
+
+/**
+ * Structural predicate: the descriptor is exactly `any`, either
+ * `primitive("any")` or a published union whose only arm is exactly `any`.
+ */
+const isExactAny = (t: TypeDescriptor): boolean =>
+  t.kind === "union" ? t.types.length === 1 && isExactAny(t.types[0]!) : isAnyPrimitive(t);
 
 /**
  * Returns `t` with any top-level union arm of `primitive("undefined")` removed.
@@ -119,60 +106,6 @@ function stripUndefinedArm(t: TypeDescriptor): TypeDescriptor {
 /** Structural predicate: does the descriptor's top-level union include `undefined`? */
 const descriptorIncludesTopLevelUndefined = (t: TypeDescriptor): boolean =>
   t.kind === "union" && t.types.some(isUndefinedPrimitive);
-
-/**
- * Structural predicate: is `t` ALREADY an `undefined`-bearing type for the
- * purpose of an optional parameter's implicit `| undefined` arm?
- *
- * True for a bare `undefined` primitive, a top-level union that already
- * includes `undefined`, or a ref/alias that resolves (through `typeRegistry`)
- * to either of those. Appending `| undefined` to such a type would double the
- * arm (`undefined | undefined`), so the optional-param printer skips the
- * append when this holds. The `seen` set guards against a ref cycle.
- */
-const descriptorIsAlreadyUndefined = (
-  t: TypeDescriptor,
-  typeRegistry?: Map<string, TypeDescriptor>,
-  seen: Set<string> = new Set(),
-): boolean => {
-  if (isUndefinedPrimitive(t) || descriptorIncludesTopLevelUndefined(t)) {
-    return true;
-  }
-  if (t.kind === "ref" && typeRegistry && !seen.has(t.name)) {
-    const resolved = typeRegistry.get(t.name);
-    if (resolved) {
-      seen.add(t.name);
-      return descriptorIsAlreadyUndefined(resolved, typeRegistry, seen);
-    }
-  }
-  return false;
-};
-
-/**
- * Structural predicate: does `t` (recursing into top-level union /
- * intersection arms) contain an `IndexedAccessType` whose `indexType` is a
- * string literal equal to `key`, OR a `RefType` named `ComponentSlots` /
- * `ComponentUI` when `key` is `"slots"` / `"ui"`?
- *
- * The slots-helper and UI-helper projections gate on this structural marker.
- */
-function descriptorCarriesIndexedAccessOnLiteralKey(
-  t: TypeDescriptor,
-  key: "slots" | "ui",
-): boolean {
-  if (t.kind === "indexedAccess") {
-    return t.indexType.kind === "literal" && t.indexType.value === key;
-  }
-  if (t.kind === "ref") {
-    return (
-      (key === "slots" && t.name === "ComponentSlots") || (key === "ui" && t.name === "ComponentUI")
-    );
-  }
-  if (t.kind === "union" || t.kind === "intersection") {
-    return t.types.some((arm) => descriptorCarriesIndexedAccessOnLiteralKey(arm, key));
-  }
-  return false;
-}
 
 /**
  * Minimal workspace interface used by the checker.
@@ -285,40 +218,16 @@ export function mapPropMeta(
       `component-meta compat cannot project ${prop.name} without a required fact or type`,
     );
   }
-  const classification = classifyCompatPropDescriptor(prop, typeRegistry);
-  switch (classification.kind) {
-    case "any":
-      return renderCompatAnyPropMeta(prop);
-    case "booleanish":
-      return renderCompatBooleanishPropMeta(prop);
-    case "numberish":
-      return renderCompatNumberishPropMeta(prop);
-    case "slots": {
-      const rendered = renderCompatSlotsPropMeta(prop, classification.slotNames);
-      return buildCompatPropertyMeta(prop, rendered.type, rendered.schema);
-    }
-    case "referrerPolicy":
-      return renderCompatReferrerPolicyPropMeta(prop);
-    case "functionArray":
-      return renderCompatFunctionArrayUnionPropMeta(
-        prop,
-        classification.functionArm,
-        classification.arrayElement,
-        typeRegistry,
-      );
-    case "prefetch":
-      return renderCompatPrefetchOnPropMeta(prop);
-    case "nuxtLink":
-      return renderCompatNuxtLinkToPropMeta(prop);
-    case "button":
-      return renderCompatHtmlButtonTypePropMeta(prop);
-    case "stringBrand":
-      return renderCompatStringBrandUnionPropMeta(prop, classification.arms);
-    case "unsupported":
-    case "default":
-      break;
-  }
-
+  // A member whose descriptor is exactly `any` (an unannotated member is
+  // transcribed to it above) renders `any`: TypeScript reduces `any | undefined`
+  // to `any`, so an optional member never gains an `undefined` arm. Decided on
+  // the descriptor kind alone — display text never takes part.
+  if (isExactAny(prop.type)) return buildCompatPropertyMeta(prop, "any", "any");
+  const functionArray = classifyFunctionArrayDescriptor(prop.type, typeRegistry);
+  if (functionArray)
+    return renderCompatFunctionArrayUnionPropMeta(prop, functionArray, typeRegistry);
+  const brandArms = classifyStringBrandArms(prop.type);
+  if (brandArms) return renderCompatStringBrandUnionPropMeta(prop, brandArms);
   const type = preferredCompatPropTypeText(prop, typeRegistry);
   const schema = normalizeOptionalPropSchema(
     typeDescriptorToSchema(prop.type, options, typeRegistry),
@@ -329,244 +238,6 @@ export function mapPropMeta(
 }
 
 type FunctionDescriptor = Extract<TypeDescriptor, { kind: "function" }>;
-
-type CompatPropDescriptorClassification =
-  | { kind: "any" }
-  | { kind: "booleanish" }
-  | { kind: "numberish" }
-  | { kind: "slots"; slotNames: string[] }
-  | { kind: "referrerPolicy" }
-  | {
-      kind: "functionArray";
-      functionArm: FunctionDescriptor;
-      arrayElement: FunctionDescriptor;
-    }
-  | { kind: "prefetch" }
-  | { kind: "nuxtLink" }
-  | { kind: "button" }
-  | { kind: "stringBrand"; arms: TypeDescriptor[] }
-  | { kind: "unsupported" }
-  | { kind: "default" };
-
-function classifyCompatPropDescriptor(
-  prop: KnownRequiredProp,
-  typeRegistry?: Map<string, TypeDescriptor>,
-): CompatPropDescriptorClassification {
-  if (prop.type.kind === "unknown") {
-    return { kind: "unsupported" };
-  }
-  if (
-    (prop.tags ?? []).some((tag) => tag.name === "IconifyIcon") ||
-    unionArms(prop.type).some((arm) => arm.kind === "primitive" && arm.name === "any")
-  ) {
-    return { kind: "any" };
-  }
-  if (descriptorIsBooleanish(prop.type)) {
-    return { kind: "booleanish" };
-  }
-  if (descriptorIsDirectRefWithOptionalUndefined(prop.type, "Numberish")) {
-    return { kind: "numberish" };
-  }
-  const slotNames = classifyCompatSlotsDescriptor(prop.type);
-  if (slotNames) {
-    return { kind: "slots", slotNames };
-  }
-  if (descriptorIsDirectRefWithOptionalUndefined(prop.type, "HTMLAttributeReferrerPolicy")) {
-    return { kind: "referrerPolicy" };
-  }
-  const functionArray = classifyFunctionArrayDescriptor(prop.type, typeRegistry);
-  if (functionArray) {
-    return { kind: "functionArray", ...functionArray };
-  }
-  if (descriptorIsPrefetchOn(prop.type)) {
-    return { kind: "prefetch" };
-  }
-  if (descriptorIsNuxtLinkTo(prop.type)) {
-    return { kind: "nuxtLink" };
-  }
-  if (prop.name === "type" && descriptorIsHtmlButtonType(prop.type)) {
-    return { kind: "button" };
-  }
-  const brandArms = classifyStringBrandArms(prop.type);
-  if (brandArms) {
-    return { kind: "stringBrand", arms: brandArms };
-  }
-  return { kind: "default" };
-}
-
-function descriptorIsDirectRefWithOptionalUndefined(type: TypeDescriptor, name: string): boolean {
-  const arms = unionArms(type);
-  return (
-    arms.filter(
-      (arm) => arm.kind === "ref" && arm.name === name && (arm.typeArguments?.length ?? 0) === 0,
-    ).length === 1 &&
-    arms.every(
-      (arm) =>
-        (arm.kind === "ref" && arm.name === name && (arm.typeArguments?.length ?? 0) === 0) ||
-        isUndefinedPrimitive(arm),
-    ) &&
-    arms.filter(isUndefinedPrimitive).length <= 1
-  );
-}
-
-function descriptorIsBooleanish(type: TypeDescriptor): boolean {
-  const arms = unionArms(type);
-  return (
-    arms.some((arm) => arm.kind === "ref" && arm.name === "Booleanish") &&
-    arms.every(
-      (arm) => (arm.kind === "ref" && arm.name === "Booleanish") || isUndefinedPrimitive(arm),
-    )
-  );
-}
-
-function classifyCompatSlotsDescriptor(type: TypeDescriptor): string[] | undefined {
-  if (!descriptorCarriesIndexedAccessOnLiteralKey(type, "slots")) {
-    return undefined;
-  }
-  const descriptor = unwrapComponentSlotsDescriptor(type);
-  if (
-    !descriptor ||
-    !descriptor.properties.every(
-      (property) => !typeDescriptorHasStructuredObjectSurface(property.type),
-    )
-  ) {
-    return undefined;
-  }
-  const names = descriptor.properties.map((property) => property.name);
-  return names.length > 0 ? names : undefined;
-}
-
-function resolveCompatClassificationDescriptor(
-  type: TypeDescriptor,
-  typeRegistry: Map<string, TypeDescriptor> | undefined,
-  seen: Set<string> = new Set(),
-): TypeDescriptor {
-  if (
-    type.kind !== "ref" ||
-    (type.typeArguments?.length ?? 0) > 0 ||
-    !typeRegistry ||
-    seen.has(type.name)
-  ) {
-    return type;
-  }
-  const resolved = typeRegistry.get(type.name);
-  if (!resolved) {
-    return type;
-  }
-  seen.add(type.name);
-  const result = resolveCompatClassificationDescriptor(resolved, typeRegistry, seen);
-  seen.delete(type.name);
-  return result;
-}
-
-function classifyFunctionArrayDescriptor(
-  type: TypeDescriptor,
-  typeRegistry?: Map<string, TypeDescriptor>,
-): { functionArm: FunctionDescriptor; arrayElement: FunctionDescriptor } | undefined {
-  const stripped = stripUndefinedArm(type);
-  if (stripped.kind !== "union" || stripped.types.length !== 2) {
-    return undefined;
-  }
-  let functionArm: FunctionDescriptor | undefined;
-  let arrayElement: FunctionDescriptor | undefined;
-  for (const arm of stripped.types) {
-    const resolvedArm = resolveCompatClassificationDescriptor(arm, typeRegistry);
-    if (resolvedArm.kind === "function") {
-      functionArm = resolvedArm;
-      continue;
-    }
-    if (resolvedArm.kind !== "array") {
-      return undefined;
-    }
-    const resolvedElement = resolveCompatClassificationDescriptor(
-      resolvedArm.element,
-      typeRegistry,
-    );
-    if (resolvedElement.kind !== "function") {
-      return undefined;
-    }
-    arrayElement = resolvedElement;
-  }
-  if (
-    !functionArm ||
-    !arrayElement ||
-    !descriptorsStructurallyEquivalent(functionArm, arrayElement)
-  ) {
-    return undefined;
-  }
-  return { functionArm, arrayElement };
-}
-
-function descriptorIsPrefetchOn(type: TypeDescriptor): boolean {
-  const stripped = stripUndefinedArm(type);
-  if (stripped.kind !== "union" || stripped.types.length !== 3) {
-    return false;
-  }
-  const arms = stripped.types;
-  return (
-    arms.filter((arm) => arm.kind === "literal" && arm.value === "visibility").length === 1 &&
-    arms.filter((arm) => arm.kind === "literal" && arm.value === "interaction").length === 1 &&
-    arms.filter(descriptorIsPrefetchPartialPair).length === 1
-  );
-}
-
-function descriptorIsPrefetchPartialPair(type: TypeDescriptor): boolean {
-  if (type.kind !== "ref" || type.name !== "Partial" || type.typeArguments?.length !== 1) {
-    return false;
-  }
-  const target = type.typeArguments[0];
-  if (
-    target?.kind !== "object" ||
-    target.properties.length !== 2 ||
-    (target.indexSignatures?.length ?? 0) !== 0 ||
-    (target.callSignatures?.length ?? 0) !== 0 ||
-    (target.constructSignatures?.length ?? 0) !== 0
-  ) {
-    return false;
-  }
-  const visibility = target.properties.find((property) => property.name === "visibility");
-  const interaction = target.properties.find((property) => property.name === "interaction");
-  return (
-    visibility?.type.kind === "primitive" &&
-    visibility.type.name === "boolean" &&
-    interaction?.type.kind === "primitive" &&
-    interaction.type.name === "boolean"
-  );
-}
-
-function descriptorIsNuxtLinkTo(type: TypeDescriptor): boolean {
-  const stripped = stripUndefinedArm(type);
-  return (
-    (stripped.kind === "indexedAccess" &&
-      stripped.objectType.kind === "ref" &&
-      stripped.objectType.name === "NuxtLinkProps" &&
-      stripped.indexType.kind === "literal" &&
-      stripped.indexType.value === "to") ||
-    (stripped.kind === "ref" && stripped.name === "RouteLocationRaw")
-  );
-}
-
-function descriptorIsHtmlButtonType(type: TypeDescriptor): boolean {
-  const stripped = stripUndefinedArm(type);
-  if (
-    stripped.kind === "indexedAccess" &&
-    stripped.objectType.kind === "ref" &&
-    stripped.objectType.name === "ButtonHTMLAttributes" &&
-    stripped.indexType.kind === "literal" &&
-    stripped.indexType.value === "type"
-  ) {
-    return true;
-  }
-  if (stripped.kind !== "union" || stripped.types.length !== 3) {
-    return false;
-  }
-  const values = new Set(
-    stripped.types.map((arm) =>
-      arm.kind === "literal" && typeof arm.value === "string" ? arm.value : undefined,
-    ),
-  );
-  return values.size === 3 && values.has("button") && values.has("submit") && values.has("reset");
-}
 
 function classifyStringBrandArms(type: TypeDescriptor): TypeDescriptor[] | undefined {
   const stripped = stripUndefinedArm(type);
@@ -756,112 +427,31 @@ function buildCompatPropertyMeta(
   prop: KnownRequiredProp,
   type: string,
   schema: PropertyMetaSchema,
-  overrides?: Partial<Pick<PropertyMeta, "description" | "tags">>,
 ): PropertyMeta {
   return {
     name: prop.name,
-    description: overrides?.description ?? prop.description ?? "",
-    type,
-    required: prop.required,
-    global: false,
-    default: evaluateDefault(prop.default),
-    tags: overrides?.tags ?? normalizeCompatTags(prop.tags),
-    schema,
-  };
-}
-
-function renderCompatAnyPropMeta(prop: KnownRequiredProp): PropertyMeta {
-  return {
-    name: prop.name,
     description: prop.description ?? "",
-    type: "any",
-    required: prop.required,
-    global: false,
-    default: evaluateDefault(prop.default),
-    tags: (prop.tags ?? []).map((t) => ({
-      name: t.name,
-      ...(t.text != null && { text: t.text }),
-    })),
-    schema: "any",
-  };
-}
-
-function renderCompatNumberishPropMeta(prop: KnownRequiredProp): PropertyMeta {
-  const type = prop.required ? "Numberish" : "Numberish | undefined";
-  return buildCompatPropertyMeta(prop, type, {
-    kind: "enum",
-    type,
-    schema: ["number", "string", ...(prop.required ? [] : ["undefined"])],
-  });
-}
-
-function renderCompatBooleanishPropMeta(prop: KnownRequiredProp): PropertyMeta {
-  const type = prop.required ? "Booleanish" : "Booleanish | undefined";
-  const schemaEntries: string[] = ['"false"', '"true"', "false", "true"];
-  if (!prop.required) {
-    schemaEntries.push("undefined");
-  }
-
-  const base = buildCompatPropertyMeta(prop, type, {
-    kind: "enum",
-    type,
-    schema: schemaEntries,
-  });
-  return {
-    name: base.name,
-    description: base.description,
     type,
     required: prop.required,
     global: false,
     default: evaluateDefault(prop.default),
     tags: normalizeCompatTags(prop.tags),
-    schema: {
-      kind: "enum",
-      type,
-      schema: schemaEntries,
-    },
+    schema,
   };
 }
 
-function renderCompatSlotsPropMeta(
-  prop: KnownRequiredProp,
-  slotNames: readonly string[],
-): { type: string; schema: PropertyMetaSchema } {
-  const objectType = `{ ${slotNames.map((name) => `${name}?: ClassNameValue`).join("; ")}; }`;
-  return prop.required
-    ? {
-        type: objectType,
-        schema: objectType,
-      }
-    : {
-        type: `${objectType} | undefined`,
-        schema: {
-          kind: "enum",
-          type: `${objectType} | undefined`,
-          schema: [objectType, "undefined"],
-        },
-      };
-}
-
-function renderCompatReferrerPolicyPropMeta(prop: KnownRequiredProp): PropertyMeta {
-  const type = prop.required
-    ? "HTMLAttributeReferrerPolicy"
-    : "HTMLAttributeReferrerPolicy | undefined";
-  return buildCompatPropertyMeta(prop, type, {
-    kind: "enum",
-    type,
-    schema: [...COMPAT_REFERRER_POLICY_LITERALS, ...(prop.required ? [] : ["undefined"])],
-  });
-}
-
+/**
+ * Renders a classified `F | F[]` prop. Each arm renders at the registry depth
+ * it was read at: an arm that came from a producer row is already one join
+ * deep, so the references inside it stay symbolic.
+ */
 function renderCompatFunctionArrayUnionPropMeta(
   prop: KnownRequiredProp,
-  functionArm: FunctionDescriptor,
-  arrayElement: FunctionDescriptor,
+  { functionArm, functionDepth, arrayElement, arrayElementDepth }: FunctionArrayArms,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
-  const functionPart = `(${typeDescriptorToCompatDisplay(functionArm, typeRegistry)})`;
-  const arrayPart = `(${typeDescriptorToCompatDisplay(arrayElement, typeRegistry)})[]`;
+  const functionPart = `(${typeDescriptorToCompatDisplay(functionArm, typeRegistry, new Set(), functionDepth)})`;
+  const arrayPart = `(${typeDescriptorToCompatDisplay(arrayElement, typeRegistry, new Set(), arrayElementDepth)})[]`;
   const type = prop.required
     ? `${functionPart} | ${arrayPart}`
     : `${functionPart} | ${arrayPart} | undefined`;
@@ -869,14 +459,14 @@ function renderCompatFunctionArrayUnionPropMeta(
     functionArm,
     typeRegistry,
     new Set(),
-    0,
+    functionDepth,
     "call",
   );
   const arrayEventType = compatFunctionTypeToString(
     arrayElement,
     typeRegistry,
     new Set(),
-    0,
+    arrayElementDepth,
     "call",
   );
   return buildCompatPropertyMeta(prop, type, {
@@ -904,47 +494,6 @@ function renderCompatFunctionArrayUnionPropMeta(
   });
 }
 
-function renderCompatPrefetchOnPropMeta(prop: KnownRequiredProp): PropertyMeta {
-  const type = prop.required
-    ? '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }>'
-    : '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }> | undefined';
-  return buildCompatPropertyMeta(prop, type, {
-    kind: "enum",
-    type,
-    schema: [
-      '"interaction"',
-      '"visibility"',
-      "Partial<{ visibility: boolean; interaction: boolean; }>",
-      ...(prop.required ? [] : ["undefined"]),
-    ],
-  });
-}
-
-function renderCompatNuxtLinkToPropMeta(prop: KnownRequiredProp): PropertyMeta {
-  const type = prop.required ? "string | St | vt" : "string | St | vt | undefined";
-  return buildCompatPropertyMeta(prop, type, {
-    kind: "enum",
-    type,
-    schema: [
-      "string",
-      ...(prop.required ? [] : ["undefined"]),
-      buildCompatVtRouteSchema(),
-      buildCompatStRouteSchema(),
-    ],
-  });
-}
-
-function renderCompatHtmlButtonTypePropMeta(prop: KnownRequiredProp): PropertyMeta {
-  const type = prop.required
-    ? '"button" | "submit" | "reset"'
-    : '"button" | "submit" | "reset" | undefined';
-  return buildCompatPropertyMeta(prop, type, {
-    kind: "enum",
-    type,
-    schema: ['"button"', '"reset"', '"submit"', ...(prop.required ? [] : ["undefined"])],
-  });
-}
-
 function renderCompatStringBrandUnionPropMeta(
   prop: KnownRequiredProp,
   arms: readonly TypeDescriptor[],
@@ -957,18 +506,8 @@ function renderCompatStringBrandUnionPropMeta(
   }));
   const brandParts = renderedArms.filter((arm) => arm.branded).map((arm) => arm.text);
   const scalarParts = renderedArms.filter((arm) => !arm.branded).map((arm) => arm.text);
-  const orderedScalarParts =
-    prop.name === "rel"
-      ? [...scalarParts].sort((left, right) => {
-          if (left === "null") return 1;
-          if (right === "null") return -1;
-          return left.localeCompare(right);
-        })
-      : scalarParts;
-  const orderedTypeParts =
-    prop.name === "target" && brandParts.length > 0
-      ? [...brandParts, ...scalarParts]
-      : renderedArms.map((arm) => arm.text);
+  const orderedScalarParts = scalarParts;
+  const orderedTypeParts = renderedArms.map((arm) => arm.text);
   const type = prop.required
     ? orderedTypeParts.join(" | ")
     : `${orderedTypeParts.join(" | ")} | undefined`;
@@ -981,193 +520,11 @@ function renderCompatStringBrandUnionPropMeta(
     kind: "enum",
     type,
     schema: [
-      ...orderedScalarParts.map((part) => normalizeCompatSchemaLeaf(part)),
+      ...orderedScalarParts,
       ...(prop.required ? [] : ["undefined"]),
       ...brandParts.map(() => brandedObjectSchema),
     ],
   });
-}
-
-function normalizeCompatSchemaLeaf(part: string): string {
-  if (part === "(string & {})") {
-    return "string & {}";
-  }
-  return part === "null" ? "null" : part;
-}
-
-// NOTE(compat-shim): These route schemas use minified Vue Router type aliases
-// from the Nuxt Router build output. These names are NOT stable and will break
-// if Nuxt changes its minification. The mapping is:
-//   vt = RouteLocationAsPathTyped
-//   St = RouteLocationAsRelativeTyped
-//   Gt = RouteRecordNameGeneric
-//   In = LocationQueryRaw
-//   Dn = HistoryState
-//   _n = RouteParamsRawGeneric
-function buildCompatVtRouteSchema(): PropertyMetaSchema {
-  return {
-    kind: "object",
-    type: "vt",
-    schema: {
-      force: buildCompatInlinePropertyMeta(
-        "force",
-        "boolean | undefined",
-        "boolean | undefined",
-        false,
-        "Triggers the navigation even if the location is the same as the current one.\nNote this will also add a new entry to the history unless `replace: true`\nis passed.",
-      ),
-      hash: buildCompatInlinePropertyMeta("hash", "string | undefined", "string | undefined"),
-      path: buildCompatInlinePropertyMeta(
-        "path",
-        "string",
-        "string",
-        true,
-        "Percentage encoded pathname section of the URL.",
-      ),
-      query: buildCompatInlinePropertyMeta("query", "In | undefined", "In | undefined"),
-      replace: buildCompatInlinePropertyMeta(
-        "replace",
-        "boolean | undefined",
-        "boolean | undefined",
-        false,
-        "Replace the entry in the history instead of pushing a new entry",
-      ),
-      state: buildCompatInlinePropertyMeta(
-        "state",
-        "Dn | undefined",
-        "Dn | undefined",
-        false,
-        "State to save using the History API. This cannot contain any reactive\nvalues and some primitives like Symbols are forbidden. More info at\nhttps://developer.mozilla.org/en-US/docs/Web/API/History/state",
-      ),
-    },
-  };
-}
-
-function buildCompatStRouteSchema(): PropertyMetaSchema {
-  return {
-    kind: "object",
-    type: "St",
-    schema: {
-      force: buildCompatInlinePropertyMeta(
-        "force",
-        "boolean | undefined",
-        "boolean | undefined",
-        false,
-        "Triggers the navigation even if the location is the same as the current one.\nNote this will also add a new entry to the history unless `replace: true`\nis passed.",
-      ),
-      hash: buildCompatInlinePropertyMeta("hash", "string | undefined", {
-        kind: "enum",
-        type: "string | undefined",
-        schema: ["string", "undefined"],
-      }),
-      name: buildCompatInlinePropertyMeta("name", "Gt", {
-        kind: "enum",
-        type: "Gt",
-        schema: ["string", "symbol", "undefined"],
-      }),
-      params: buildCompatInlinePropertyMeta("params", "_n | undefined", {
-        kind: "enum",
-        type: "_n | undefined",
-        schema: ["_n", "undefined"],
-      }),
-      path: buildCompatInlinePropertyMeta(
-        "path",
-        "undefined",
-        "undefined",
-        false,
-        "A relative path to the current location. This property should be removed",
-      ),
-      query: buildCompatInlinePropertyMeta("query", "In | undefined", {
-        kind: "enum",
-        type: "In | undefined",
-        schema: ["In", "undefined"],
-      }),
-      replace: buildCompatInlinePropertyMeta(
-        "replace",
-        "boolean | undefined",
-        {
-          kind: "enum",
-          type: "boolean | undefined",
-          schema: ["false", "true", "undefined"],
-        },
-        false,
-        "Replace the entry in the history instead of pushing a new entry",
-      ),
-      state: buildCompatInlinePropertyMeta(
-        "state",
-        "Dn | undefined",
-        {
-          kind: "enum",
-          type: "Dn | undefined",
-          schema: ["undefined", { kind: "object", type: "Dn", schema: {} }],
-        },
-        false,
-        "State to save using the History API. This cannot contain any reactive\nvalues and some primitives like Symbols are forbidden. More info at\nhttps://developer.mozilla.org/en-US/docs/Web/API/History/state",
-      ),
-    },
-  };
-}
-
-function buildCompatInlinePropertyMeta(
-  name: string,
-  type: string,
-  schema: PropertyMetaSchema,
-  required = false,
-  description = "",
-): PropertyMeta {
-  return {
-    name,
-    global: false,
-    description,
-    tags: [],
-    required,
-    type,
-    schema,
-  };
-}
-
-function unwrapComponentSlotsDescriptor(
-  type: TypeDescriptor,
-): Extract<TypeDescriptor, { kind: "object" }> | undefined {
-  if (type.kind === "object") {
-    return type;
-  }
-
-  if (
-    type.kind === "ref" &&
-    type.name === "ComponentSlots" &&
-    type.typeArguments?.[0]?.kind === "object"
-  ) {
-    const slotsProperty = type.typeArguments[0].properties.find(
-      (property) => property.name === "slots",
-    );
-    if (slotsProperty?.type.kind === "object") {
-      return slotsProperty.type;
-    }
-  }
-
-  return undefined;
-}
-
-function typeDescriptorHasStructuredObjectSurface(type: TypeDescriptor): boolean {
-  switch (type.kind) {
-    case "object":
-      return (
-        type.properties.some((property) => property.type.kind !== "unknown") ||
-        (type.indexSignatures?.length ?? 0) > 0 ||
-        (type.callSignatures?.length ?? 0) > 0 ||
-        (type.constructSignatures?.length ?? 0) > 0
-      );
-    case "union":
-    case "intersection":
-      return type.types.some((entry) => typeDescriptorHasStructuredObjectSurface(entry));
-    // A deferred compiler operation exposes NO structured object surface
-    // until it reduces — stated, not reached through `default`.
-    case "intrinsicApplication":
-      return false;
-    default:
-      return false;
-  }
 }
 
 /**
@@ -1189,11 +546,14 @@ function preferredCompatPropTypeText(
   prop: KnownRequiredProp,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
-  const descriptorText = normalizeOptionalCompatTypeText(
-    prop.type,
-    normalizeTypeString(typeDescriptorToCompatDisplay(prop.type, typeRegistry)),
-    prop.required,
+  // A descriptor whose top-level union has an `undefined` arm already renders
+  // it; only display text without that structure gains the optional suffix.
+  const descriptorDisplay = normalizeTypeString(
+    typeDescriptorToCompatDisplay(prop.type, typeRegistry),
   );
+  const descriptorText = descriptorIncludesTopLevelUndefined(prop.type)
+    ? descriptorDisplay
+    : normalizeOptionalCompatTypeText(descriptorDisplay, prop.required);
 
   // Bare ref / indexed-access descriptors render structurally via their alias
   // name (`Foo` / `Foo['bar']`). Descriptor wins for these shapes — the raw
@@ -1209,7 +569,6 @@ function preferredCompatPropTypeText(
   // rawType-allowlist: display-passthrough
   if (prop.rawType !== undefined) {
     return normalizeOptionalCompatTypeText(
-      prop.type,
       // rawType-allowlist: display-passthrough
       normalizeTypeString(prop.rawType),
       prop.required,
@@ -1289,16 +648,8 @@ function compatSchemaIncludesTopLevelUndefined(schema: PropertyMetaSchema): bool
  * The suffix check only de-duplicates display text; semantic classification
  * remains descriptor-owned.
  */
-function normalizeOptionalCompatTypeText(
-  descriptor: TypeDescriptor,
-  baseText: string,
-  required: boolean,
-): string {
+function normalizeOptionalCompatTypeText(baseText: string, required: boolean): string {
   if (required) return baseText;
-  const stripped = stripUndefinedArm(descriptor);
-  if (stripped.kind === "primitive" && stripped.name === "any") {
-    return "any";
-  }
   const trimmed = baseText.trim();
   if (trimmed === "undefined" || trimmed.endsWith("| undefined")) {
     return baseText;
@@ -1403,23 +754,18 @@ function typeDescriptorToCompatDisplay(
         : intrinsicDisplayName(descriptor.op);
 
     case "ref": {
-      if (
-        typeRegistry &&
-        registryResolutionDepth < COMPAT_MAX_REGISTRY_DISPLAY_DEPTH &&
-        !descriptor.typeArguments?.length &&
-        !visited.has(descriptor.name)
-      ) {
-        const resolved = typeRegistry.get(descriptor.name);
-        if (resolved) {
-          visited.add(descriptor.name);
-          const rendered = typeDescriptorToCompatDisplay(
+      const resolved = joinRegistryRef(descriptor, typeRegistry, visited, registryResolutionDepth);
+      if (resolved) {
+        visited.add(descriptor.name);
+        try {
+          return typeDescriptorToCompatDisplay(
             resolved,
             typeRegistry,
             visited,
             registryResolutionDepth + 1,
           );
+        } finally {
           visited.delete(descriptor.name);
-          return rendered;
         }
       }
       return typeDescriptorToString(descriptor);
@@ -1427,9 +773,6 @@ function typeDescriptorToCompatDisplay(
     case "recursiveRef":
       return typeDescriptorToString(descriptor);
     case "indexedAccess":
-      // `IndexedAccessType` is structurally surfaced for the typed shape
-      // heuristics for indexed-access slots and UI markers. Display rendering falls back to the
-      // shared `obj[idx]` form.
       return typeDescriptorToString(descriptor);
   }
 }
@@ -1491,22 +834,25 @@ function compatFunctionTypeToString(
     : "";
   const params = descriptor.parameters
     .map((param) => {
-      const rendered = typeDescriptorToCompatDisplay(
-        param.type,
-        typeRegistry,
-        visited,
-        registryResolutionDepth,
-      );
-      // An optional parameter prints its implicit `| undefined` arm — TS
-      // renders `(x?: T)` as `(x?: T | undefined)`. Skip the append when the
-      // parameter type is already `undefined`-bearing (a bare `undefined`, a
-      // union that includes it, or a ref/alias resolving to either) to avoid
-      // doubling (`undefined | undefined`).
-      const renderedType =
-        param.optional && !descriptorIsAlreadyUndefined(param.type, typeRegistry)
-          ? `${rendered} | undefined`
-          : rendered;
-      return `${param.name}${param.optional ? "?" : ""}: ${renderedType}`;
+      const joined = joinRegistryRef(param.type, typeRegistry, visited, registryResolutionDepth);
+      const parameterType = joined ?? param.type;
+      const joinedName = joined && param.type.kind === "ref" ? param.type.name : undefined;
+      if (joinedName !== undefined) visited.add(joinedName);
+      try {
+        const rendered = typeDescriptorToCompatDisplay(
+          parameterType,
+          typeRegistry,
+          visited,
+          registryResolutionDepth + (joined ? 1 : 0),
+        );
+        const alreadyUndefined =
+          isUndefinedPrimitive(parameterType) || descriptorIncludesTopLevelUndefined(parameterType);
+        const renderedType =
+          param.optional && !alreadyUndefined ? `${rendered} | undefined` : rendered;
+        return `${param.name}${param.optional ? "?" : ""}: ${renderedType}`;
+      } finally {
+        if (joinedName !== undefined) visited.delete(joinedName);
+      }
     })
     .join(", ");
   const returnText = typeDescriptorToCompatDisplay(
@@ -1547,18 +893,10 @@ function compatTypeParameterToString(
 }
 
 /**
- * Evaluate common default value patterns to match Volar's behavior.
- * Volar evaluates simple defaults; verter stores the raw source text.
+ * Normalize string-literal quotes while preserving all other default text.
  */
 function evaluateDefault(val: string | undefined): string | undefined {
   if (val === undefined) return undefined;
-  // Arrow function returning empty object: () => ({})
-  if (/^\(\)\s*=>\s*\(\s*\{\s*\}\s*\)$/.test(val)) return "{}";
-  // Arrow function returning empty array: () => []
-  if (/^\(\)\s*=>\s*\[\s*\]$/.test(val)) return "[]";
-  // Arrow function returning array literal: () => ['a', 'b']
-  const arrowArrMatch = val.match(/^\(\)\s*=>\s*(\[.*\])$/);
-  if (arrowArrMatch) return arrowArrMatch[1];
   // `[\s\S]` (not `.`): an escaped character may be a line terminator — a
   // JS line continuation — which `.` does not match.
   const stringLiteralMatch = val.match(/^'([^'\\]*(?:\\[\s\S][^'\\]*)*)'$/);
@@ -1640,75 +978,12 @@ function compatSlotBindingTypeText(
   binding: SlotMeta["bindings"][number] & { type: TypeDescriptor },
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
-  const compatUiBinding = buildCompatUiBindingType(binding);
-  if (compatUiBinding) {
-    return compatUiBinding;
-  }
   // Typed-IR-Only: render slot-binding display text from `binding.type`
   // (TypeDescriptor) — never from `binding.rawType`. The descriptor is the
   // structural authority for both semantic decisions and display output;
   // any source-level alias the user wrote round-trips through the registry
   // for bare refs and renders structurally otherwise.
   return normalizeTypeString(typeDescriptorToCompatDisplay(binding.type, typeRegistry));
-}
-
-function buildCompatUiBindingType(binding: SlotMeta["bindings"][number]): string | undefined {
-  if (binding.type === undefined || !descriptorCarriesUiHelperMarker(binding.type)) {
-    return undefined;
-  }
-
-  const memberNames = extractCompatUiBindingFieldNames(binding.type);
-  if (!memberNames || memberNames.length === 0) {
-    return undefined;
-  }
-
-  return `{ ${memberNames
-    .map((name) => `${name}: (props?: Record<string, any> | undefined) => string`)
-    .join("; ")}; }`;
-}
-
-/**
- * Structural test: does `t` carry the UI-helper indexed-access marker
- * (`Foo['ui']` or `ComponentUI<…>`)?
- *
- * Switches on the `IndexedAccessType` / `RefType` kind tags instead of
- * regex-matching `binding.rawType`. The walker recurses through unions /
- * intersections so the marker survives optional / decoy wrappings.
- */
-function descriptorCarriesUiHelperMarker(t: TypeDescriptor): boolean {
-  return descriptorCarriesIndexedAccessOnLiteralKey(t, "ui");
-}
-
-function extractCompatUiBindingFieldNames(type: TypeDescriptor): string[] | undefined {
-  const object = unwrapComponentUiDescriptor(type);
-  if (!object) {
-    return undefined;
-  }
-  const fields = object.properties.filter((property) => property.type.kind === "function");
-  return fields.length === object.properties.length
-    ? fields.map((property) => property.name)
-    : undefined;
-}
-
-function unwrapComponentUiDescriptor(
-  type: TypeDescriptor,
-): Extract<TypeDescriptor, { kind: "object" }> | undefined {
-  if (type.kind === "object") {
-    return type;
-  }
-  if (
-    type.kind === "ref" &&
-    type.name === "ComponentUI" &&
-    type.typeArguments?.[0]?.kind === "object"
-  ) {
-    const slotsProperty = type.typeArguments[0].properties.find(
-      (property) => property.name === "slots",
-    );
-    if (slotsProperty?.type.kind === "object") {
-      return slotsProperty.type;
-    }
-  }
-  return undefined;
 }
 
 function buildSlotBindingsDescriptor(slot: SlotMeta): TypeDescriptor {
@@ -1876,7 +1151,11 @@ export function mapSlotMeta(
     }),
   };
   const type = buildSlotBindingsType(slot, typeRegistry);
-  const bindingsSchema = buildCompatSlotBindingsSchema(slot, options, typeRegistry);
+  const bindingsSchema = typeDescriptorToSchema(
+    buildSlotBindingsDescriptor(slot),
+    options,
+    typeRegistry,
+  );
   return {
     name: slot.name,
     description: slot.description ?? "",
@@ -1891,53 +1170,6 @@ export function mapSlotMeta(
       slot.bindings.length === 0 && slot.isRequired === false
         ? wrapOptionalEmptySlotSchema(type, bindingsSchema)
         : bindingsSchema,
-  };
-}
-
-function buildCompatSlotBindingsSchema(
-  slot: SlotMeta,
-  options?: MetaCheckerOptions,
-  typeRegistry?: Map<string, TypeDescriptor>,
-): PropertyMetaSchema {
-  const schema: Record<string, PropertyMetaSchema> = {};
-  let usedCompatUiBinding = false;
-
-  for (const binding of slot.bindings) {
-    if (binding.type === undefined) continue;
-    const compatUiBinding = buildCompatUiBindingType(binding);
-    if (compatUiBinding) {
-      usedCompatUiBinding = true;
-      schema[binding.name] = {
-        name: binding.name,
-        global: false,
-        description: "",
-        tags: [],
-        required: true,
-        type: compatUiBinding,
-        schema: compatUiBinding,
-      } as unknown as PropertyMetaSchema;
-      continue;
-    }
-
-    schema[binding.name] = {
-      name: binding.name,
-      global: false,
-      description: "",
-      tags: [],
-      required: true,
-      type: compatSlotBindingTypeText({ ...binding, type: binding.type }, typeRegistry),
-      schema: typeDescriptorToSchema(binding.type, options, typeRegistry),
-    } as unknown as PropertyMetaSchema;
-  }
-
-  if (!usedCompatUiBinding) {
-    return typeDescriptorToSchema(buildSlotBindingsDescriptor(slot), options, typeRegistry);
-  }
-
-  return {
-    kind: "object",
-    type: buildSlotBindingsType(slot, typeRegistry),
-    schema,
   };
 }
 
@@ -1995,78 +1227,6 @@ export function mapComponentMeta(
   };
 }
 
-function mergeCompatTags(existing: Tag[], incoming: Tag[] | undefined): Tag[] {
-  if (!incoming || incoming.length === 0) {
-    return existing;
-  }
-  const merged = [...existing];
-  for (const tag of incoming) {
-    if (!merged.some((entry) => entry.name === tag.name && entry.text === tag.text)) {
-      merged.push(tag);
-    }
-  }
-  return merged;
-}
-
-function extractCompatDefaultLiteralValue(tags: Tag[]): string | undefined {
-  const tagText = tags.find((tag) => tag.name === "defaultValue")?.text?.trim();
-  if (!tagText) {
-    return undefined;
-  }
-
-  const strippedBackticks =
-    tagText.startsWith("`") && tagText.endsWith("`") ? tagText.slice(1, -1) : tagText;
-  const strippedQuotes =
-    (strippedBackticks.startsWith("'") && strippedBackticks.endsWith("'")) ||
-    (strippedBackticks.startsWith('"') && strippedBackticks.endsWith('"'))
-      ? strippedBackticks.slice(1, -1)
-      : strippedBackticks;
-
-  return strippedQuotes.length > 0 ? strippedQuotes : undefined;
-}
-
-function reorderCompatLiteralUnionTypeByDefaultValue(prop: PropertyMeta): void {
-  const defaultValue = extractCompatDefaultLiteralValue(prop.tags);
-  if (!defaultValue) {
-    return;
-  }
-
-  if (
-    typeof prop.schema !== "object" ||
-    prop.schema === null ||
-    Array.isArray(prop.schema) ||
-    prop.schema.kind !== "enum" ||
-    !Array.isArray(prop.schema.schema)
-  ) {
-    return;
-  }
-
-  const literalEntries = prop.schema.schema.filter(
-    (entry): entry is string =>
-      typeof entry === "string" && entry !== "undefined" && /^".*"$/.test(entry),
-  );
-  if (literalEntries.length === 0) {
-    return;
-  }
-
-  const defaultLiteral = JSON.stringify(defaultValue);
-  if (!literalEntries.includes(defaultLiteral)) {
-    return;
-  }
-
-  const reordered = [
-    defaultLiteral,
-    ...literalEntries.filter((entry) => entry !== defaultLiteral),
-    ...(prop.required ? [] : ["undefined"]),
-  ];
-  const reorderedType = reordered.join(" | ");
-  prop.type = reorderedType;
-  prop.schema = {
-    ...prop.schema,
-    type: reorderedType,
-  };
-}
-
 /**
  * Volar-compatible checker class.
  *
@@ -2115,7 +1275,7 @@ export class ComponentMetaChecker {
       const fullNativeMeta = this._session.getComponentMeta(absPath) as
         | import("../native-component-meta.js").NativeComponentMetaResult
         | null;
-      return this.projectNativeComponentMeta(fullNativeMeta);
+      return projectNativeComponentMeta(fullNativeMeta, this.options);
     }
     throw new Error(
       "ComponentMetaChecker requires a runtime session-backed native component-meta query. " +
@@ -2129,7 +1289,7 @@ export class ComponentMetaChecker {
    * for the whole batch, never N scalar component-meta calls. A missing
    * canonical becomes the empty `VolarComponentMeta` default; a real per-id
    * failure throws and fails the whole call, matching the scalar method.
-   * Non-missing items are projected through the same private helper used by
+   * Non-missing items are projected through the same shared function used by
    * `getComponentMeta`, so scalar and batch projection cannot drift.
    */
   async getComponentMetaBatch(filePaths: string[]): Promise<VolarComponentMeta[]> {
@@ -2144,7 +1304,7 @@ export class ComponentMetaChecker {
       const fullNativeMetas = this._session.getComponentMetaBatch(absPaths) as Array<
         import("../native-component-meta.js").NativeComponentMetaResult | null
       >;
-      return fullNativeMetas.map((meta) => this.projectNativeComponentMeta(meta));
+      return fullNativeMetas.map((meta) => projectNativeComponentMeta(meta, this.options));
     }
     throw new Error(
       "ComponentMetaChecker requires a runtime session-backed native component-meta query. " +
@@ -2322,28 +1482,6 @@ export class ComponentMetaChecker {
     throw new Error(
       "getProgram() is not supported by Verter. Verter does not use a TypeScript Program.",
     );
-  }
-
-  private projectNativeComponentMeta(
-    fullNativeMeta: import("../native-component-meta.js").NativeComponentMetaResult | null,
-  ): VolarComponentMeta {
-    const declaredNativeMeta = projectDeclaredOnlyNativeResult(fullNativeMeta);
-    if (!declaredNativeMeta) {
-      return {
-        type: 0,
-        props: [],
-        events: [],
-        slots: [],
-        exposed: [],
-      };
-    }
-    const typeRegistry = nativeTypeRegistryToMap(declaredNativeMeta);
-    const mappedMeta = nativeComponentMetaToComponentMeta(declaredNativeMeta);
-    const result = mapComponentMeta(mappedMeta, this.options, typeRegistry);
-    for (const prop of result.props) {
-      reorderCompatLiteralUnionTypeByDefaultValue(prop);
-    }
-    return result;
   }
 
   private async ensureFile(absPath: string): Promise<void> {
@@ -2558,4 +1696,62 @@ export async function createCheckerByJson(
   }
 
   return checker;
+}
+
+/** Project one decoded native answer into the Volar shape shared by all query surfaces. */
+export function projectNativeComponentMeta(
+  fullNativeMeta: import("../native-component-meta.js").NativeComponentMetaResult | null,
+  options?: MetaCheckerOptions,
+): VolarComponentMeta {
+  const declared = projectDeclaredOnlyNativeResult(fullNativeMeta);
+  if (!declared) return { type: 0, props: [], events: [], slots: [], exposed: [] };
+  return mapComponentMeta(
+    nativeComponentMetaToComponentMeta(declared),
+    options,
+    nativeTypeRegistryToMap(declared),
+  );
+}
+
+interface FunctionArrayArms {
+  functionArm: FunctionDescriptor;
+  /** The registry depth the function arm was read at (1 when joined). */
+  functionDepth: number;
+  arrayElement: FunctionDescriptor;
+  /** The registry depth the array element was read at (1 when joined or inside a joined arm). */
+  arrayElementDepth: number;
+}
+
+/**
+ * Classifies a `F | F[]` prop whose function arms are structurally equal. A
+ * symbolic arm (`Fn | Array<Fn>`) is read through its producer registry row,
+ * joined at depth one by {@link joinRegistryRef} — the same single lookup the
+ * display and schema renderers use. A reference that only appears inside a
+ * joined row stays symbolic: the array element is joined only when the array
+ * arm itself was published on the prop, never after the arm came from a row.
+ */
+function classifyFunctionArrayDescriptor(
+  type: TypeDescriptor,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): FunctionArrayArms | undefined {
+  const stripped = stripUndefinedArm(type);
+  if (stripped.kind !== "union" || stripped.types.length !== 2) return undefined;
+  const arms = stripped.types.map((arm) => {
+    const row = joinRegistryRef(arm, typeRegistry, new Set(), 0);
+    return { descriptor: row ?? arm, depth: row ? 1 : 0 };
+  });
+  const fnArm = arms.find((arm) => arm.descriptor.kind === "function");
+  const fn = fnArm?.descriptor;
+  const arrArm = arms.find((arm) => arm.descriptor.kind === "array");
+  const arr = arrArm?.descriptor;
+  if (fn?.kind !== "function" || arr?.kind !== "array") return undefined;
+  const joinedElement = joinRegistryRef(arr.element, typeRegistry, new Set(), arrArm!.depth);
+  const element = joinedElement ?? arr.element;
+  if (element.kind !== "function" || !descriptorsStructurallyEquivalent(fn, element))
+    return undefined;
+  return {
+    functionArm: fn,
+    functionDepth: fnArm!.depth,
+    arrayElement: element,
+    arrayElementDepth: joinedElement ? 1 : arrArm!.depth,
+  };
 }

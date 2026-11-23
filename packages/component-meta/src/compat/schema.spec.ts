@@ -15,8 +15,68 @@ import {
   indexedAccess,
 } from "@verter/type-ir";
 import type { PropertyMetaSchema } from "./types.js";
+import { nativeTypeRegistryToMap } from "../native-component-meta.js";
+import type { NativeComponentMetaResult } from "../native-component-meta.js";
 
 describe("typeDescriptorToString", () => {
+  it("withholds duplicate names when exact declaration positions are absent", () => {
+    const rows = ["small", "large"].map((value) => ({
+      name: "Size",
+      type: { kind: "literal", literalKind: "string", value },
+      typeFact: { kind: "complete", value: { kind: "literal", literalKind: "string", value } },
+      declaration: {
+        canonicalSource: "/types/sizes.ts",
+        requestedName: "Size",
+        resolvedName: "Size",
+        kind: "typeAlias",
+      },
+    }));
+    const registry = nativeTypeRegistryToMap({ typeRegistry: rows } as NativeComponentMetaResult);
+    expect(typeDescriptorToSchema(ref("Size"), undefined, registry)).toEqual({
+      kind: "object",
+      type: "Size",
+      schema: {},
+    });
+  });
+  it("joins a producer row once and leaves its referenced row symbolic", () => {
+    const registry = new Map([
+      ["Size", union([literal("small"), ref("NestedSize")])],
+      ["NestedSize", literal("large")],
+    ]);
+    expect(typeDescriptorToSchema(ref("Size"), undefined, registry)).toEqual({
+      kind: "enum",
+      type: '"small" | NestedSize',
+      schema: ['"small"', { kind: "object", type: "NestedSize", schema: {} }],
+    });
+  });
+
+  it.each([false, true])(
+    "withholds colliding declaration names regardless of row order: %s",
+    (reverse) => {
+      const rows = ["/types/first.ts", "/types/second.ts"].map((canonicalSource, index) => ({
+        name: "Size",
+        type: { kind: "literal", literalKind: "string", value: index ? "large" : "small" },
+        typeFact: {
+          kind: "complete",
+          value: { kind: "literal", literalKind: "string", value: index ? "large" : "small" },
+        },
+        declaration: {
+          canonicalSource,
+          requestedName: "Size",
+          resolvedName: "Size",
+          kind: "typeAlias",
+        },
+      }));
+      const registry = nativeTypeRegistryToMap({
+        typeRegistry: reverse ? rows.reverse() : rows,
+      } as NativeComponentMetaResult);
+      expect(typeDescriptorToSchema(ref("Size"), undefined, registry)).toEqual({
+        kind: "object",
+        type: "Size",
+        schema: {},
+      });
+    },
+  );
   it("converts primitives", () => {
     expect(typeDescriptorToString(primitive("string"))).toBe("string");
     expect(typeDescriptorToString(primitive("number"))).toBe("number");
@@ -341,8 +401,9 @@ describe("typeDescriptorToSchema", () => {
     });
   });
 
-  // @ai-generated - Distinguishes producer-expanded indexed access from an unsubstituted generic body.
-  it("expands non-generic indexed access from the producer registry", () => {
+  // Indexed-access terminals are the producer's to publish: a registry row for
+  // the object type is never navigated by member name on the JS side.
+  it("keeps non-generic indexed access shallow beside a registry row for its object", () => {
     const schema = typeDescriptorToSchema(
       indexedAccess(ref("RecordShape"), literal("value")),
       undefined,
@@ -351,7 +412,7 @@ describe("typeDescriptorToSchema", () => {
       ]),
     );
 
-    expect(schema).toBe("string");
+    expect(schema).toEqual({ kind: "object", type: 'RecordShape["value"]', schema: {} });
   });
 
   // @ai-generated - A generic registry declaration is not an instantiated descriptor.
@@ -374,8 +435,8 @@ describe("typeDescriptorToSchema", () => {
     });
   });
 
-  // @ai-generated - Exact instantiated producer rows may be expanded without compat-side substitution.
-  it("uses an exact producer-supplied instantiated descriptor for generic indexed access", () => {
+  // Rendered application text cannot identify a producer row.
+  it("keeps generic indexed access shallow even when a rendered-name row exists", () => {
     const schema = typeDescriptorToSchema(
       indexedAccess(ref("Box", [primitive("string")]), literal("value")),
       undefined,
@@ -384,6 +445,6 @@ describe("typeDescriptorToSchema", () => {
       ]),
     );
 
-    expect(schema).toBe("string");
+    expect(schema).toEqual({ kind: "object", type: 'Box<string>["value"]', schema: {} });
   });
 });

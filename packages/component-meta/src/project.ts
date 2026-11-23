@@ -14,14 +14,9 @@
  */
 
 import { createRequire } from "node:module";
-import { mapComponentMeta } from "./compat/checker.js";
+import { projectNativeComponentMeta } from "./compat/checker.js";
 import type { CheckerWorkspace } from "./compat/checker.js";
-import { projectDeclaredOnlyNativeResult } from "./compat/native-projection.js";
 import type { MetaCheckerOptions, VolarComponentMeta } from "./compat/types.js";
-import {
-  nativeComponentMetaToComponentMeta,
-  nativeTypeRegistryToMap,
-} from "./native-component-meta.js";
 import type { NativeComponentMetaResult } from "./native-component-meta.js";
 import {
   createMetaRuntime,
@@ -159,51 +154,20 @@ export class ComponentMetaSession {
     return abs;
   }
 
-  private loadCompatNativeMeta(filePath: string): NativeComponentMetaResult | undefined {
+  private loadNativeMeta(filePath: string): NativeComponentMetaResult | undefined {
     const abs = this.ensureNativeMetaFile(filePath);
     if (!abs) {
       return undefined;
     }
 
     const fullNativeMeta = this._session.getComponentMeta(abs) as NativeComponentMetaResult | null;
-    return projectDeclaredOnlyNativeResult(fullNativeMeta) ?? undefined;
-  }
-
-  private loadResolvedNativeMeta(filePath: string): NativeComponentMetaResult | undefined {
-    const abs = this.ensureNativeMetaFile(filePath);
-    if (!abs) {
-      return undefined;
-    }
-
-    const getResolvedComponentMeta = (
-      this._session as {
-        getResolvedComponentMeta?: ProjectSession["getResolvedComponentMeta"];
-      }
-    ).getResolvedComponentMeta;
-    if (typeof getResolvedComponentMeta !== "function") {
-      throw new Error("Resolved component-meta query is unavailable on the active native session");
-    }
-
-    const nativeMeta = getResolvedComponentMeta.call(this._session, abs);
-    if (!nativeMeta) {
-      return undefined;
-    }
-
-    return nativeMeta as NativeComponentMetaResult;
+    return fullNativeMeta ?? undefined;
   }
 
   async getComponentMeta(filePath: string): Promise<VolarComponentMeta> {
     this.ensureOpen();
-    const nativeMeta = this.loadCompatNativeMeta(filePath);
-    if (!nativeMeta) {
-      return { type: 0, props: [], events: [], slots: [], exposed: [] };
-    }
-
-    return mapComponentMeta(
-      nativeComponentMetaToComponentMeta(nativeMeta),
-      this._options,
-      nativeTypeRegistryToMap(nativeMeta),
-    );
+    const nativeMeta = this.loadNativeMeta(filePath);
+    return projectNativeComponentMeta(nativeMeta ?? null, this._options);
   }
 
   /**
@@ -235,37 +199,17 @@ export class ComponentMetaSession {
     };
     const getComponentMetaBatch = sessionWithBatch.getComponentMetaBatch;
     if (typeof getComponentMetaBatch !== "function") {
-      // Fallback: per-id loop. Stays positional in input order and
-      // matches the batch semantics observable from JS, at the cost
-      // of N scheduler dispatches. Preserves backward compatibility
-      // for native bindings that have not yet exposed the batch
-      // surface.
-      const results: VolarComponentMeta[] = [];
-      for (const p of filePaths) {
-        results.push(await this.getComponentMeta(p));
-      }
-      return results;
+      throw new Error("Component-meta batch query is unavailable on the active native session");
     }
     const raw = getComponentMetaBatch.call(this._session, canonicalIds);
-    return raw.map((nativeMeta) => {
-      if (!nativeMeta) {
-        return { type: 0, props: [], events: [], slots: [], exposed: [] };
-      }
-      const declaredOnly = projectDeclaredOnlyNativeResult(nativeMeta as NativeComponentMetaResult);
-      if (!declaredOnly) {
-        return { type: 0, props: [], events: [], slots: [], exposed: [] };
-      }
-      return mapComponentMeta(
-        nativeComponentMetaToComponentMeta(declaredOnly),
-        this._options,
-        nativeTypeRegistryToMap(declaredOnly),
-      );
-    });
+    return raw.map((meta) =>
+      projectNativeComponentMeta(meta as NativeComponentMetaResult | null, this._options),
+    );
   }
 
   async getNativeComponentMeta(filePath: string): Promise<NativeComponentMetaResult | undefined> {
     this.ensureOpen();
-    return this.loadResolvedNativeMeta(filePath);
+    return this.loadNativeMeta(filePath);
   }
 
   async getExportNames(_filePath: string): Promise<string[]> {

@@ -48,6 +48,7 @@ export type TestTypeExpr =
   | { kind: "literal"; literalKind: "string"; value: string }
   | { kind: "ref"; name: string }
   | { kind: "union"; types: TestTypeExpr[] }
+  | { kind: "intrinsicApplication"; op: number; arguments: TestTypeExpr[] }
   | { kind: "indexedAccess"; object: TestTypeExpr; index: TestTypeExpr }
   | {
       kind: "object";
@@ -244,6 +245,12 @@ class TestGraphBuilder {
           typeNodeIds: expr.types.map((member) => this.nodeId(member)),
         });
         break;
+      case "intrinsicApplication":
+        proto = typeNode("intrinsicApplication", {
+          op: expr.op,
+          argumentNodeIds: expr.arguments.map((argument) => this.nodeId(argument)),
+        });
+        break;
       case "indexedAccess":
         proto = typeNode("indexedAccess", {
           objectNodeId: this.nodeId(expr.object),
@@ -318,6 +325,7 @@ function typeNode(
     | "literal"
     | "ref"
     | "union"
+    | "intrinsicApplication"
     | "indexedAccess"
     | "object"
     | "recursiveRef"
