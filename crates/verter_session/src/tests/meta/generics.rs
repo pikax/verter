@@ -4053,3 +4053,210 @@ withDefaults(defineProps<Props<T>>(), { pluginKey: 'menu' })
         );
     }
 }
+
+/// Publish `/App.vue` and return each requested prop's materialized published
+/// type (in request order) plus the names the component-meta type registry
+/// carries, both read from ONE `get_component_meta_output` publication.
+fn generic_shell_published_props(sfc: &str, props: &[&str]) -> (Vec<TypeExpr>, Vec<String>) {
+    let project = make_project();
+    project.upsert_base("/App.vue", sfc).unwrap();
+    let (analysis, _resolution, types) = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("output materialization must succeed")
+        .expect("component must resolve")
+        .into_parts();
+    let lanes = types.into_lanes();
+    let published = props
+        .iter()
+        .map(|name| {
+            let index = analysis
+                .props
+                .iter()
+                .position(|prop| prop.name == *name)
+                .unwrap_or_else(|| panic!("prop `{name}` must publish"));
+            lanes.props[index]
+                .materialized_type()
+                .unwrap_or_else(|| panic!("prop `{name}` must publish a type"))
+                .clone()
+        })
+        .collect();
+    let registry = analysis
+        .type_registry
+        .iter()
+        .map(|entry| entry.name.to_string())
+        .collect();
+    (published, registry)
+}
+
+fn is_bare_ref(expr: &TypeExpr, expected: &str) -> bool {
+    matches!(
+        expr,
+        TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == expected && type_arguments.is_empty()
+    )
+}
+
+/// A local generic shell instantiated by the macro type argument
+/// (`defineProps<Props<Item>>()` over `interface Props<T> { item: T }`)
+/// publishes the SUBSTITUTED member type `Item` — never the shell's own
+/// parameter `T` — and the registry carries `Item` for consumers that
+/// re-resolve the shallow reference.
+#[test]
+fn generic_shell_prop_publishes_the_substituted_member_type_and_registers_it() {
+    let (published, registry) = generic_shell_published_props(
+        r#"<script setup lang="ts">
+interface Item { id: string }
+interface Props<T> { item: T }
+defineProps<Props<Item>>()
+</script>
+<template><div /></template>"#,
+        &["item"],
+    );
+    assert!(
+        is_bare_ref(&published[0], "Item"),
+        "`item` publishes the type argument `Item`, not the shell parameter; got {:?}",
+        published[0]
+    );
+    assert!(
+        registry.iter().any(|name| name == "Item"),
+        "the substituted `Item` enters the type registry; got {registry:?}"
+    );
+    assert!(
+        !registry.iter().any(|name| name == "T"),
+        "the shell parameter never enters the type registry; got {registry:?}"
+    );
+}
+
+/// A shell parameter NESTED inside the member type (`items: T[]`) is
+/// substituted in place: the published element is the argument `Item`.
+#[test]
+fn generic_shell_prop_substitutes_a_parameter_nested_in_the_member_type() {
+    let (published, registry) = generic_shell_published_props(
+        r#"<script setup lang="ts">
+interface Item { id: string }
+interface Props<T> { items: T[] }
+defineProps<Props<Item>>()
+</script>
+<template><div /></template>"#,
+        &["items"],
+    );
+    let TypeExpr::Array { element, .. } = &published[0] else {
+        panic!("`items` stays an array; got {:?}", published[0]);
+    };
+    assert!(
+        is_bare_ref(element, "Item"),
+        "the nested shell parameter is substituted by `Item`; got {element:?}"
+    );
+    assert!(
+        registry.iter().any(|name| name == "Item"),
+        "the nested substituted `Item` enters the type registry; got {registry:?}"
+    );
+}
+
+/// A CONSTRAINED shell parameter (`T extends Base`) publishes the supplied
+/// argument, never its constraint and never the parameter itself.
+#[test]
+fn constrained_generic_shell_prop_publishes_the_argument_not_the_constraint() {
+    let (published, registry) = generic_shell_published_props(
+        r#"<script setup lang="ts">
+interface Base { id: string }
+interface Item extends Base { label: string }
+interface Props<T extends Base> { item: T }
+defineProps<Props<Item>>()
+</script>
+<template><div /></template>"#,
+        &["item"],
+    );
+    assert!(
+        is_bare_ref(&published[0], "Item"),
+        "`item` publishes the argument `Item`; got {:?}",
+        published[0]
+    );
+    assert!(
+        registry.iter().any(|name| name == "Item"),
+        "the substituted `Item` enters the type registry; got {registry:?}"
+    );
+}
+
+/// An OMITTED type argument instantiates the shell parameter's DEFAULT
+/// (`interface Props<T = Item>` reached as `defineProps<Props>()`).
+#[test]
+fn defaulted_generic_shell_prop_publishes_the_default_argument() {
+    let (published, registry) = generic_shell_published_props(
+        r#"<script setup lang="ts">
+interface Item { id: string }
+interface Props<T = Item> { item: T }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        &["item"],
+    );
+    assert!(
+        is_bare_ref(&published[0], "Item"),
+        "`item` publishes the default argument `Item`; got {:?}",
+        published[0]
+    );
+    assert!(
+        registry.iter().any(|name| name == "Item"),
+        "the defaulted `Item` enters the type registry; got {registry:?}"
+    );
+}
+
+/// Each parameter of a TWO-parameter shell substitutes in place: `first`
+/// takes `A := Item` and `second` takes `B := Other`, never swapped and
+/// never left as the parameter.
+#[test]
+fn two_parameter_generic_shell_props_substitute_each_parameter_in_place() {
+    let (published, registry) = generic_shell_published_props(
+        r#"<script setup lang="ts">
+interface Item { id: string }
+interface Other { code: number }
+interface Pair<A, B> { first: A; second: B }
+defineProps<Pair<Item, Other>>()
+</script>
+<template><div /></template>"#,
+        &["first", "second"],
+    );
+    assert!(
+        is_bare_ref(&published[0], "Item"),
+        "`first` publishes `Item`; got {:?}",
+        published[0]
+    );
+    assert!(
+        is_bare_ref(&published[1], "Other"),
+        "`second` publishes `Other`; got {:?}",
+        published[1]
+    );
+    for expected in ["Item", "Other"] {
+        assert!(
+            registry.iter().any(|name| name == expected),
+            "`{expected}` enters the type registry; got {registry:?}"
+        );
+    }
+}
+
+/// A member inherited from a GENERIC heritage base (`interface Props extends
+/// Base<Item>`) publishes the base's substituted member type.
+#[test]
+fn generic_heritage_base_prop_publishes_the_substituted_member_type() {
+    let (published, registry) = generic_shell_published_props(
+        r#"<script setup lang="ts">
+interface Item { id: string }
+interface Base<T> { item: T }
+interface Props extends Base<Item> { label: string }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        &["item"],
+    );
+    assert!(
+        is_bare_ref(&published[0], "Item"),
+        "the inherited `item` publishes `Item`; got {:?}",
+        published[0]
+    );
+    assert!(
+        registry.iter().any(|name| name == "Item"),
+        "the substituted `Item` enters the type registry; got {registry:?}"
+    );
+}

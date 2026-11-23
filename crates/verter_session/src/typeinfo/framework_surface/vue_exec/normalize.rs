@@ -61,7 +61,10 @@ use verter_type_engine::semantic_query::{
 ///   interns for multiple same-name contributors) additionally requires the
 ///   candidate's authored payload to PROVABLY cover the merged member
 ///   ([`authored_candidate_matches_member_value`]) — a resolvable local arm
-///   never masks a FAILED same-name sibling into a concrete success;
+///   never masks a FAILED same-name sibling into a concrete success. A
+///   member declared by a GENERIC shell ([`member_declared_by_generic_shell`])
+///   requires the same proof: the authored annotation is the shell's
+///   unsubstituted body (`item: T`), never the instantiated member value;
 /// - every other member (inherited / substituted / merged / structural)
 ///   publishes the graph-native closed / shallow-ref / projected member-path
 ///   source ([`member_value_source`]) and keeps the honest locator-less
@@ -160,6 +163,16 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
             // publishes it (a symbolic surface value folds differently from
             // its Navigate-raised authored form, so an unconditional proof
             // would false-negative the single-contributor classes).
+            //
+            // A member declared by a GENERIC shell (`interface Props<T> {
+            // item: T }` reached as `Props<Item>`, a defaulted `Props`, or a
+            // generic heritage base) also requires the coverage proof: the
+            // analyzer harvests the shell body's UNSUBSTITUTED annotation
+            // (`T`), while the surface member value carries the instantiated
+            // type (`Item`). Publishing that annotation unproven would hand
+            // every consumer the shell's own parameter instead of the
+            // argument; when the proof fails, the substituted member value
+            // publishes through the graph-native ladder instead.
             let member_value_is_merge_capable = matches!(
                 dispatch.graph().read_in_scope(member.value).as_deref(),
                 Some(
@@ -169,7 +182,12 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
                 )
             );
             let authored_payload = match candidates.as_slice() {
-                [candidate] if !member_value_is_merge_capable => candidate.payload.clone(),
+                [candidate]
+                    if !member_value_is_merge_capable
+                        && !member_declared_by_generic_shell(dispatch, member) =>
+                {
+                    candidate.payload.clone()
+                }
                 [candidate] => candidate.payload.clone().filter(|locator| {
                     authored_candidate_matches_member_value(
                         dispatch,
@@ -284,6 +302,52 @@ fn unavailable_required_member_source() -> verter_type_expr::facts::SourcePositi
     verter_type_expr::facts::SourcePosition::Failed(
         verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
     )
+}
+
+/// Whether a GENERIC type declaration in the member's declaring file declares
+/// the member in its OWN syntactic member headers — the shell whose body the
+/// analyzer harvests UNSUBSTITUTED (`interface Props<T> { item: T }` reached
+/// as `Props<Item>`, a defaulted `Props`, or a generic heritage base
+/// `Base<Item>`). Such a member's authored annotation names the shell's type
+/// parameters, while the surface member value is the instantiated type, so
+/// the single-candidate authored shortcut must be proven against the member
+/// value before it publishes.
+///
+/// Reads the declaring file's shallow prepared-declaration inventory only
+/// (header member index + type-parameter facts — no body lowering, no
+/// resolution); the same declaring-declaration lookup the arg-preserving
+/// use-site recovery applies for its substitution-honesty gate. `false` for
+/// a synthetic / multi-origin member (no single declaring file) or a member
+/// with a computed key.
+///
+/// The scan visits every same-file type name, most of them unrelated to the
+/// member, so it reads the typed preparation outcome directly: a declaration
+/// whose strict preparation failed is no evidence of a generic shell and
+/// must not taint the enclosing request the way a consumed (`ReturnOnly`)
+/// preparation failure does.
+fn member_declared_by_generic_shell<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    member: &TypeInfoSurfaceMember,
+) -> bool {
+    let Some(origin) = member.origin.canonical_file.as_deref() else {
+        return false;
+    };
+    let Some(member_key) = member.key.cloned_known() else {
+        return false;
+    };
+    let Some(bundle) = dispatch.ctx.prepared_decl_bundle(origin) else {
+        return false;
+    };
+    bundle.owner_scopes.iter().any(|(owner, scope)| {
+        scope.scope_type_names.iter().any(|name| {
+            matches!(
+                dispatch.ctx.prepared_type_decl(origin, *owner, name),
+                Ok(Some(prepared))
+                    if !prepared.type_parameters.is_empty()
+                        && prepared.member_index.contains_key(&member_key)
+            )
+        })
+    })
 }
 
 /// The graph-native member-value SOURCE for a props / expose / options
