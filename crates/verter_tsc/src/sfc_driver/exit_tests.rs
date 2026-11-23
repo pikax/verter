@@ -390,6 +390,46 @@ fn a_script_lang_mismatch_prints_vter1002_on_the_carrier() {
     assert_eq!(exit_status(&run), ExitStatus::Diagnostics);
 }
 
+/// The `v-if` chain the repeated-key cases share: three branches, one key.
+const REPEATED_BRANCH_KEY: &str = concat!(
+    "<script setup lang=\"ts\">\n",
+    "const kind = 'a' as string;\n",
+    "const id = 1;\n",
+    "</script>\n",
+    "\n",
+    "<template>\n",
+    "  <div>\n",
+    "    <p v-if=\"kind === 'a'\" :key=\"`k:${id}`\">a</p>\n",
+    "    <p v-else-if=\"kind === 'b'\" :key=\"`k:${id}`\">b</p>\n",
+    "    <p v-else :key=\"`k:${id}`\">c</p>\n",
+    "  </div>\n",
+    "</template>\n",
+);
+
+#[test]
+fn a_key_repeated_across_a_v_if_chain_warns_without_withholding_the_carrier() {
+    let ws = Workspace::new();
+    let mut p = project(&ws.path("tsconfig.json"));
+    p.carriers
+        .push(ws.carrier("Repeated.vue", REPEATED_BRANCH_KEY));
+    let run = outcome(vec![p]);
+    let file = canonical(&ws.path("Repeated.vue"));
+    // One warning on each branch that repeats an earlier branch's key, under
+    // its own code: no syntax error, no partial-check line.
+    assert_eq!(
+        rendered(&run),
+        [
+            format!("{file}(9,5): warning VTER1010: v-if/else branches must use unique keys."),
+            format!("{file}(10,5): warning VTER1010: v-if/else branches must use unique keys."),
+        ]
+    );
+    let result = &run.projects[0].carriers[0].result;
+    let module = result.module.as_ref().expect("the carrier composes");
+    assert!(module.withheld.is_empty(), "{:?}", module.withheld);
+    assert!(result.complete, "a warning leaves the result complete");
+    assert_eq!(exit_status(&run), ExitStatus::Clean, "a warning only");
+}
+
 #[test]
 fn an_unreadable_carrier_prints_one_diagnostic() {
     let ws = Workspace::new();

@@ -46,7 +46,7 @@ fn needs_attr_quoting(value: &str) -> bool {
             .any(|b| matches!(b, b' ' | b'"' | b'\'' | b'=' | b'<' | b'>' | b'`'))
 }
 
-/// Close the HTML tag for a non-void, non-self-closing element.
+/// Close the HTML tag of every element except a void one.
 ///
 /// Takes fields separately to avoid borrow conflict between `html` and `tag_name`.
 pub(super) fn close_html_tag(html: &mut String, tag_name: &str, is_void: bool) {
@@ -64,10 +64,14 @@ pub(super) fn close_html_tag(html: &mut String, tag_name: &str, is_void: bool) {
 /// - `<div>hello</div>` → `<div>hello`
 /// - `<div><span>inner</span></div>` → `<div><span>inner`
 /// - `<div><span>a</span><span>b</span></div>` → `<div><span>a</span><span>b`
+///
+/// Text after the last end tag is a node of its own (`<div><p>x</p> ` keeps
+/// the space a text effect sets), so stripping stops at any text, whitespace
+/// included.
 pub(super) fn strip_trailing_close_tags(html: &mut String) {
     // Repeatedly strip closing tags from the end
     loop {
-        let trimmed = html.trim_end();
+        let trimmed = html.as_str();
         if !trimmed.ends_with('>') {
             break;
         }

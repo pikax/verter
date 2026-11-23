@@ -20,9 +20,12 @@ pub(super) enum VaporEffect<'c> {
         parts: Vec<TextPart<'c>>,
         generated: bool,
     },
+    /// `svg` passes runtime-vapor's SVG flag: an SVG element's class is
+    /// its `class` attribute.
     Class {
         node_ref: u32,
         expr: RunId,
+        svg: bool,
     },
     Style {
         node_ref: u32,
@@ -33,10 +36,12 @@ pub(super) enum VaporEffect<'c> {
         attr: &'c str,
         expr: RunId,
     },
+    /// `svg` passes runtime-vapor's SVG flag.
     Attr {
         node_ref: u32,
         attr: &'c str,
         expr: RunId,
+        svg: bool,
     },
     DomProp {
         node_ref: u32,
@@ -47,8 +52,21 @@ pub(super) enum VaporEffect<'c> {
         node_ref: u32,
         expr: RunId,
     },
+    /// `setValue`: an element's `value`, kept beside the DOM property.
+    Value {
+        node_ref: u32,
+        expr: RunId,
+    },
+    /// `setElementText`: a bound `textContent`.
+    ElementText {
+        node_ref: u32,
+        expr: RunId,
+    },
+    /// `svg` passes runtime-vapor's SVG flag, so each key is set as an SVG
+    /// element's attribute rather than as its (read-only) DOM property.
     DynamicProps {
         node_ref: u32,
         expr: RunId,
+        svg: bool,
     },
 }

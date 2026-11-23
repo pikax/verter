@@ -12,7 +12,7 @@ use crate::template::topology::{
     RegionCompleteness, VueBranchRole, VueTemplateNodeId, VueTemplateNodeKind, VueTemplateTopology,
 };
 use crate::types::NodeProp;
-use crate::utils::vue::tag::{is_raw_text_tag, is_void_tag};
+use crate::utils::vue::tag::{is_mathml_tag, is_raw_text_tag, is_svg_tag, is_void_tag};
 use crate::work_ledger::{CompilerWorkLedger, WorkKind};
 
 /// Collection marker of compile nodes.
@@ -315,23 +315,15 @@ impl<'a, 'p> Builder<'a, 'p> {
             let name = self.tag_bytes(element)?;
             tag = Some(self.out.names.intern(name)?);
             let bytes = name.as_bytes();
-            // A namespace starts at `svg` or `math` and every descendant
-            // inherits it until an integration point. `mglyph` and
-            // `malignmark` stay MathML inside a MathML text integration point.
-            let parent_is_mathml_text_point = topology.parent(node).is_some_and(|parent| {
-                let facts = self.out.facts(self.ids[parent.index()]);
-                facts.flags.has(VueNodeFlags::MATHML_NAMESPACE)
-                    && facts
-                        .tag
-                        .is_some_and(|t| is_mathml_text_point(self.out.text(t)))
-            });
-            namespace = match (parent_namespace, bytes) {
-                (Namespace::Html, b"svg") => Namespace::Svg,
-                (Namespace::Html, b"math") => Namespace::MathMl,
-                (Namespace::Html, b"mglyph" | b"malignmark") if parent_is_mathml_text_point => {
-                    Namespace::MathMl
-                }
-                (inherited, _) => inherited,
+            // As Vue 3.6.0-rc.15 compiler-dom `getNamespace` decides it: an
+            // element read as HTML starts the SVG or MathML namespace when its
+            // tag is an SVG or MathML tag (`<path>` or `<g>` with no `<svg>`
+            // in the file, `mglyph` inside a MathML text integration point),
+            // and every descendant inherits it until an integration point.
+            namespace = match parent_namespace {
+                Namespace::Html if is_svg_tag(bytes) => Namespace::Svg,
+                Namespace::Html if is_mathml_tag(bytes) => Namespace::MathMl,
+                inherited => inherited,
             };
             match namespace {
                 Namespace::Svg => flags = flags.with(VueNodeFlags::SVG_NAMESPACE),

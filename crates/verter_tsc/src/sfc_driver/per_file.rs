@@ -9,7 +9,7 @@ use verter_session::sfc_projection_mapper::{
 };
 use verter_workspace::WorkspaceRead;
 
-use crate::reporter::{Diagnostic, VerterCode};
+use crate::reporter::{Diagnostic, Severity, VerterCode};
 
 /// The projection of one carrier for one project.
 #[derive(Debug, Clone)]
@@ -35,6 +35,7 @@ impl CarrierProjection {
             MapperDiagnosticCode::ScriptLangConflict => VerterCode::ScriptLangMismatch,
             MapperDiagnosticCode::ProjectionRefused => VerterCode::CarrierProjectionRefused,
             MapperDiagnosticCode::ProjectionInternal => VerterCode::CarrierProjectionInternal,
+            MapperDiagnosticCode::RepeatedBranchKey => VerterCode::RepeatedBranchKey,
         }
     }
 
@@ -49,13 +50,17 @@ impl CarrierProjection {
             .iter()
             .map(|diagnostic| {
                 let (line, col) = super::exit::engine_position(&table, diagnostic.start);
-                Diagnostic::verter(
+                let mut reported = Diagnostic::verter(
                     self.carrier.to_string(),
                     line,
                     col,
                     self.verter_code(diagnostic.code),
                     diagnostic.message.clone(),
-                )
+                );
+                if diagnostic.code.is_warning() && !self.unreadable {
+                    reported.severity = Severity::Warning;
+                }
+                reported
             })
             .collect()
     }

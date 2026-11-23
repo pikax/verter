@@ -14,7 +14,14 @@ pub(super) struct ChildInfo {
     pub(super) continuation: bool,
     pub(super) following_template: bool,
     pub(super) sole_meaningful: bool,
+    /// Every rendered child is text or interpolation, so the node's
+    /// children are one text run its first child holds.
     pub(super) children_all_text_like: bool,
+    /// The block roots the node's children make as a slot body: a run of
+    /// text is one root, every other rendered child (an element, a
+    /// construct, a kept comment) is one, a `<template v-slot>` is its own
+    /// slot and a `v-else` branch belongs to its chain.
+    pub(super) slot_body_roots: u32,
 }
 
 /// One linear projection of the structure's already-resolved child lists.
@@ -44,6 +51,29 @@ pub(super) fn child_info(inputs: &VueTargetInputs<'_>) -> Vec<ChildInfo> {
             .count();
         let mut following_template = false;
         let mut all_text_like = true;
+        let mut slot_body_roots = 0;
+        let mut in_text_run = false;
+        for child in children {
+            if slot_template(child.node) || child.chain == VueChainRole::Continuation {
+                continue;
+            }
+            match child.kind {
+                VueChildKind::Text
+                | VueChildKind::Interpolation
+                | VueChildKind::WhitespaceSpace
+                | VueChildKind::WhitespaceNewline => {
+                    if !in_text_run {
+                        slot_body_roots += 1;
+                        in_text_run = true;
+                    }
+                }
+                VueChildKind::Comment if !inputs.options.comments => {}
+                VueChildKind::Element | VueChildKind::Comment => {
+                    slot_body_roots += 1;
+                    in_text_run = false;
+                }
+            }
+        }
         for child in children.iter().rev() {
             let template = inputs.structure.template_id(child.node);
             let contributes = match inputs.topology.kind(template) {
@@ -69,15 +99,26 @@ pub(super) fn child_info(inputs: &VueTargetInputs<'_>) -> Vec<ChildInfo> {
                 continue;
             }
             row.sole_meaningful = meaningful == 1 && !whitespace;
-            // A continuation occupies its source position but is part of the preceding construct.
-            if contributes && !whitespace && child.chain != VueChainRole::Continuation {
+            // A continuation occupies its source position but is part of the
+            // preceding construct. Whitespace the structure keeps is a text
+            // node of the template, so a block before it needs an anchor.
+            if contributes && child.chain != VueChainRole::Continuation {
                 following_template = true;
             }
-            if !whitespace && !contributes {
+            // Any other rendered child (an element, a construct, a kept
+            // comment) is a node beside the text: each text run is then
+            // reached as its own node, never as the parent's first child.
+            let text_like = match child.kind {
+                VueChildKind::Text | VueChildKind::Interpolation => true,
+                VueChildKind::Comment => !inputs.options.comments,
+                _ => whitespace,
+            };
+            if !text_like {
                 all_text_like = false;
             }
         }
         rows[parent_id.index()].children_all_text_like = all_text_like;
+        rows[parent_id.index()].slot_body_roots = slot_body_roots;
     }
     rows
 }
@@ -103,6 +144,8 @@ impl<'c> VaporCompiler<'c> {
         &mut self,
         scope: &mut VaporScope<'c>,
     ) -> Result<(), VueTargetRefusal> {
+        // The last text run ends with its scope.
+        scope.end_text_run();
         let requests = std::mem::take(&mut scope.pending_nav_requests);
         for request in requests {
             match request {
@@ -149,6 +192,7 @@ impl<'c> VaporCompiler<'c> {
                     dom_child_index,
                     nav_slot,
                     stmt_slot,
+                    parts,
                 } => {
                     let container = scope.ensure_node_ref(&mut self.state.counters);
                     scope.child_nav[nav_slot] = Nav::At {
@@ -159,12 +203,21 @@ impl<'c> VaporCompiler<'c> {
                     };
                     let effect = self.state.add_effect(VaporEffect::Text {
                         text_ref: own_ref,
-                        parts: std::mem::take(&mut scope.text_parts),
+                        parts,
                         generated: false,
                     });
-                    let group = self.state.add_effect_group(vec![effect], "  ", true)?;
-                    let run = self.state.runs.commit(&mut vec![Part::Effects(group)]);
-                    scope.child_statements[stmt_slot] = Stmt::Run(run);
+                    match stmt_slot {
+                        Some(slot) => {
+                            let group = self.state.add_effect_group(
+                                vec![effect],
+                                "  ",
+                                super::graph::EffectWrapper::Render,
+                            )?;
+                            let run = self.state.runs.commit(&mut vec![Part::Effects(group)]);
+                            scope.child_statements[slot] = Stmt::Run(run);
+                        }
+                        None => scope.own_effects.push(effect),
+                    }
                 }
             }
         }

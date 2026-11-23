@@ -180,7 +180,14 @@ describe("static transitive-closure cross-derivation", () => {
 
   it("refuses a byte-mutated closure.tsv evidence file (digest layer)", () => {
     const original = readFileSync(VUE_EVIDENCE_CLOSURE, "utf8");
-    const mutatedText = original.replace("@babel/parser\t7.29.8", "@babel/parser\t7.29.9");
+    // Bump the patch of the closure's own @babel/parser row, read from the
+    // committed file so the plant tracks whatever version the domain pins.
+    const parserRow = /^(node_modules\/@babel\/parser\t@babel\/parser\t\d+\.\d+\.)(\d+)\t/m;
+    expect(original).toMatch(parserRow);
+    const mutatedText = original.replace(
+      parserRow,
+      (_, prefix, patch) => `${prefix}${Number(patch) + 1}\t`,
+    );
     expect(mutatedText).not.toBe(original); // plant proven applied
     const dir = scratchDir("bf2-closure-tsv-");
     const mutatedPath = path.join(dir, "closure.tsv");

@@ -40,7 +40,7 @@ pub struct RunOutcome {
 /// `Failed` when any project has an engine failure, any carrier is
 /// unreadable, any mapper diagnostic is `ProjectionInternal`, or the graph
 /// has a problem. Otherwise `Diagnostics` when any error exists. Otherwise
-/// `Clean`. Warnings do not change the status.
+/// `Clean`. Warnings, a carrier's own included, do not change the status.
 #[must_use]
 pub fn exit_status(outcome: &RunOutcome) -> ExitStatus {
     let failed = !outcome.graph_problems.is_empty()
@@ -63,9 +63,13 @@ pub fn exit_status(outcome: &RunOutcome) -> ExitStatus {
             .diagnostics
             .iter()
             .any(|d| d.severity == Severity::Error)
-            || project
-                .checked_carriers()
-                .any(|carrier| !carrier.result.diagnostics.is_empty())
+            || project.checked_carriers().any(|carrier| {
+                carrier
+                    .result
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| !diagnostic.code.is_warning())
+            })
             || project
                 .attributed
                 .iter()

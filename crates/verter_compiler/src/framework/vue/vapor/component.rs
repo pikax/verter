@@ -1,6 +1,7 @@
 //! Component operations consume the snapshot's component classification.
 use super::ops::{BlockKind, ClosedBlock, NameKind, Part, RunId};
 use super::scope::VaporScope;
+use super::slot_roots::flags_text;
 use super::VaporCompiler;
 use crate::framework::vue::semantic::VueComponentClass;
 use crate::framework::vue::structure::{
@@ -168,30 +169,45 @@ impl<'c> VaporCompiler<'c> {
         parts.push(slots.map_or(Part::Text("null"), Part::Run));
         if dynamic {
             // Official `genDynamicComponentFlags`: the template's sole root is
-            // SINGLE_ROOT; a component's sole slot root is SLOT_ROOT plus
-            // SINGLE_ROOT under a `<KeepAlive>`/`<Transition>` (which pass
-            // their single root through) or SLOT_SINGLE_ROOT under any other
-            // component. One of several slot children gets no flag.
+            // SINGLE_ROOT; a component's sole slot child is SINGLE_ROOT under
+            // a `<KeepAlive>`/`<Transition>` (which pass their single root
+            // through) or SLOT_SINGLE_ROOT under any other component. A root
+            // of a slot block with no stable root is SLOT_ROOT as well
+            // (`markSlotRootOperations`).
             let sole_slot_root = self
                 .element_stack
                 .last()
                 .is_some_and(|parent| parent.is_component_scope)
                 && self.is_sole_meaningful_child(node);
-            let flag = if self.template_single_root && self.depth == 0 {
-                Some((1, " /* SINGLE_ROOT */"))
-            } else if sole_slot_root && self.parent_hosts_single_root_child(node) {
-                Some((5, " /* SINGLE_ROOT, SLOT_ROOT */"))
+            let root = if (self.template_single_root && self.depth == 0)
+                || (sole_slot_root && self.parent_hosts_single_root_child(node))
+            {
+                Some((1, "SINGLE_ROOT"))
             } else if sole_slot_root {
-                Some((36, " /* SLOT_SINGLE_ROOT, SLOT_ROOT */"))
+                Some((32, "SLOT_SINGLE_ROOT"))
             } else {
                 None
             };
-            if let Some((number, comment)) = flag {
-                parts.extend([Part::Text(", "), Part::Name(NameKind::Number, number)]);
-                if !self.inputs.options.is_production {
-                    parts.push(Part::Text(comment));
+            let is_production = self.inputs.options.is_production;
+            let allocator = self.inputs.allocator;
+            let argument = |slot_root: bool| {
+                let (mut flags, mut names) =
+                    root.map_or((0, Vec::new()), |(flags, name)| (flags, vec![name]));
+                if slot_root {
+                    flags |= 4;
+                    names.push("SLOT_ROOT");
                 }
-            }
+                if flags == 0 {
+                    return Vec::new();
+                }
+                let text = flags_text(flags, &names, is_production);
+                vec![Part::Text(", "), Part::Text(allocator.alloc_str(&text))]
+            };
+            let (mut plain, mut slot_root) = (argument(false), argument(true));
+            let flags = self
+                .state
+                .slot_root_flags(node_ref, &mut plain, &mut slot_root);
+            parts.push(Part::Run(flags));
             self.state.use_helper(VaporHelper::CreateDynamicComponent);
         } else {
             parts.push(Part::Text(", true"));

@@ -319,6 +319,69 @@ impl CompilerErrorCode {
             Self::XCodegenEditRefused => "Code generation recorded edits the transform refused.",
         }
     }
+
+    /// True for an error Vue's compiler refuses that still leaves the parsed
+    /// template's structure trustworthy: a compile keeps refusing the file,
+    /// while a type checker reports it as a warning and checks the template
+    /// through it. A key repeated within one `v-if` chain is the one such
+    /// error: the chain itself is well formed.
+    #[must_use]
+    pub fn leaves_template_checkable(self) -> bool {
+        // Exhaustive: a new code cannot compile until it chooses whether a
+        // checker may check through it.
+        match self {
+            Self::XVIfSameKey => true,
+            Self::AbruptClosingOfEmptyComment
+            | Self::CdataInHtmlContent
+            | Self::DuplicateAttribute
+            | Self::EndTagWithAttributes
+            | Self::EofBeforeTagName
+            | Self::EofInCdata
+            | Self::EofInComment
+            | Self::EofInTag
+            | Self::IncorrectlyClosedComment
+            | Self::IncorrectlyOpenedComment
+            | Self::InvalidFirstCharacterOfTagName
+            | Self::MissingAttributeValue
+            | Self::MissingEndTagName
+            | Self::MissingWhitespaceBetweenAttributes
+            | Self::NestedComment
+            | Self::UnexpectedCharacterInAttributeName
+            | Self::UnexpectedCharacterInUnquotedAttributeValue
+            | Self::UnexpectedEqualsSignBeforeAttributeName
+            | Self::UnexpectedQuestionMarkInsteadOfTagName
+            | Self::XInvalidEndTag
+            | Self::XMissingEndTag
+            | Self::XMissingInterpolationEnd
+            | Self::XMissingDirectiveName
+            | Self::XMissingDynamicDirectiveArgumentEnd
+            | Self::XVIfNoExpression
+            | Self::XVElseNoAdjacentIf
+            | Self::XVForNoExpression
+            | Self::XVForMalformedExpression
+            | Self::XVBindNoExpression
+            | Self::XVOnNoExpression
+            | Self::XVSlotMisplaced
+            | Self::XVSlotDuplicateSlotNames
+            | Self::XVModelNoExpression
+            | Self::XVModelMalformedExpression
+            | Self::DuplicateTemplate
+            | Self::MissingSfcEntryBlock
+            | Self::TemplateFunctionalUnsupported
+            | Self::DuplicateScriptSetup
+            | Self::DuplicateScript
+            | Self::ScriptLangMismatch
+            | Self::XDuplicateDirective
+            | Self::XInvalidExpression
+            | Self::XInvalidMacroType
+            | Self::XInvalidMacroScopeReference
+            | Self::XUnresolvedImportedMacroType
+            | Self::XMissingMacroSemanticBundle
+            | Self::XUnavailableMacroSemanticResult
+            | Self::XCssParseError
+            | Self::XCodegenEditRefused => false,
+        }
+    }
 }
 
 impl std::fmt::Display for CompilerErrorCode {
@@ -387,6 +450,14 @@ impl Diagnostic {
             arguments: Vec::new(),
             span,
         }
+    }
+
+    /// True for an error that leaves the parsed template untrustworthy to
+    /// check: every error except one whose code
+    /// [leaves the template checkable](CompilerErrorCode::leaves_template_checkable).
+    #[must_use]
+    pub fn breaks_template_structure(&self) -> bool {
+        self.severity == DiagnosticSeverity::Error && !self.code.leaves_template_checkable()
     }
 
     /// Create a warning diagnostic with a Vue-compatible error code.

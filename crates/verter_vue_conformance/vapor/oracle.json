@@ -57,6 +57,14 @@
       "outputSha256": "8e9b0e76b29bef16f4a5619631bf92b35e2fa2cc230c8bed6a0c4f6b3f39cf87"
     },
     {
+      "file": "conditional-slot-template.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "0e8bcd9fe752fd9ab6172d8df51d2cbe51c42390a7a4c8ac47ca042fe29139b9",
+      "outputSha256": "2705c030a958a3e701ba82e172f84d4c0004a66bccef524c9d457dc7f0b64e31"
+    },
+    {
       "file": "dynamic-slot-name.vue",
       "version": "3.6.0-rc.15",
       "bindings": {
@@ -68,6 +76,22 @@
       "diagnostics": [],
       "sourceSha256": "715cb73e1a513d25f66016707d884dbe0b9cb3179260dc2245cadf42b6692cd9",
       "outputSha256": "4ef4045399f39a7263d0c54eb946022e13672c85f184f6b85f8ca20ecfa64553"
+    },
+    {
+      "file": "empty-element-siblings.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "75e0dc27ff3f9d3d0a22ccf5c85c1a4cd88671c42032a395e54d00cbfe8b7594",
+      "outputSha256": "ee612fa316f346c76877f845f44bde58d77cf906c7fd1e8275e92cbebc072e62"
+    },
+    {
+      "file": "forced-multi-root.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "87b4b0c40d54b3c77a659b0271f7b05fee07e844cfb367f5e9e1147e2f7ec559",
+      "outputSha256": "33b69ce2a95761eb1c06e08e18c70c837bca466d4228cdeb89c5f4cc29fd167d"
     },
     {
       "file": "generated-local-container.vue",
@@ -98,6 +122,14 @@
       "diagnostics": [],
       "sourceSha256": "f15bd707e71484ad1b6a5c1f9ccdee84e1d1fd2bd42ff1ada2a3455e972b1482",
       "outputSha256": "9e5f2bf91741ea652533aeb34f02d437c76c87270dbae05fdf0cfa9914688b85"
+    },
+    {
+      "file": "insertion-anchor-whitespace.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "7a33c7a5bd3d50ca8bc0217a089d7bf40c2c67307d4b12373e59546ccda49199",
+      "outputSha256": "3987746ac08b7d0789453154ae8530288228bf037593722857134977dc6f1f5e"
     },
     {
       "file": "loop-source-callback.vue",
@@ -189,6 +221,14 @@
       "outputSha256": "6a2297f3b69bb64a6026a3966fe97399bc97de8547010b23f46e6e58c8fe3bfa"
     },
     {
+      "file": "multi-root-slot-body.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "7e092fa8032be71b877d754e0e95b8fe23f05bbe2485fd7e8ebf3f345fd4f47e",
+      "outputSha256": "2c205a02ebb0cb42bcbab770b59f47b41654669ace1d12071e052bd12671ca03"
+    },
+    {
       "file": "multiple-root-condition.vue",
       "version": "3.6.0-rc.15",
       "bindings": {
@@ -254,6 +294,54 @@
       "diagnostics": [],
       "sourceSha256": "793a312397443059d81bdd774386deb62461267fe80c72008a7bccfc01329323",
       "outputSha256": "9a392711d52eea131f96f2acb4b3a7af161e16a8e9157c7e79f83ba5f35ac284"
+    },
+    {
+      "file": "svg-attributes.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "159b2f6be068523a634e94e3282f9e26d08653592f37dc557bdb33d4cdf51a46",
+      "outputSha256": "f0d16bbcf5ac5875219cd929e8f06c0be7e3a818e0237f76f957bdc8e2bd593a"
+    },
+    {
+      "file": "svg-dynamic-props.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "a71cb72ef33526afec88763ec10a7abb29c06ea0b445aef549cc94f52629e2b5",
+      "outputSha256": "1e581b91f84ca8f6074a43cd13be8b488edee03d0624e1430a40247865e29ccd"
+    },
+    {
+      "file": "svg-fragment-namespace.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "47a8ff079c14cbc0bd292b84fbfd1eec1a6cbe32b3fb09759781e5e6a0c15c80",
+      "outputSha256": "5d8434d99278e07b173980145f86e1ccb65a9be84ddcb0af1ce1eef86fd516c4"
+    },
+    {
+      "file": "template-namespace.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "afc9f36d28b62d55d96d8ebdec98c613e86bdd54d088be1a51e9f431f39d06b9",
+      "outputSha256": "643378682e6c8ed3f036d8c2eab03f804d90c67114ac2043edafe9c7c81ace77"
+    },
+    {
+      "file": "text-runs-beside-elements.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "137e2797873f9fbb8ef65a1f06d8d071e16e4ec438c046b218c889e72535bfe7",
+      "outputSha256": "b2d95823495e5e9700393e2d13c844c5c76ac3a44027d2cf5687ff6018cc3657"
+    },
+    {
+      "file": "trailing-text-run.vue",
+      "version": "3.6.0-rc.15",
+      "bindings": {},
+      "diagnostics": [],
+      "sourceSha256": "672238ed9dedab1fb49b64f45a7cf9bc5dc7538a9ef0c677a463a38a0cf89656",
+      "outputSha256": "915332f4d52db379fd15def5d24a2d95b6d5a060e9de1694db32fe02c52f7cda"
     }
   ]
 }
