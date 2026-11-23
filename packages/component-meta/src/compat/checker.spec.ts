@@ -884,6 +884,28 @@ describe("mapPropMeta", () => {
       ],
     });
   });
+
+  it.each([true, false])(
+    "renders a published union whose only arm is any as any (required: %s)",
+    (required) => {
+      const type: TypeDescriptor = { kind: "union", types: [primitive("any")] };
+      const result = mapPropMeta({ name: "as", type, required, hasDefault: false });
+
+      expect(result.type).toBe("any");
+      expect(result.schema).toBe("any");
+    },
+  );
+
+  it("does not append a second undefined arm to a descriptor that already has one", () => {
+    const result = mapPropMeta({
+      name: "label",
+      type: { kind: "union", types: [primitive("undefined"), primitive("string")] },
+      required: false,
+      hasDefault: false,
+    });
+
+    expect(result.type).toBe("undefined | string");
+  });
 });
 
 describe("mapEventMeta", () => {

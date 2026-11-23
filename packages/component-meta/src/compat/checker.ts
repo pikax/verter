@@ -81,6 +81,13 @@ const isUndefinedPrimitive = (t: TypeDescriptor): boolean =>
 const isAnyPrimitive = (t: TypeDescriptor): boolean => t.kind === "primitive" && t.name === "any";
 
 /**
+ * Structural predicate: the descriptor is exactly `any`, either
+ * `primitive("any")` or a published union whose only arm is exactly `any`.
+ */
+const isExactAny = (t: TypeDescriptor): boolean =>
+  t.kind === "union" ? t.types.length === 1 && isExactAny(t.types[0]!) : isAnyPrimitive(t);
+
+/**
  * Returns `t` with any top-level union arm of `primitive("undefined")` removed.
  * Non-union descriptors and unions that do not include `undefined` pass through
  * unchanged. The structural authority for "drop the trailing `| undefined`"
@@ -215,7 +222,7 @@ export function mapPropMeta(
   // transcribed to it above) renders `any`: TypeScript reduces `any | undefined`
   // to `any`, so an optional member never gains an `undefined` arm. Decided on
   // the descriptor kind alone — display text never takes part.
-  if (isAnyPrimitive(prop.type)) return buildCompatPropertyMeta(prop, "any", "any");
+  if (isExactAny(prop.type)) return buildCompatPropertyMeta(prop, "any", "any");
   const functionArray = classifyFunctionArrayDescriptor(prop.type, typeRegistry);
   if (functionArray)
     return renderCompatFunctionArrayUnionPropMeta(prop, functionArray, typeRegistry);
@@ -539,10 +546,14 @@ function preferredCompatPropTypeText(
   prop: KnownRequiredProp,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
-  const descriptorText = normalizeOptionalCompatTypeText(
-    normalizeTypeString(typeDescriptorToCompatDisplay(prop.type, typeRegistry)),
-    prop.required,
+  // A descriptor whose top-level union has an `undefined` arm already renders
+  // it; only display text without that structure gains the optional suffix.
+  const descriptorDisplay = normalizeTypeString(
+    typeDescriptorToCompatDisplay(prop.type, typeRegistry),
   );
+  const descriptorText = descriptorIncludesTopLevelUndefined(prop.type)
+    ? descriptorDisplay
+    : normalizeOptionalCompatTypeText(descriptorDisplay, prop.required);
 
   // Bare ref / indexed-access descriptors render structurally via their alias
   // name (`Foo` / `Foo['bar']`). Descriptor wins for these shapes — the raw
