@@ -4324,6 +4324,53 @@ fn v_else_branches_with_distinct_keys_are_accepted() {
     assert_eq!(if_same_key_count(input), 0);
 }
 
+/// A key repeated across a whole chain is one error on each branch that
+/// repeats an earlier branch's key: a compile refuses it, as Vue's compiler
+/// does. The chain itself is well formed, so the error leaves the template
+/// checkable, and it is the only thing that makes the parse erroneous.
+#[test]
+fn same_key_across_a_three_branch_chain_is_refused_per_repeating_branch_yet_checkable() {
+    let input = r#"<template><div><p v-if="a" :key="`k:${id}`">a</p><p v-else-if="b" :key="`k:${id}`">b</p><p v-else :key="`k:${id}`">c</p></div></template>"#;
+    let parsed = parse_sfc(input);
+    let same_key = parsed
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::XVIfSameKey)
+        .collect::<Vec<_>>();
+    let starts = same_key.iter().map(|d| d.span.start).collect::<Vec<_>>();
+    assert_eq!(
+        starts,
+        [
+            input.find("<p v-else-if").unwrap() as u32,
+            input.find("<p v-else ").unwrap() as u32,
+        ],
+        "one per repeating branch, at its tag: {same_key:?}"
+    );
+    assert!(
+        same_key.iter().all(
+            |d| d.severity == crate::diagnostics::DiagnosticSeverity::Error
+                && !d.breaks_template_structure()
+        ),
+        "{same_key:?}"
+    );
+    assert!(parsed.has_errors(), "a compile refuses the file");
+    assert!(
+        !parsed.has_structural_errors(),
+        "a checker checks through it: {:?}",
+        parsed.diagnostics
+    );
+}
+
+/// An error that does break the template stays structural beside a
+/// repeated key: the exemption is the repeated key's alone.
+#[test]
+fn a_repeated_key_does_not_hide_a_structural_error_beside_it() {
+    let input = r#"<template><div><p v-if="a" :key="1">a</p><p v-else :key="1">b</p><span></div></template>"#;
+    let parsed = parse_sfc(input);
+    assert_eq!(if_same_key_count(input), 1);
+    assert!(parsed.has_structural_errors(), "{:?}", parsed.diagnostics);
+}
+
 // ========================================================================
 // An unclosed element inside a v-if branch keeps the branch's siblings
 // ========================================================================

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 3,
+  "framework": "vue",
+  "domain": {
+    "upstream": "https://github.com/vuejs/core",
+    "commit": "1595469ef66e4126351609f7df8ef334560aa3fa",
+    "tree": "a417748239111b19c9f78380531fda9ef13f7c6c",
+    "packageVersion": "3.6.0-rc.15"
+  },
+  "packageLockSha256": "418ffca6ed806b30f93c82b8358720a3b13618ab35f5703cac9b310f3a5ea44a",
+  "realizedClosureSha256": "53efe33accfa5889757f32e75632a78cb45ab17d545e59294d7b98303c6021f3",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "272128d5ea31d82994ef9d8d302f1c96f4b02be502e7f7308defa978c4b8ac74",
+    "commit": "bb2a37408f614ac46d44fe8fc3f322e2e41baf72",
+    "tree": "62e1014cbb73a39d167385413bf7e59b62afa75e",
+    "worktreeDirty": false,
+    "implementationSha256": "659b65c5474b664d15192338b68000d6609a70849da0149c9995ce5230367dcc"
+  },
+  "fixture": {
+    "path": "fixtures/vue/basic-interpolation.vue",
+    "sha256": "9af37e23a9e5a23ddcfdfb9ec3c15f2b15cd8f739d2c52a2fd63e6ba275268f1"
+  },
+  "options": {
+    "backend": "vdom",
+    "sourceMap": false,
+    "isProd": false,
+    "transformAssetUrls": {
+      "includeAbsolute": true
+    }
+  },
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "fa31c3ec4e9227f000ddab34eaf3161a406b995e6059033bd53d2bc512d44f83",
+    "mapPresent": false
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "a7b08b677b2f23e5a84b183e586d60624517c7923847b9e0e5b10899f607ee80",
+    "normalizedDigestSha256": "88965729f541cdc0395ebf5171e95ab68635db61a55e780cf769dd995b9df7c3"
+  },
+  "code": "import { ref } from \"vue\";\n\n\nconst _sfc_main = {\n  __name: 'basic-interpolation',\n  setup(__props, { expose: __expose }) {\n  __expose();\n\nconst count = ref(0);\nconst items = [\"a\", \"b\", \"c\"];\n\nconst __returned__ = { count, items, ref }\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true })\nreturn __returned__\n}\n\n}\nimport { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock, createCommentVNode as _createCommentVNode, renderList as _renderList, Fragment as _Fragment, createElementVNode as _createElementVNode } from \"vue\"\n\nconst _hoisted_1 = { class: \"root\" }\nconst _hoisted_2 = { key: 0 }\nconst _hoisted_3 = { key: 1 }\n\nfunction render(_ctx, _cache, $props, $setup, $data, $options) {\n  return (_openBlock(), _createElementBlock(\"div\", _hoisted_1, [\n    ($setup.count > 0)\n      ? (_openBlock(), _createElementBlock(\"p\", _hoisted_2, _toDisplayString($setup.count), 1 /* TEXT */))\n      : (_openBlock(), _createElementBlock(\"p\", _hoisted_3, \"zero\")),\n    _createElementVNode(\"ul\", null, [\n      (_openBlock(), _createElementBlock(_Fragment, null, _renderList($setup.items, (item) => {\n        return _createElementVNode(\"li\", { key: item }, _toDisplayString(item), 1 /* TEXT */)\n      }), 64 /* STABLE_FRAGMENT */))\n    ])\n  ]))\n}\n_sfc_main.render = render\nexport default _sfc_main",
+  "map": null
+}

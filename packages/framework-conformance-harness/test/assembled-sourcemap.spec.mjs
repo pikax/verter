@@ -118,8 +118,10 @@ describe("assembled-module map — every backend, whole-artifact soundness", () 
 // assertion over corpus maps can discriminate a broken column offset. This
 // control compiles a plain `<script>` SFC — whose user-authored
 // `export default { ... }` line IS officially mapped, column by column —
-// through the real production path (compileVueFixture), for every backend,
-// and pins the exact composed segment set with literal expected columns:
+// through the real production path (compileVueFixture), for every backend
+// that accepts a plain `<script>` (vdom and ssr; the pinned official
+// compiler refuses one for vapor, locked below), and pins the exact
+// composed segment set with literal expected columns:
 //   - the `export default ` keyword span (original columns 0..13) is
 //     harness-replaced text, so its segments must be DROPPED;
 //   - every surviving segment shifts by the splice delta
@@ -157,13 +159,6 @@ const PLAIN_RENDER_LINE_LITERALS = {
       [79, 3, 7],
     ],
   },
-  vapor: {
-    genLine: 9,
-    segments: [
-      [52, 3, 6],
-      [58, 3, 7],
-    ],
-  },
   ssr: {
     genLine: 9,
     segments: [
@@ -173,8 +168,32 @@ const PLAIN_RENDER_LINE_LITERALS = {
   },
 };
 
-describe("splice re-anchoring — exact column correspondences on the edited line, every backend", () => {
-  for (const backend of ["vdom", "vapor", "ssr"]) {
+describe("splice re-anchoring — exact column correspondences on the edited line, every plain-script backend", () => {
+  // The pinned official compiler refuses a vapor component whose only script
+  // block is a plain `<script>` (it must also carry `<script setup>` or
+  // `<script vapor>`), so no vapor module ever assembles from a user-authored
+  // `export default` line. The harness surfaces that refusal as the official
+  // script diagnostic and publishes no artifact.
+  it("vapor: a plain-script SFC is refused by the official compiler and publishes nothing", () => {
+    const artifact = compileVueFixture(PLAIN_SCRIPT_FIXTURE, "plain-script-control.vue", {
+      backend: "vapor",
+      sourceMap: true,
+      isProd: false,
+    });
+    expect(artifact.code).toBeNull();
+    expect(artifact.map).toBeNull();
+    expect(artifact.diagnostics).toEqual([
+      expect.objectContaining({
+        kind: "script-error",
+        source: "plain-script-control.vue",
+        message: expect.stringContaining(
+          "Vapor components with a normal <script> must also include <script setup>",
+        ),
+      }),
+    ]);
+  });
+
+  for (const backend of ["vdom", "ssr"]) {
     it(`${backend}: the edited export-default line's composed segments carry the exact re-anchored columns`, () => {
       const artifact = compileVueFixture(PLAIN_SCRIPT_FIXTURE, "plain-script-control.vue", {
         backend,

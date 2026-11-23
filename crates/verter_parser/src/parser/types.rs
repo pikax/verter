@@ -365,6 +365,16 @@ impl ParsedSfc {
         self.has_errors
     }
 
+    /// Whether an error leaves the parsed template untrustworthy to check.
+    /// Unlike [`Self::has_errors`], an error Vue's compiler refuses on a
+    /// well-formed structure (a key repeated within a `v-if` chain) does not
+    /// count: a checker checks the template through it.
+    pub fn has_structural_errors(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(crate::diagnostics::Diagnostic::breaks_template_structure)
+    }
+
     pub fn has_style_scope(&self) -> bool {
         self.has_style_scope
     }

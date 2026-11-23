@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 3,
+  "framework": "vue",
+  "domain": {
+    "upstream": "https://github.com/vuejs/core",
+    "commit": "1595469ef66e4126351609f7df8ef334560aa3fa",
+    "tree": "a417748239111b19c9f78380531fda9ef13f7c6c",
+    "packageVersion": "3.6.0-rc.15"
+  },
+  "packageLockSha256": "418ffca6ed806b30f93c82b8358720a3b13618ab35f5703cac9b310f3a5ea44a",
+  "realizedClosureSha256": "53efe33accfa5889757f32e75632a78cb45ab17d545e59294d7b98303c6021f3",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "272128d5ea31d82994ef9d8d302f1c96f4b02be502e7f7308defa978c4b8ac74",
+    "commit": "bb2a37408f614ac46d44fe8fc3f322e2e41baf72",
+    "tree": "62e1014cbb73a39d167385413bf7e59b62afa75e",
+    "worktreeDirty": false,
+    "implementationSha256": "659b65c5474b664d15192338b68000d6609a70849da0149c9995ce5230367dcc"
+  },
+  "fixture": {
+    "path": "fixtures/vue/basic-interpolation.vue",
+    "sha256": "9af37e23a9e5a23ddcfdfb9ec3c15f2b15cd8f739d2c52a2fd63e6ba275268f1"
+  },
+  "options": {
+    "backend": "ssr",
+    "sourceMap": false,
+    "isProd": true,
+    "transformAssetUrls": {
+      "includeAbsolute": true
+    }
+  },
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "87a64f6276bd167137cab2bb857c5c4bf8a7a7bd9fe7fb4d55a049036938a4f4",
+    "mapPresent": false
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "a7b08b677b2f23e5a84b183e586d60624517c7923847b9e0e5b10899f607ee80",
+    "normalizedDigestSha256": "b5dec73361a288a48aa755c7b19e2aeced8c49b0cc6711087a13c7436de377a0"
+  },
+  "code": "import { ref } from \"vue\";\n\n\nconst _sfc_main = {\n  __name: 'basic-interpolation',\n  setup(__props, { expose: __expose }) {\n  __expose();\n\nconst count = ref(0);\nconst items = [\"a\", \"b\", \"c\"];\n\nconst __returned__ = { count, items, ref }\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true })\nreturn __returned__\n}\n\n}\nimport { mergeProps as _mergeProps } from \"vue\"\nimport { ssrRenderAttrs as _ssrRenderAttrs, ssrInterpolate as _ssrInterpolate, ssrRenderList as _ssrRenderList } from \"vue/server-renderer\"\n\nfunction ssrRender(_ctx, _push, _parent, _attrs, $props, $setup, $data, $options) {\n  _push(`<div${_ssrRenderAttrs(_mergeProps({ class: \"root\" }, _attrs))}>`)\n  if ($setup.count > 0) {\n    _push(`<p>${_ssrInterpolate($setup.count)}</p>`)\n  } else {\n    _push(`<p>zero</p>`)\n  }\n  _push(`<ul><!--[-->`)\n  _ssrRenderList($setup.items, (item) => {\n    _push(`<li>${_ssrInterpolate(item)}</li>`)\n  })\n  _push(`<!--]--></ul></div>`)\n}\n_sfc_main.ssrRender = ssrRender\nexport default _sfc_main",
+  "map": null
+}
