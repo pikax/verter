@@ -26,6 +26,8 @@ use std::time::Duration;
 
 use crate::error::{TsgoApiError, TsgoApiResult};
 
+mod tree_cpu;
+
 /// The bound on the reap wait after a tree kill (SIGKILL / `TerminateJobObject`
 /// is prompt; this only bounds an already-dead system's bookkeeping).
 pub const REAP_BOUND: Duration = Duration::from_secs(2);
@@ -580,6 +582,45 @@ impl TreeKill {
         #[cfg(not(any(unix, windows)))]
         {
             terminate_process(self.pid);
+        }
+    }
+}
+
+impl TreeKill {
+    /// The summed user+system CPU time the armed tree has used so far: the
+    /// root, every process descended from it (including descendants that lead
+    /// a process group of their own), every process still in its group, and
+    /// the time of children those processes already reaped. On Windows this is
+    /// the job object's accounting, which also keeps the time of members that
+    /// already exited.
+    ///
+    /// Unlike wall-clock time this does not advance while the tree waits for a
+    /// core, so a caller bounding a child by it is not failed by a loaded
+    /// machine. Read it while the root is alive; once the root is reaped its
+    /// own counters are gone.
+    ///
+    /// `None` when the tree cannot be measured: a tree armed with pid 0, a
+    /// platform without an implementation, or (Windows, job assignment failed)
+    /// a direct child that is already gone.
+    #[must_use]
+    pub fn cpu_time(&self) -> Option<Duration> {
+        if self.pid == 0 {
+            return None;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            tree_cpu::descendant_cpu_time(self.pid)
+        }
+        #[cfg(windows)]
+        {
+            match &self.job {
+                Some(job) => tree_cpu::job_cpu_time(job.0),
+                None => tree_cpu::process_cpu_time(self.pid),
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            None
         }
     }
 }
