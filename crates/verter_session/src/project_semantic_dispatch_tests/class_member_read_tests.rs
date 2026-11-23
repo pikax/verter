@@ -57,18 +57,19 @@ fn traced(
 /// own member in one delivery; an inherited member followed up a chain to
 /// the class declaring it; a generic base applied to its clause's argument;
 /// a circular chain, which stops at the class already followed; a value-only
-/// base, which names no class; and a class with neither the member nor an
-/// `extends` clause, which answers nothing.
+/// base, whose `extends` arm names the synthesized `V:extends` declaration,
+/// which is no class, so the read answers with the arm; and a class with
+/// neither the member nor an `extends` clause, which answers nothing.
 #[test]
 fn stepped_class_member_reads_preserve_in_place_answers_order_and_observations() {
     for (class, name, path, answers) in [
-        ("Own", "a", &["Own"][..], Some(true)),
-        ("D", "a", &["D", "M", "B"][..], Some(true)),
-        ("D", "other", &["D", "M", "B"][..], Some(true)),
-        ("GD", "v", &["GD", "G"][..], Some(true)),
-        ("C1", "a", &["C1", "C2"][..], Some(true)),
-        ("V", "a", &["V"][..], None),
-        ("Lone", "a", &["Lone"][..], Some(false)),
+        ("Own", "a", &["Own"][..], true),
+        ("D", "a", &["D", "M", "B"][..], true),
+        ("D", "other", &["D", "M", "B"][..], true),
+        ("GD", "v", &["GD", "G"][..], true),
+        ("C1", "a", &["C1", "C2"][..], true),
+        ("V", "a", &["V", "V:extends"][..], true),
+        ("Lone", "a", &["Lone"][..], false),
     ] {
         let host = host();
         upsert_ts(&host, FILE, SOURCE);
@@ -95,13 +96,11 @@ fn stepped_class_member_reads_preserve_in_place_answers_order_and_observations()
             })
             .collect();
         assert_eq!(named, path, "{class}.{name}: the classes the read named");
-        if let Some(answers) = answers {
-            assert_eq!(
-                trace.source.is_some(),
-                answers,
-                "{class}.{name}: where the member reads from"
-            );
-        }
+        assert_eq!(
+            trace.source.is_some(),
+            answers,
+            "{class}.{name}: where the member reads from"
+        );
     }
 }
 
