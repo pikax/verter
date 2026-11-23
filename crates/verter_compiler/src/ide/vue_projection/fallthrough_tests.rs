@@ -319,7 +319,7 @@ fn fallthrough_consumes_model_value_listener_and_modifier_keys() {
     for (tag, expected, in_statement) in [
         (
             "Child",
-            "[\"$props\"], \"title\" | \"onUpdate:title\" | \"titleModifiers\">",
+            "infer P } ? P : {}), \"title\" | \"onUpdate:title\" | \"titleModifiers\">",
             true,
         ),
         (

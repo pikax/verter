@@ -3643,3 +3643,37 @@ import { Anchor as Root } from './Comp.vue';
         "{text}"
     );
 }
+
+#[test]
+fn fallthrough_self_default_import_is_recursive_from_either_script_block() {
+    for source in [
+        r#"<script lang="ts">
+import Self from './Comp.vue';
+</script><script setup lang="ts">
+defineProps<{ depth: number }>();
+</script><template><Self v-if="depth > 0" :depth="depth - 1"/><div v-else/></template>"#,
+        r#"<script setup lang="ts">
+import { default as Self } from './Comp.vue';
+defineProps<{ depth: number }>();
+</script><template><Self v-if="depth > 0" :depth="depth - 1"/><div v-else/></template>"#,
+    ] {
+        let module = composed(source);
+        let text = module.checking_text();
+        assert!(!text.contains("if (__VerterRootProbe)"), "{text}");
+        assert!(!text.contains("__verterRootArm"), "{text}");
+    }
+}
+
+#[test]
+fn fallthrough_component_root_arm_reads_props_only_from_an_instance_that_has_them() {
+    let module = composed(
+        r#"<script setup lang="ts">
+import Child from './Child.vue';
+</script><template><Child/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(
+        text.contains("extends { readonly $props: infer P } ? P : {})"),
+        "{text}"
+    );
+}

@@ -961,12 +961,19 @@ fn compose_template_scope(
             None => {
                 // A statement without a JavaScript form: nothing of the
                 // template is checked, and the module says so.
+                // No root arm is returned either, so the declaration keeps
+                // only extras that do not read the setup scope's return.
                 withhold(ObligationFamily::Scaffold, false, false);
+                let extras = fallthrough.declaration_extras();
                 return Ok(TemplateScope {
                     lowered: LoweredScope::default(),
                     withheld,
                     markup,
-                    declaration_extras: fallthrough.declaration_extras(),
+                    declaration_extras: if extras.reads_setup_return {
+                        PublicDeclarationExtras::default()
+                    } else {
+                        extras
+                    },
                 });
             }
         }

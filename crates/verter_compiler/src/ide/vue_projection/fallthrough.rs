@@ -322,7 +322,12 @@ fn root_type(
                 }
             }
             (
-                format!("typeof {}[\"$props\"]", observation.witness.binding),
+                // An instance without `$props` (a foreign constructor the
+                // use contract admits) publishes no surface: fail closed.
+                format!(
+                    "(typeof {} extends {{ readonly $props: infer P }} ? P : {{}})",
+                    observation.witness.binding
+                ),
                 keys,
             )
         }

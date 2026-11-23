@@ -188,32 +188,19 @@ impl ComponentResolutionProjection {
     }
 }
 
-/// The setup default imports whose relative specifier resolves to the
-/// carrier itself: each names this carrier's own constructor.
+/// The default imports, from either script block, whose relative specifier
+/// resolves to the carrier itself: each names this carrier's own constructor.
 fn self_imported_names<'a>(
     script: &'a ScriptProjectionFacts,
     canonical_id: &str,
 ) -> FxHashSet<&'a str> {
-    let mut names = FxHashSet::default();
-    let Some(setup) = &script.setup else {
-        return names;
-    };
-    for statement in &setup.statements {
-        let SetupStatementKind::Import {
-            default_name: Some(name),
-            ..
-        } = &statement.kind
-        else {
-            continue;
-        };
-        let imports_carrier = script.module.imports.iter().any(|import| {
-            import.span == statement.span && specifier_names(&import.source, canonical_id)
-        });
-        if imports_carrier {
-            names.insert(name.as_str());
-        }
-    }
-    names
+    script
+        .module
+        .imports
+        .iter()
+        .filter(|import| specifier_names(&import.source, canonical_id))
+        .filter_map(|import| import.default_name.as_deref())
+        .collect()
 }
 
 /// Whether a relative module `specifier`, read from `canonical_id`'s
@@ -260,7 +247,7 @@ pub fn project_component_resolution(
     if let Some(setup) = &script.setup {
         for statement in &setup.statements {
             match &statement.kind {
-                SetupStatementKind::Import { names, .. }
+                SetupStatementKind::Import { names }
                 | SetupStatementKind::Declaration { names } => {
                     known.extend(names.iter().map(String::as_str));
                 }
