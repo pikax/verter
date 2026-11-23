@@ -332,6 +332,17 @@ export async function measure({
 
 const round = (ms) => Math.round(ms);
 
+/**
+ * The paths a failure message must not reveal: the corpus root, the variable's
+ * raw value, and the directory each stock checker was found under. A checker
+ * hoisted above the corpus root (`<dir>/node_modules/.bin/vue-tsc`) names a
+ * private directory the corpus root does not cover.
+ */
+export function privatePaths(corpusRoot, variable, bins = []) {
+  const owners = bins.map((bin) => path.dirname(path.dirname(path.dirname(bin))));
+  return [corpusRoot, variable, ...owners];
+}
+
 /** Replace every occurrence of a private path in a message. */
 export function redact(message, paths) {
   return paths
@@ -342,6 +353,7 @@ export function redact(message, paths) {
 
 async function main(env) {
   let corpus = null;
+  const bins = [];
   try {
     corpus = locateCorpus(env);
     const engine = verterEngine(env);
@@ -352,6 +364,7 @@ async function main(env) {
         throw new Refusal(
           `refusing to run: no vue-tsc is installed for the ${member.name} member; prepare the corpus first.`,
         );
+      bins.push(bin);
       stockChecks.set(member.name, [bin]);
     }
     const verterTsc = await buildVerterTsc();
@@ -363,7 +376,7 @@ async function main(env) {
     });
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } catch (error) {
-    const paths = corpus ? [corpus.root, env[CORPUS_VARIABLE]] : [env[CORPUS_VARIABLE]];
+    const paths = privatePaths(corpus?.root, env[CORPUS_VARIABLE], bins);
     process.stderr.write(`measure: ${redact(error.message, paths)}\n`);
     process.exitCode = 2;
   }

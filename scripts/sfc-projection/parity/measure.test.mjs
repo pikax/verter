@@ -18,6 +18,7 @@ import {
   measure,
   memberCommands,
   procPeak,
+  privatePaths,
   redact,
 } from "./measure.mjs";
 
@@ -280,4 +281,14 @@ test("redaction replaces the longest private path first", () => {
     redact("spawn /c/web/node_modules/.bin/vue-tsc ENOENT in /c", ["/c", "/c/web"]),
     "spawn <corpus>/node_modules/.bin/vue-tsc ENOENT in <corpus>",
   );
+});
+
+test("redaction covers a stock checker hoisted above the corpus root", () => {
+  const hoisted = path.join(path.sep, "work", "client", "node_modules", ".bin", "vue-tsc");
+  const corpusRoot = path.join(path.sep, "work", "client", "apps");
+  const message = redact(
+    `spawn ${hoisted} EACCES`,
+    privatePaths(corpusRoot, corpusRoot, [hoisted]),
+  );
+  assert.equal(message.includes("client"), false, message);
 });
