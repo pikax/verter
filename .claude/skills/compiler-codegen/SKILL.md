@@ -1148,6 +1148,16 @@ The expose provider excludes root-arm returns from the same inferred return
 type. For a component root, `$attrs` and `useAttrs()` keep Vue's
 `Record<string, unknown>`: reading the bridge there would make wrappers using
 `v-bind="$attrs"` circular. Native roots retain their existing attrs type.
+The setup scope's return is inferred from the template context, so when the
+bridge is in use (`PublicDeclarationExtras::reads_setup_return`) the context
+reads `__VerterTemplateInstance & __VerterTemplateProps`: the declared props
+and the public instance without the setup scope's exposed return. The
+`Exclude` of root arms and the `__VerterRootProbe`/`__VerterRootArm`
+prelude appear only in such a scope, which ends in `return undefined;` when it
+returns nothing else (`noImplicitReturns`). A standalone declaration has no
+setup scope, so it publishes the declared contract without the bridge. A root
+that is the carrier itself (filename self reference, or its default import
+from its own relative path) returns no arm.
 TypeScript performs the type operations. The product
 uses the constructor owner's `declared_props_type` to subtract declared props,
 models, emits and augmented public props before intersection. The composer carries
