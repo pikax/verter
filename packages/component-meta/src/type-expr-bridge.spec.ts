@@ -926,7 +926,11 @@ describe("typeExprToDescriptor", () => {
     });
   });
 
-  it.each(["none", "add", "remove"] as const)("keeps mapped modifiers symbolic: %s", (modifier) => {
+  it.each([
+    ["none", "{ [K in string]: number }"],
+    ["add", "{ readonly [K in string]?: number }"],
+    ["remove", "{ -readonly [K in string]-?: number }"],
+  ] as const)("keeps mapped modifiers symbolic: %s", (modifier, rawType) => {
     expect(
       typeExprToDescriptor({
         kind: "mapped",
@@ -935,8 +939,8 @@ describe("typeExprToDescriptor", () => {
         value: { kind: "primitive", name: "number" },
         optional: modifier,
         readonly: modifier,
-      }).kind,
-    ).toBe("unknown");
+      }),
+    ).toEqual({ kind: "unknown", rawType });
   });
 
   // =============================================================================
