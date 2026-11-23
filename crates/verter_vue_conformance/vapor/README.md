@@ -60,8 +60,10 @@ native output's. Each then compares the one construct it isolates:
   and slot functions with their parameter counts, the kinds and order of the
   dynamic slot list, and looped slots through `createForSlots`.
 - `slot-roots`: slot templates beside default content, slot functions whose
-  roots may render nothing (`{ _: 1 }` NON_STABLE flags), refs inside looped
-  slot templates, and dynamic slot order.
+  roots may render nothing (`{ _: 1 }` NON_STABLE flags) with the slot-root
+  flags of their roots (the flags argument of each `createIf`, `createFor`,
+  `createKeyedFragment`, `createDynamicComponent` and `createSlot`), refs
+  inside looped slot templates, and dynamic slot order.
 - `empty-element-siblings`, `trailing-text-run`, `text-runs-beside-elements`,
   `insertion-anchor-whitespace` and `forced-multi-root` use the template
   comparison: an empty or self-closing non-void element keeps its end tag
@@ -72,7 +74,8 @@ native output's. Each then compares the one construct it isolates:
   MULTI_ROOT flags.
 - `multi-root-slot-body`: a default or named slot body with several roots
   gives each root its own template and returns them all.
-- `svg-attributes`: the arguments of every attribute, class and style setter,
+- `svg-attributes`: every attribute, class and style setter with the
+  structural path of the element it receives and its other arguments,
   including the trailing SVG flag on SVG attributes and classes.
 - `svg-dynamic-props`: on SVG elements, an object spread and a dynamic
   argument pass the SVG flag to `setDynamicProps`, while `innerHTML`,

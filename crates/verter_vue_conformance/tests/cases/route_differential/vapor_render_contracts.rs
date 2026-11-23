@@ -44,6 +44,8 @@ struct ModuleFacts {
     events: Vec<(String, String)>,
     /// Each component creation's prop keys and slot signatures.
     components: Vec<ComponentFacts>,
+    /// Runtime calls with the DOM node each argument reads.
+    operations: Vec<Operation>,
 }
 
 /// The props and slots one component creation passes.
@@ -216,6 +218,7 @@ fn facts(code: &str) -> Result<ModuleFacts, String> {
             _ => {}
         }
     }
+    facts.operations = operations(code)?;
     Ok(facts)
 }
 
@@ -314,12 +317,38 @@ fn component_facts(call: &oxc_ast::ast::CallExpression<'_>) -> ComponentFacts {
     ComponentFacts { props, slots }
 }
 
+/// One runtime call: its helper and each argument's source text with the
+/// structural path of the DOM node the argument reads, when it reads one.
+#[derive(Debug, Clone)]
+struct Operation {
+    helper: String,
+    arguments: Vec<(String, Option<String>)>,
+}
+
 /// Every runtime operation with the DOM nodes it receives, as structural
 /// paths under the pinned runtime-vapor 3.6.0-rc.15 `dom/node.ts`:
 /// `child(n)` and `txt(n)` are `n.firstChild`, `next(n)` is `n.nextSibling`
 /// (its second argument is only a hydration text flag), `nthChild(n, i)` is
 /// `n.childNodes[i]`, and a template factory call is its payload's first root.
 fn node_operations(code: &str) -> Result<Vec<(String, Vec<String>)>, String> {
+    let mut operations: Vec<_> = operations(code)?
+        .into_iter()
+        .filter_map(|operation| {
+            let nodes: Vec<String> = operation
+                .arguments
+                .into_iter()
+                .filter_map(|(_, node)| node)
+                .collect();
+            (!nodes.is_empty()).then_some((operation.helper, nodes))
+        })
+        .collect();
+    operations.sort();
+    Ok(operations)
+}
+
+/// Every runtime call outside navigation, in source order, with the node
+/// path each argument reads (see [`node_operations`]).
+fn operations(code: &str) -> Result<Vec<Operation>, String> {
     let allocator = Allocator::new();
     let parse = Parser::new(&allocator, code, SourceType::mjs()).parse();
     if parse.fatal_error || !parse.diagnostics.is_empty() {
@@ -384,22 +413,29 @@ fn node_operations(code: &str) -> Result<Vec<(String, Vec<String>)>, String> {
                 if NAVIGATION_HELPERS.contains(&helper) {
                     continue;
                 }
-                let nodes: Vec<String> = call
+                let arguments = call
                     .arguments
                     .iter()
-                    .filter_map(|argument| match argument.as_expression()? {
-                        Expression::Identifier(identifier) => paths.read(identifier),
-                        _ => None,
+                    .map(|argument| {
+                        let span = argument.span();
+                        let node = match argument.as_expression() {
+                            Some(Expression::Identifier(identifier)) => paths.read(identifier),
+                            _ => None,
+                        };
+                        (
+                            code[span.start as usize..span.end as usize].to_string(),
+                            node,
+                        )
                     })
                     .collect();
-                if !nodes.is_empty() {
-                    operations.push((helper.to_string(), nodes));
-                }
+                operations.push(Operation {
+                    helper: helper.to_string(),
+                    arguments,
+                });
             }
             _ => {}
         }
     }
-    operations.sort();
     Ok(operations)
 }
 
@@ -607,13 +643,14 @@ enum Contract {
     ComponentSlots,
     /// Template refs go through the setter Vue calls, with its arguments.
     TemplateRefs,
-    /// Slot functions whose roots may render nothing are marked NON_STABLE,
-    /// slot templates beside default content leave it its own roots, and the
-    /// slots, dynamic slot order and refs are Vue's.
+    /// Slot functions whose roots may render nothing are marked NON_STABLE and
+    /// their roots carry the slot-root flags, slot templates beside default
+    /// content leave it its own roots, and the slots, dynamic slot order and
+    /// refs are Vue's.
     SlotRoots,
     /// Dynamic attribute, property, class, style, content and spread setters
-    /// are the ones Vue calls, with its arguments, including the trailing
-    /// SVG flag.
+    /// are the ones Vue calls, on the element Vue passes, with its arguments,
+    /// including the trailing SVG flag.
     Setters,
     /// Each static template is parsed in the namespace Vue declares for it,
     /// and its elements' setters are the ones Vue calls for that namespace.
@@ -668,8 +705,10 @@ fn component_slots_difference(ours: &ModuleFacts, vue: &ModuleFacts) -> Option<S
     }
 }
 
-/// Setter calls with every argument after the node, in a stable order.
-fn setters(facts: &ModuleFacts) -> Vec<(String, Vec<String>)> {
+/// Setter calls as `(helper, node, every argument after the node)` records,
+/// in a stable order. The node is the structural path of the element the
+/// setter receives, so a setter moved to another element differs.
+fn setters(facts: &ModuleFacts) -> Vec<(String, String, Vec<String>)> {
     const SETTERS: [&str; 9] = [
         "setAttr",
         "setProp",
@@ -682,20 +721,52 @@ fn setters(facts: &ModuleFacts) -> Vec<(String, Vec<String>)> {
         "setDynamicProps",
     ];
     let mut calls: Vec<_> = facts
-        .calls
+        .operations
         .iter()
-        .filter(|(helper, _)| SETTERS.contains(&helper.as_str()))
-        .map(|(helper, arguments)| {
-            let rest: Vec<_> = arguments
+        .filter(|operation| SETTERS.contains(&operation.helper.as_str()))
+        .map(|operation| {
+            let node = match operation.arguments.first() {
+                Some((_, Some(path))) => path.clone(),
+                Some((text, None)) => format!("unresolved {text}"),
+                None => String::new(),
+            };
+            let rest: Vec<_> = operation
+                .arguments
                 .iter()
                 .skip(1)
-                .map(|argument| argument.text.clone())
+                .map(|(text, _)| text.clone())
                 .collect();
-            (helper.clone(), rest)
+            (operation.helper.clone(), node, rest)
         })
         .collect();
     calls.sort();
     calls
+}
+
+/// The flags argument of each construct Vue 3.6.0-rc.15's
+/// `markSlotRootOperations` marks as a slot root, by helper, in source order:
+/// a conditional's SLOT_ROOT, a loop's SLOT_ROOT, a keyed fragment's
+/// `slotRoot`, a dynamic component's SLOT_ROOT and an outlet's FORWARDED.
+fn slot_root_flags(facts: &ModuleFacts) -> Vec<(&'static str, Vec<Option<String>>)> {
+    const FLAGS: [(&str, usize); 5] = [
+        ("createIf", 3),
+        ("createFor", 3),
+        ("createKeyedFragment", 2),
+        ("createDynamicComponent", 3),
+        ("createSlot", 3),
+    ];
+    FLAGS
+        .iter()
+        .map(|&(helper, index)| {
+            let flags = facts
+                .calls
+                .iter()
+                .filter(|(name, _)| name == helper)
+                .map(|(_, arguments)| arguments.get(index).map(|flags| flags.text.clone()))
+                .collect();
+            (helper, flags)
+        })
+        .collect()
 }
 
 /// Each static template's node forest with its namespace argument, sorted.
@@ -817,11 +888,28 @@ fn contract_difference(
                 flags
             };
             assert_eq!(flags(vue).len(), 3, "oracle NON_STABLE inventory");
+            let marked = slot_root_flags(vue);
+            let slot_root = Some("129".to_string());
+            assert_eq!(
+                marked[0],
+                ("createIf", vec![slot_root.clone(), slot_root]),
+                "oracle SLOT_ROOT inventory"
+            );
+            assert_eq!(
+                marked[4],
+                ("createSlot", vec![Some("4".to_string())]),
+                "oracle FORWARDED inventory"
+            );
             if flags(ours) != flags(vue) {
                 Some(format!(
                     "slot flags {:?} against {:?}",
                     flags(ours),
                     flags(vue)
+                ))
+            } else if slot_root_flags(ours) != marked {
+                Some(format!(
+                    "slot root flags {:?} against {marked:?}",
+                    slot_root_flags(ours)
                 ))
             } else if template_refs(ours) != template_refs(vue) {
                 Some(format!(
@@ -936,4 +1024,33 @@ fn template_shapes_ignore_attributes_and_omitted_end_tags() {
         template_shape("<section><!><div>")
     );
     assert_eq!(template_shape("<p><input>x</p>"), "p(input(),T)");
+}
+
+#[test]
+fn setters_compare_the_element_each_one_receives() {
+    let module = |width: &str, cx: &str| {
+        format!(
+            "import {{ child as _child, setAttr as _setAttr, template as _template }} from 'vue';\n\
+             const t0 = _template(\"<svg><circle>\", 1, 1)\n\
+             export function render(_ctx) {{\n  \
+             const n1 = t0()\n  \
+             const n0 = _child(n1)\n  \
+             _setAttr({width}, \"width\", _ctx.width, true)\n  \
+             _setAttr({cx}, \"cx\", _ctx.x, true)\n  \
+             return n1\n}}\n"
+        )
+    };
+    let native = facts(&module("n1", "n0")).unwrap();
+    assert_eq!(
+        setters(&facts(&module("n1", "n0")).unwrap()),
+        setters(&native)
+    );
+    // The same calls on swapped elements reach the same multiset of nodes,
+    // so only the setter records tell them apart.
+    let swapped = module("n0", "n1");
+    assert_eq!(
+        node_operations(&swapped).unwrap(),
+        node_operations(&module("n1", "n0")).unwrap()
+    );
+    assert_ne!(setters(&facts(&swapped).unwrap()), setters(&native));
 }
