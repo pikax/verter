@@ -243,6 +243,14 @@ impl HeldValidity {
         }
         self.abort
     }
+
+    /// Detach the rail at its read's completion and hand its abort to the
+    /// rail's owner instead of the scope below: the owner carries it on as a
+    /// value to whoever the read was made for.
+    pub(crate) fn end(mut self) -> Option<crate::semantic_query::ExecutionAbort> {
+        self.detach();
+        self.abort
+    }
 }
 
 thread_local! {

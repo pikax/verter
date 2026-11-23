@@ -75,7 +75,7 @@ pub(super) fn lowering_in_place(
         LowerStart::Wait(mut lowering, wait) => settle_now(
             ReadStep::Wait(wait),
             |wait| dispatch.read_in_place(wait, canonical),
-            |delivery| dispatch.deliver_lowering(&mut lowering, delivery),
+            |delivery| dispatch.deliver_lowering(&mut lowering, delivery, canonical),
         ),
     }
 }
@@ -197,6 +197,71 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             node,
             completeness.is_partial().then(|| completeness.reasons()),
         )
+    }
+
+    /// Lower `expr` in the ordinary owner scope of `canonical` under
+    /// `context`, inside an enclosing observation of the test's own, driven
+    /// by `driver`: natively, or through the flow read driver as a body
+    /// that suspends at each read the lowering waits on, its root read
+    /// answering the request, or as one that answers each at once. The
+    /// flow drivers keep the connected demand open for the lowering's
+    /// extent, as a suspending holder does.
+    pub fn observed_owner_lowering_for_tests(
+        &self,
+        canonical: &str,
+        expr: &verter_type_expr::TypeExpr,
+        context: crate::semantic_query::ProjectionReductionContext,
+        driver: super::super::lower::OwnerLoweringDriverForTests,
+    ) -> super::super::lower::ObservedOwnerLoweringForTests {
+        use super::super::lower::OwnerLoweringDriverForTests as Driver;
+        let ((node, completeness), decision_reads) =
+            super::super::lower::record_decision_reads_for_tests(|| {
+                let enclosing = ProjectSemanticDispatch::observe_read(self, || {
+                    if driver == Driver::Native {
+                        return self
+                            .lower_type_expr_in_scope_with_context(canonical, expr, context)
+                            .expect("an owner-scope lowering yields a node");
+                    }
+                    let _demand = self.enter_connected_demand(false).0;
+                    let start = FlowReadDriver::request_owner_lowering(
+                        self,
+                        (
+                            canonical,
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        ),
+                        expr,
+                        context,
+                    );
+                    if driver == Driver::FlowInPlace {
+                        return lowering_in_place(self, canonical, start);
+                    }
+                    match start {
+                        LowerStart::Done(node) => node,
+                        LowerStart::Wait(mut lowering, wait) => settle_now(
+                            ReadStep::Wait(wait),
+                            |wait| FlowReadDriver::answer_read(self, wait, canonical),
+                            |delivery| {
+                                FlowReadDriver::deliver_lowering(
+                                    self,
+                                    &mut lowering,
+                                    delivery,
+                                    canonical,
+                                )
+                            },
+                        ),
+                    }
+                });
+                let completeness = enclosing.result_completeness();
+                let node = enclosing
+                    .discard()
+                    .expect("the enclosing observation observes no abort");
+                (node, completeness)
+            });
+        super::super::lower::ObservedOwnerLoweringForTests {
+            node,
+            partial: completeness.is_partial().then(|| completeness.reasons()),
+            decision_reads,
+        }
     }
 }
 
@@ -736,7 +801,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                     let delivery = delivered
                         .take()
                         .expect("the lowering receives its requested read");
-                    return match self.dispatch.deliver_lowering(&mut lowering, delivery) {
+                    return match self.dispatch.deliver_lowering(
+                        &mut lowering,
+                        delivery,
+                        self.st.canonical,
+                    ) {
                         ReadStep::Wait(wait) => {
                             run.frames.push(HelperFrame::Lower(lowering));
                             ReadStep::Wait(wait)

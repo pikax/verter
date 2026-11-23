@@ -1395,6 +1395,11 @@ read being the set's need. A walk standing at that read keeps its cost
 recordings open on the connected demand, so its holder keeps the demand
 open until the walk answers (`InstantiationDemand`): a suspending holder
 for its whole extent, an in-place lowering driver around each substitution.
+A conditional the type lowering holds keeps its structural-fact and
+deferred-evaluation cost scopes open across its reads the same way: the
+in-place lowering driver holds the demand from the outermost held decision's
+start to its answer (`LowerDemand` in `lower.rs`), the span the native
+decision driver holds.
 Whether a candidate takes the arguments at all
 is read from its clause alone (`explicit_clause_fit`), the drop the
 machine itself starts with, so a call walk pairs its raw candidates with
