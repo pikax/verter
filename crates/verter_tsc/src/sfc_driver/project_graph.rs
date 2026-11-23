@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use verter_session::semantic_capability::ServingLease;
 use verter_session_query::resolution::path_utils::path_is_carrier;
-use verter_session_query::resolution::ProjectId;
+use verter_session_query::resolution::{ProjectId, ProjectOwnership};
 use verter_span::path::{canonicalize_path, CanonicalPath};
 use verter_workspace::config::{
     load_project_reference_targets, parse_tsconfig_json_with_dependencies,
@@ -95,6 +95,27 @@ impl GraphLoad {
             .find_map(|project| match &project.payload {
                 ProjectPayload::Configured { tsconfig_path, .. } if tsconfig_path == &config => {
                     Some(project.id)
+                }
+                _ => None,
+            })
+    }
+
+    /// The project of `config` as the workspace resolver's owner, so a
+    /// specifier resolves under that project's configuration, whatever else
+    /// owns the importing file.
+    pub(crate) fn ownership(&self, config: &Path) -> Option<ProjectOwnership> {
+        self.published
+            .snapshot
+            .projects
+            .iter()
+            .find_map(|candidate| match &candidate.payload {
+                ProjectPayload::Configured { tsconfig_path, .. }
+                    if Path::new(tsconfig_path.as_str()) == config =>
+                {
+                    Some(ProjectOwnership {
+                        project_root: canonicalize_path(candidate.root.as_str()),
+                        tsconfig_path: Some(tsconfig_path.as_str().to_string()),
+                    })
                 }
                 _ => None,
             })

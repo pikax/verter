@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use verter_session::sfc_projection_mapper::ContentMapperProjectionAdapter;
 use verter_session::sfc_projection_observations::ProjectionPublicationAdmission;
 use verter_session_query::resolution::path_utils::path_is_carrier;
 use verter_span::path::canonicalize_path;
@@ -56,13 +57,31 @@ impl WatchedProject {
     /// new session. A path the program stopped importing stays until then:
     /// the engine still holds its old text, and serves it if the import
     /// returns, so it must still be told when the path changes.
-    fn program_reads(&self) -> Vec<PathBuf> {
-        self.live
+    ///
+    /// The carriers the program reached by import are read too: the engine
+    /// reads their projections, so each carrier itself is what changes. So
+    /// is the carrier of every checking module the engine looked for, found
+    /// or not: a carrier created after its import is what the import then
+    /// resolves to.
+    fn program_reads(&self, mapper: &ContentMapperProjectionAdapter) -> Vec<PathBuf> {
+        let host = self
+            .live
             .as_ref()
             .map(LiveProgram::host_reads)
-            .unwrap_or_default()
-            .into_iter()
+            .unwrap_or_default();
+        let probed = host
+            .iter()
+            .filter_map(|read| mapper.carrier_of_checking_module(read))
+            .collect::<Vec<_>>();
+        host.into_iter()
+            .chain(probed)
             .map(PathBuf::from)
+            .chain(
+                self.check
+                    .imported_carriers
+                    .iter()
+                    .map(|carrier| PathBuf::from(&*carrier.carrier)),
+            )
             .collect()
     }
 }
@@ -184,7 +203,7 @@ impl WatchSession {
             let reads = self
                 .projects
                 .iter()
-                .flat_map(WatchedProject::program_reads)
+                .flat_map(|watched| watched.program_reads(&self.driver.mapper))
                 .filter_map(|read| read.to_str().map(str::to_owned))
                 .collect::<BTreeSet<_>>();
             paths.extend(reads);
@@ -294,7 +313,7 @@ impl WatchSession {
     fn record_program_reads(&mut self) {
         for (project, watched) in self.load.graph.projects.iter().zip(&self.projects) {
             self.binding
-                .record_program_reads(&project.config, &watched.program_reads());
+                .record_program_reads(&project.config, &watched.program_reads(&self.driver.mapper));
         }
     }
 
@@ -334,6 +353,7 @@ impl WatchSession {
                 check: ProjectCheck {
                     config: Arc::from(canonicalize_path(&project.config.to_string_lossy())),
                     carriers: Vec::new(),
+                    imported_carriers: Vec::new(),
                     unowned_carriers: Vec::new(),
                     foreign_surfaces: Vec::new(),
                     diagnostics: Vec::new(),

@@ -88,6 +88,7 @@ fn project_config_and_overlay_keep_the_authored_config_and_descriptor_paths() {
     let inputs = ProjectProgramInputs {
         project: &project,
         carriers: &carriers,
+        imported: &[],
         surfaces: &[],
         no_emit: true,
     };
@@ -106,6 +107,26 @@ fn project_config_and_overlay_keep_the_authored_config_and_descriptor_paths() {
     assert_eq!(overlay.len(), 1);
     assert_eq!(overlay[0].path, carriers[0].result.virtual_file.as_ref());
     assert_eq!(overlay[0].content, carriers[0].result.text.as_ref());
+    // A carrier reached by import is served beside the members, never rooted.
+    f.write(
+        "lib/Card.vue",
+        r#"<script setup lang="ts">const label = "card";</script><template>{{ label }}</template>"#,
+    );
+    let imported = [project_carrier(
+        &adapter,
+        &handle,
+        &f.path("lib/Card.vue"),
+        &ws,
+    )];
+    let reaching = ProjectProgramInputs {
+        imported: &imported,
+        ..inputs
+    };
+    assert_eq!(project_config_bytes(&reaching, &ws).1, bytes);
+    let overlay = project_overlay(&reaching);
+    assert_eq!(overlay.len(), 2);
+    assert_eq!(overlay[1].path, imported[0].result.virtual_file.as_ref());
+    assert_eq!(overlay[1].content, imported[0].result.text.as_ref());
     let missing = project_carrier(&adapter, &handle, &f.path("Missing.vue"), &ws);
     assert!(missing.unreadable);
     assert_eq!(missing.result.text.as_ref(), "export {};");
@@ -291,7 +312,14 @@ fn missing_reference_suppression_uses_the_attribution_key() {
     };
     let mut another = raw.clone();
     another.message = "File '/project/another.json' not found.".into();
-    let engine = attribute_diagnostics(&[raw, another], &ProjectTransforms(&[], None));
+    let engine = attribute_diagnostics(
+        &[raw, another],
+        &ProjectTransforms {
+            carriers: &[],
+            imported: &[],
+            workspace: None,
+        },
+    );
     assert_eq!(engine[0].dedup, graph[0].dedup);
     assert_ne!(engine[1].dedup, graph[0].dedup);
 }
@@ -497,6 +525,7 @@ fn served(project: &DriverProject, check: &ProjectCheck) -> Vec<OverlayFile> {
     project_overlay(&ProjectProgramInputs {
         project,
         carriers: &check.carriers,
+        imported: &check.imported_carriers,
         surfaces: &check.foreign_surfaces,
         no_emit: true,
     })

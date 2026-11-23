@@ -694,6 +694,7 @@ mod tests {
             projects: vec![sfc_driver::ProjectCheck {
                 config: std::sync::Arc::from("tsconfig.json"),
                 carriers: vec![],
+                imported_carriers: vec![],
                 unowned_carriers: vec![],
                 foreign_surfaces: vec![],
                 diagnostics: vec![diagnostic(2, 1, "line start"), diagnostic(2, 8, "brace")],
