@@ -15,8 +15,7 @@ use verter_session::sfc_projection_diagnostics::{
     TransformLookup,
 };
 use verter_session::sfc_projection_mapper::{
-    ContentMapperProjectionAdapter, MapperProjectHandle, MapperProjectSettings,
-    MapperTransformResult,
+    MapperProjectHandle, MapperProjectSettings, MapperTransformResult,
 };
 use verter_session::sfc_projection_observations::{
     projection_input_basis, CertifiedProjectionBinding, SnapshotQualifiedObservation,
@@ -278,17 +277,6 @@ impl LiveProgram {
             .unwrap_or_default()
     }
 
-    /// Whether the open session looked on disk for a carrier's checking
-    /// module. The engine keeps every read for its session, so such a read
-    /// may belong to an import the program no longer has: which carriers
-    /// the program still reaches is known only to a session that never made
-    /// one.
-    fn probed_a_checking_module(&self, mapper: &ContentMapperProjectionAdapter) -> bool {
-        self.host_reads()
-            .iter()
-            .any(|read| mapper.carrier_of_checking_module(read).is_some())
-    }
-
     /// Close the engine session and the mapper project.
     pub(crate) fn close(mut self, driver: &SfcTypeScriptDriverAdapter) {
         if let Some(session) = self.session.take() {
@@ -339,7 +327,7 @@ pub(crate) fn check_project(
 /// listed carriers are projected again, and the program is advanced in its
 /// running engine when its input basis held. It is opened anew when the basis
 /// or the mapper settings moved, when the previous session failed, or when
-/// that session looked for a carrier's checking module, so the carriers a
+/// that session served a carrier outside the membership, so the carriers a
 /// program reaches by import are always those a fresh program reaches. The
 /// surfaces of foreign carriers that did not change are kept as well.
 #[allow(clippy::too_many_arguments)]
@@ -593,16 +581,22 @@ impl ProgramInputs<'_> {
             compute_virtual_config_identity(driver.workspace.as_ref(), config, &paths).to_hash16(),
             &settings.identity,
         );
-        // A program that looked for a carrier's checking module is opened
-        // anew rather than advanced: its session cannot tell an import it
-        // still has from one since removed, and the carriers it serves, with
-        // their diagnostics, must be exactly those a fresh program reaches.
+        // A program that served a carrier outside its membership is opened
+        // anew rather than advanced: the engine keeps every lookup for its
+        // session, so it cannot tell an import the program still has from
+        // one since removed, and the carriers it serves, with their
+        // diagnostics, must be exactly those a fresh program reaches. A
+        // member's checking module looked for at another dialect's path, or
+        // a carrier not found at all, leaves nothing to drop: such a program
+        // advances, and a carrier created since is reached below.
         let advance = live.session.is_some()
             && live
                 .certified
                 .as_ref()
                 .is_some_and(|certified| certified.input_basis() == &basis)
-            && !live.probed_a_checking_module(&driver.mapper);
+            && changes
+                .as_ref()
+                .is_some_and(|changes| changes.previous.imported_carriers.is_empty());
         let changes = changes.filter(|_| advance);
         let inputs = ProjectProgramInputs {
             project,

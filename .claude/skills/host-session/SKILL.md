@@ -1058,14 +1058,18 @@ carriers are not roots, not part of the virtual-config identity or the projectio
 input basis, never published as declarations and not counted in `carriers_checked`;
 their mapper diagnostics, revisions and engine diagnostics are reported like a
 member's (`ProjectCheck::checked_carriers`), as tsc reports a non-root source. The
-engine's read set lasts for its session, so a session that recorded any checking-module
-read cannot tell an import it still has from one since removed: such a program is
-opened anew on its next check instead of advanced (`LiveProgram::probed_a_checking_module`),
-and the carriers it serves, with their mapper and engine diagnostics, are exactly those
-a fresh run reaches. A program that never looked for a checking module still advances
-in place, and every checking-module read after its update belongs to its current
-state. A watch session counts the imported carriers among the project's program reads,
-so an edit to one rechecks the importing project.
+engine's read set lasts for its session, so a session whose previous check served an
+imported carrier cannot tell an import it still has from one since removed: such a
+program is opened anew on its next check instead of advanced (the `advance` gate in
+`ProgramInputs::check`), and the carriers it serves, with their mapper and engine
+diagnostics, are exactly those a fresh run reaches. A program that served no imported
+carrier still advances in place, even when the engine looked for a member's checking
+module at another dialect's path (a `lang="tsx"` or plain JS member is probed at
+`C.vue.ts` first) or for a carrier that does not exist; a carrier created since is
+reached by the discovery loop after the update. A watch session counts the imported
+carriers, and the carrier of every checking module the engine looked for, among the
+project's program reads, so an edit to an imported carrier, or the creation of one an
+import names, rechecks the importing project.
 
 The engine's own `-b` build serves no carrier, so this discovery never reaches an
 emitting, carrier-less project that `EngineBuild::partition` hands to it, and the
