@@ -399,24 +399,34 @@ the walk's one read it does not name. The read is `Send`, never `Clone` or
 `Copy`. The conditional decision holds it as its `KeySet` operation.
 
 **Class member sources.** `build.rs` owns `ClassMemberRead`, the owned form
-of `class_member_source`. It holds the demanded name, every class the read
-has followed up the inheritance path, and the `extends` arm of the class last
-followed. `begin_class_member_read` names the reading class as an owned
-`ClassMemberKey` (file, owner, class, the clause's type arguments, the name)
-without reading, lowering or observing any of it. The holder delivers a key
-with `deliver_class_member_read`, which makes that class's reads where the
-delivery is made: the class's own members of the name (the exact member read
-first, then the selected member positions), else its `extends` arm and the
-class declaration that arm names. `resume_class_member_read` consumes one
-`ClassMemberDelivery` and returns `ClassMemberReadStep::Done` or the next
-class's key; a base already followed (a circular chain), an arm naming no
-class, or a class the selective route cannot serve answers with the arm last
-handed on. `abandon_class_member_read` releases a read: between classes it
-holds only names and node ids. `class_member_source` keeps its signature and
-is the in-place loop over the same steps, with the read on the stack; it
-allocates no box. The read is `Send`, never `Clone` or `Copy`, so the flow
-body can hold it as a request; until it does, the flow driver's
-`class_member_source` still drives it in place.
+of `class_member_source`. It holds the demanded name, every class the walk
+has followed up the inheritance path, the `extends` arm of the class last
+followed, and the class it stands at (`ClassMemberFrame`: the members of the
+name selected from the retained declaration, the bindings, scope and
+substitutions its lowerings share, the own members lowered so far). Each
+authored shape the walk lowers, a declaring member's value or the class's
+`extends` arm, is the `LowerLocator` query of that shape
+(`locator_shape_key`), named as `lower::LowerRead` with
+`LowerReadShape::Whole`: the un-narrowed read, which the walk narrows with
+`finish_locator_shape_read` (`narrow_value_cache_read`). These are the reads
+the flow body census counts under `class_member_source`.
+`begin_class_member_read` opens the reading class and stops at the first
+such read without making it; opening a class reads only its retained
+declaration (the exact member read, the selected member positions, the
+`extends` slot). `resume_class_member_read` takes one `LowerDelivery::Whole`,
+lowers the shape where the class stands, and returns
+`ClassMemberReadStep::Done` or the next read. A class declaring the member
+answers; otherwise the walk follows the base its arm names, and a base already
+followed (a circular chain), an arm naming no class, or a class the selective
+route cannot serve answers with the arm last handed on.
+`abandon_class_member_read` releases a walk: between reads it holds no
+recording, cost scope or observation. `class_member_source` keeps its
+signature and is the in-place loop over the same steps, answering each read
+with `answer_class_member_read` as the located body lowering made it in place.
+The read is `Send`, never `Clone` or `Copy`, and its reads map onto a flow
+request through `lowering_wait`, so the flow body can hold it as a request;
+until it does, the flow driver's `class_member_source` still drives it in
+place.
 
 ### Indexed argument reads in flow bodies
 
