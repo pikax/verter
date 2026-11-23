@@ -187,6 +187,30 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
       expect(nested.type).toContain("Handler[]");
     });
 
+    it("keeps references inside a joined function-array arm symbolic", () => {
+      const registry = new Map<string, TypeDescriptor>([
+        [
+          "Handler",
+          func([{ name: "e", type: ref("Payload"), optional: false }], primitive("void")),
+        ],
+        ["Payload", object([{ name: "id", type: primitive("string"), optional: false }])],
+      ]);
+
+      const result = mapPropMeta(
+        makeProp({
+          name: "onPick",
+          type: union([ref("Handler"), array(ref("Handler"))]),
+          required: true,
+        }),
+        undefined,
+        registry,
+      );
+
+      // `Handler` is the one join; `Payload` only appears inside its row.
+      expect(result.type).toBe("((e: Payload) => void) | ((e: Payload) => void)[]");
+      expect(JSON.stringify(result.schema)).not.toContain("id: string");
+    });
+
     // @ai-generated - Requires Numberish classification to consume the complete descriptor.
     it("declines Numberish projection when an unrelated union arm is present", () => {
       const result = mapPropMeta(

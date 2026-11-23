@@ -218,12 +218,7 @@ export function mapPropMeta(
   if (isAnyPrimitive(prop.type)) return buildCompatPropertyMeta(prop, "any", "any");
   const functionArray = classifyFunctionArrayDescriptor(prop.type, typeRegistry);
   if (functionArray)
-    return renderCompatFunctionArrayUnionPropMeta(
-      prop,
-      functionArray.functionArm,
-      functionArray.arrayElement,
-      typeRegistry,
-    );
+    return renderCompatFunctionArrayUnionPropMeta(prop, functionArray, typeRegistry);
   const brandArms = classifyStringBrandArms(prop.type);
   if (brandArms) return renderCompatStringBrandUnionPropMeta(prop, brandArms);
   const type = preferredCompatPropTypeText(prop, typeRegistry);
@@ -438,14 +433,18 @@ function buildCompatPropertyMeta(
   };
 }
 
+/**
+ * Renders a classified `F | F[]` prop. Each arm renders at the registry depth
+ * it was read at: an arm that came from a producer row is already one join
+ * deep, so the references inside it stay symbolic.
+ */
 function renderCompatFunctionArrayUnionPropMeta(
   prop: KnownRequiredProp,
-  functionArm: FunctionDescriptor,
-  arrayElement: FunctionDescriptor,
+  { functionArm, functionDepth, arrayElement, arrayElementDepth }: FunctionArrayArms,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
-  const functionPart = `(${typeDescriptorToCompatDisplay(functionArm, typeRegistry)})`;
-  const arrayPart = `(${typeDescriptorToCompatDisplay(arrayElement, typeRegistry)})[]`;
+  const functionPart = `(${typeDescriptorToCompatDisplay(functionArm, typeRegistry, new Set(), functionDepth)})`;
+  const arrayPart = `(${typeDescriptorToCompatDisplay(arrayElement, typeRegistry, new Set(), arrayElementDepth)})[]`;
   const type = prop.required
     ? `${functionPart} | ${arrayPart}`
     : `${functionPart} | ${arrayPart} | undefined`;
@@ -453,14 +452,14 @@ function renderCompatFunctionArrayUnionPropMeta(
     functionArm,
     typeRegistry,
     new Set(),
-    0,
+    functionDepth,
     "call",
   );
   const arrayEventType = compatFunctionTypeToString(
     arrayElement,
     typeRegistry,
     new Set(),
-    0,
+    arrayElementDepth,
     "call",
   );
   return buildCompatPropertyMeta(prop, type, {
@@ -1702,6 +1701,15 @@ export function projectNativeComponentMeta(
   );
 }
 
+interface FunctionArrayArms {
+  functionArm: FunctionDescriptor;
+  /** The registry depth the function arm was read at (1 when joined). */
+  functionDepth: number;
+  arrayElement: FunctionDescriptor;
+  /** The registry depth the array element was read at (1 when joined or inside a joined arm). */
+  arrayElementDepth: number;
+}
+
 /**
  * Classifies a `F | F[]` prop whose function arms are structurally equal. A
  * symbolic arm (`Fn | Array<Fn>`) is read through its producer registry row,
@@ -1713,20 +1721,26 @@ export function projectNativeComponentMeta(
 function classifyFunctionArrayDescriptor(
   type: TypeDescriptor,
   typeRegistry?: Map<string, TypeDescriptor>,
-): { functionArm: FunctionDescriptor; arrayElement: FunctionDescriptor } | undefined {
+): FunctionArrayArms | undefined {
   const stripped = stripUndefinedArm(type);
   if (stripped.kind !== "union" || stripped.types.length !== 2) return undefined;
   const arms = stripped.types.map((arm) => {
     const row = joinRegistryRef(arm, typeRegistry, new Set(), 0);
     return { descriptor: row ?? arm, depth: row ? 1 : 0 };
   });
-  const fn = arms.find((arm) => arm.descriptor.kind === "function")?.descriptor;
+  const fnArm = arms.find((arm) => arm.descriptor.kind === "function");
+  const fn = fnArm?.descriptor;
   const arrArm = arms.find((arm) => arm.descriptor.kind === "array");
   const arr = arrArm?.descriptor;
   if (fn?.kind !== "function" || arr?.kind !== "array") return undefined;
-  const element =
-    joinRegistryRef(arr.element, typeRegistry, new Set(), arrArm!.depth) ?? arr.element;
+  const joinedElement = joinRegistryRef(arr.element, typeRegistry, new Set(), arrArm!.depth);
+  const element = joinedElement ?? arr.element;
   if (element.kind !== "function" || !descriptorsStructurallyEquivalent(fn, element))
     return undefined;
-  return { functionArm: fn, arrayElement: element };
+  return {
+    functionArm: fn,
+    functionDepth: fnArm!.depth,
+    arrayElement: element,
+    arrayElementDepth: joinedElement ? 1 : arrArm!.depth,
+  };
 }
