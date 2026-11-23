@@ -156,8 +156,14 @@ impl<'c> VaporCompiler<'c> {
             parts.push(Part::Name(NameKind::Node, root.node_ref));
         }
         parts.push(Part::Text("]\n"));
+        let run = self.state.runs.commit(&mut parts);
+        let slot_roots = roots
+            .iter()
+            .map(|root| self.state.slot_root(root))
+            .collect();
+        self.state.record_block_roots(run, slot_roots);
         Ok(ClosedBlock {
-            run: self.state.runs.commit(&mut parts),
+            run,
             node_ref: first.node_ref,
             template_idx: None,
             is_static: roots.iter().all(|root| root.is_static),

@@ -1716,6 +1716,7 @@ fn compute_if_flags_bare_if_no_else_dynamic_positive_omits_argument() {
         Some(0),
         true,
         false,
+        false,
     );
     assert_eq!(flags, None);
 }
@@ -1729,6 +1730,7 @@ fn compute_if_flags_bare_if_no_else_static_positive_emits_no_scope_only() {
         super::control_flow::IfNegative::None,
         Some(0),
         true,
+        false,
         false,
     );
     assert_eq!(
@@ -1750,6 +1752,7 @@ fn compute_if_flags_dynamic_positive_static_negative_matches_basic_interpolation
         Some(0),
         true,
         false,
+        false,
     );
     assert_eq!(
         flags.as_deref(),
@@ -1769,6 +1772,7 @@ fn compute_if_flags_both_branches_dynamic_no_no_scope_bits() {
         Some(2),
         true,
         false,
+        false,
     );
     assert_eq!(
         flags.as_deref(),
@@ -1785,6 +1789,7 @@ fn compute_if_flags_else_if_chain_never_gets_false_no_scope() {
         super::control_flow::IfNegative::Chain,
         Some(1),
         true,
+        false,
         false,
     );
     // A `v-else-if` false branch is the ELSE_IF shape (3 << 2).
@@ -1843,6 +1848,7 @@ fn compute_if_flags_nested_v_if_never_gets_no_scope_bits() {
         Some(0),
         false,
         false,
+        false,
     );
     assert_eq!(
         flags.as_deref(),
@@ -1861,6 +1867,7 @@ fn compute_if_flags_production_mode_omits_comment() {
         },
         Some(0),
         true,
+        false,
         true,
     );
     assert_eq!(flags.as_deref(), Some("325"));

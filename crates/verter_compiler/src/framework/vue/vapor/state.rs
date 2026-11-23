@@ -1,6 +1,6 @@
 //! The immutable runs, operation rows, and two outputs of one fine-grained render.
 use oxc_allocator::Allocator;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::counters::VaporCounters;
 use super::effect::{EffectGroupId, EffectId, VaporEffect};
@@ -52,6 +52,11 @@ pub(super) struct VaporState<'c> {
     pub(super) template_ref_setter: bool,
     /// Dynamic slot function locals declared so far.
     slot_caches: u32,
+    /// Slot-root metadata of each construct, by its node name, until a slot
+    /// block marks it or the render ends.
+    pub(super) slot_root_marks: FxHashMap<u32, super::slot_roots::SlotRootMark>,
+    /// The roots of each block returning several, by its run.
+    pub(super) block_roots: FxHashMap<u32, Vec<super::slot_roots::SlotRoot>>,
     helpers: VaporHelperFlags,
     pub(super) builtins: crate::template::code_gen::shared::helpers::BuiltinComponentFlags,
 }
@@ -74,6 +79,8 @@ impl<'c> VaporState<'c> {
             handler_names: FxHashSet::default(),
             template_ref_setter: false,
             slot_caches: 0,
+            slot_root_marks: FxHashMap::default(),
+            block_roots: FxHashMap::default(),
             helpers: VaporHelperFlags::empty(),
             builtins: crate::template::code_gen::shared::helpers::BuiltinComponentFlags::empty(),
         }

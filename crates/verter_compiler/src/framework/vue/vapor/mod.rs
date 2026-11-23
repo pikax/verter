@@ -40,6 +40,7 @@ mod repeated_reads;
 #[cfg(test)]
 mod repeated_reads_tests;
 mod scope;
+mod slot_roots;
 #[cfg(test)]
 mod slot_roots_tests;
 mod slots;

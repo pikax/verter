@@ -24,17 +24,20 @@ pub(super) enum IfNegative {
 /// `None` when official omits it (`flags === 1`: bare v-if, positive
 /// branch not NO_SCOPE-eligible, not nested where NO_SCOPE is disallowed).
 ///
-/// No `v-once`/slot-root `v-if` is reachable. A branch's shape is
+/// No `v-once` `v-if` is reachable. A branch's shape is
 /// SINGLE_ROOT (1) or MULTI_ROOT (2); a `v-else-if` false branch is ELSE_IF (3):
 /// `(positive multi ? 2 : 1) | (negative shape << 2) |
 /// (positive NO_SCOPE ? 32 : 0) | (negative NO_SCOPE ? 64 : 0) |
-/// (has_negative ? (own_if_index + 1) << 8 : 0)`.
+/// (slot_root ? 128 : 0) | (has_negative ? (own_if_index + 1) << 8 : 0)`; a
+/// root of a slot block with no stable root is SLOT_ROOT
+/// (`markSlotRootOperations`).
 pub(super) fn compute_if_flags(
     positive_static: bool,
     positive_multi_root: bool,
     negative: IfNegative,
     own_if_index: Option<u32>,
     allow_no_scope: bool,
+    slot_root: bool,
     is_production: bool,
 ) -> Option<String> {
     let has_negative = !matches!(negative, IfNegative::None);
@@ -71,6 +74,10 @@ pub(super) fn compute_if_flags(
             names.push("FALSE_NO_SCOPE".to_string());
         }
     }
+    if slot_root {
+        flags |= 128;
+        names.push("SLOT_ROOT".to_string());
+    }
     if has_negative {
         if let Some(idx) = own_if_index {
             flags |= (idx + 1) << 8;
@@ -93,11 +100,12 @@ pub(super) fn compute_if_flags(
 /// directly inside a `<template v-for>` is MULTI_ROOT on both sides,
 /// whatever its branches hold. The false side is ELSE_IF for a continuing
 /// `v-else-if` and MULTI_ROOT otherwise, even with no `v-else`; no branch is
-/// NO_SCOPE. The keyed index follows a present negative branch, as in
-/// [`compute_if_flags`].
+/// NO_SCOPE. A slot root is SLOT_ROOT and the keyed index follows a present
+/// negative branch, as in [`compute_if_flags`].
 pub(super) fn compute_forced_multi_root_if_flags(
     negative: IfNegative,
     own_if_index: Option<u32>,
+    slot_root: bool,
     is_production: bool,
 ) -> String {
     let (false_shape, false_name) = match negative {
@@ -106,6 +114,10 @@ pub(super) fn compute_forced_multi_root_if_flags(
     };
     let mut flags = 2 | (false_shape << 2);
     let mut names = vec!["TRUE_MULTI_ROOT".to_string(), false_name.to_string()];
+    if slot_root {
+        flags |= 128;
+        names.push("SLOT_ROOT".to_string());
+    }
     if !matches!(negative, IfNegative::None) {
         if let Some(index) = own_if_index {
             flags |= (index + 1) << 8;
@@ -123,10 +135,13 @@ pub(super) fn compute_forced_multi_root_if_flags(
 /// through transparent wrappers. Components and fragments never use DOM-node ops.
 /// `wrapped_rows` is independent of the returned kind: a `<template v-for>`
 /// row wraps its content unless it is one plain element.
+/// A root of a slot block with no stable root is SLOT_ROOT
+/// (`markSlotRootOperations`).
 pub(super) fn compute_for_flags(
     only_child: bool,
     kind: BlockKind,
     wrapped_rows: bool,
+    slot_root: bool,
     is_production: bool,
 ) -> Option<String> {
     let mut flags: u32 = 0;
@@ -149,6 +164,10 @@ pub(super) fn compute_for_flags(
             names.push("IS_FRAGMENT");
         }
         BlockKind::Roots => {}
+    }
+    if slot_root {
+        flags |= 32;
+        names.push("SLOT_ROOT");
     }
     if wrapped_rows {
         flags |= 64;
@@ -762,40 +781,52 @@ impl<'c> VaporCompiler<'c> {
                         multi_root: next.multi_root,
                     },
                 };
-                let flags = if force_multi_root {
-                    Some(compute_forced_multi_root_if_flags(
-                        shape,
-                        branch.own_if_index,
-                        self.inputs.options.is_production,
-                    ))
-                } else {
-                    compute_if_flags(
-                        branch.body.is_static,
-                        branch.multi_root,
-                        shape,
-                        branch.own_if_index,
-                        self.block_depth == 0,
-                        self.inputs.options.is_production,
-                    )
-                };
-                if let Some(next) = negative {
-                    current.extend([Part::Text("  }, () => "), Part::Run(next)]);
-                    if let Some(flags) = flags {
-                        current.extend([
-                            Part::Text(", "),
-                            Part::Text(self.inputs.allocator.alloc_str(&flags)),
-                        ]);
+                let is_production = self.inputs.options.is_production;
+                let if_flags = |slot_root: bool| {
+                    if force_multi_root {
+                        Some(compute_forced_multi_root_if_flags(
+                            shape,
+                            branch.own_if_index,
+                            slot_root,
+                            is_production,
+                        ))
+                    } else {
+                        compute_if_flags(
+                            branch.body.is_static,
+                            branch.multi_root,
+                            shape,
+                            branch.own_if_index,
+                            self.block_depth == 0,
+                            slot_root,
+                            is_production,
+                        )
                     }
+                };
+                let (flags, marked) = (if_flags(false), if_flags(true));
+                let separator = if let Some(next) = negative {
+                    current.extend([Part::Text("  }, () => "), Part::Run(next)]);
+                    ", "
                 } else {
                     current.push(Part::Text("  }"));
-                    if let Some(flags) = flags {
-                        current.extend([
-                            Part::Text(", null, "),
-                            Part::Text(self.inputs.allocator.alloc_str(&flags)),
-                        ]);
-                    }
-                }
-                current.push(Part::Text(")"));
+                    ", null, "
+                };
+                let allocator = self.inputs.allocator;
+                let mut plain = flags.map_or_else(Vec::new, |flags| {
+                    vec![
+                        Part::Text(separator),
+                        Part::Text(allocator.alloc_str(&flags)),
+                    ]
+                });
+                let mut slot_root = marked.map_or_else(Vec::new, |flags| {
+                    vec![
+                        Part::Text(separator),
+                        Part::Text(allocator.alloc_str(&flags)),
+                    ]
+                });
+                let flags = self
+                    .state
+                    .slot_root_flags(chain.outer_ref, &mut plain, &mut slot_root);
+                current.extend([Part::Run(flags), Part::Text(")")]);
             } else {
                 current.extend([
                     Part::Text("{\n"),
@@ -804,6 +835,11 @@ impl<'c> VaporCompiler<'c> {
                 ]);
             }
             negative = Some(self.state.runs.commit(&mut current));
+        }
+        // `markSlotRootIf` marks every branch of the chain in turn.
+        for branch in &chain.branches {
+            let roots = self.state.block_roots(&branch.body);
+            self.state.slot_root_block(chain.outer_ref, roots);
         }
         if let Some(run) = negative {
             parts.push(Part::Run(run));
@@ -946,21 +982,35 @@ impl<'c> VaporCompiler<'c> {
                     != crate::template::topology::VueTemplateNodeKind::Root
             })
             && self.is_sole_meaningful_child(node);
-        if let Some(flags) = compute_for_flags(
-            only_child,
-            body.kind,
-            self.wraps_rows(node),
-            self.inputs.options.is_production,
-        ) {
-            if key.is_none() {
-                parts.push(Part::Text(", undefined"));
+        let for_flags = |slot_root: bool| {
+            compute_for_flags(
+                only_child,
+                body.kind,
+                self.wraps_rows(node),
+                slot_root,
+                self.inputs.options.is_production,
+            )
+        };
+        let (flags, marked) = (for_flags(false), for_flags(true));
+        let allocator = self.inputs.allocator;
+        let arguments = |flags: Option<String>| {
+            let mut parts = Vec::new();
+            if let Some(flags) = flags {
+                if key.is_none() {
+                    parts.push(Part::Text(", undefined"));
+                }
+                parts.extend([Part::Text(", "), Part::Text(allocator.alloc_str(&flags))]);
             }
-            parts.extend([
-                Part::Text(", "),
-                Part::Text(self.inputs.allocator.alloc_str(&flags)),
-            ]);
-        }
-        parts.push(Part::Text(")"));
+            parts
+        };
+        let (mut plain, mut slot_root) = (arguments(flags), arguments(marked));
+        let flags = self
+            .state
+            .slot_root_flags(outer, &mut plain, &mut slot_root);
+        // `markSlotRootFor` marks the loop's row in turn.
+        let roots = self.state.block_roots(&body);
+        self.state.slot_root_block(outer, roots);
+        parts.extend([Part::Run(flags), Part::Text(")")]);
         self.state.use_helper(VaporHelper::CreateFor);
         Ok(self.construct(outer, &mut parts, BlockKind::Fragment))
     }

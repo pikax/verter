@@ -2,6 +2,7 @@
 use super::control_flow::{ConstructRefs, LoopParts};
 use super::ops::{BlockKind, ClosedBlock, NameKind, Part, RunId, Stmt};
 use super::scope::{MergedConstructKind, NamedSlot, VaporScope};
+use super::slot_roots::{merged_root, SlotRoot};
 use super::VaporCompiler;
 use crate::ast::types::ChildrenFlags;
 use crate::ast::types::ElementNodeConditionKind;
@@ -165,7 +166,9 @@ impl<'c> VaporCompiler<'c> {
     /// A body whose roots are all conditionals, loops, outlets or dynamic
     /// components has no stable root, so its function is marked NON_STABLE,
     /// as Vue's `markSlotRootOperations` decides; the runtime gives such a
-    /// slot a fragment that can fall back when it renders nothing.
+    /// slot a fragment that can fall back when it renders nothing. Its roots
+    /// are marked then, so each notifies the slot boundary when what it
+    /// renders changes.
     fn slot_body(
         &mut self,
         scope: VaporScope<'c>,
@@ -177,11 +180,12 @@ impl<'c> VaporCompiler<'c> {
             // Several roots: each closed its own template as a root of the
             // slot block. A component, or a template with content other than
             // comments (an element or a text run), is a stable root.
-            let non_stable = !scope.roots.iter().any(|root| match root.kind {
-                BlockKind::Component => true,
-                BlockKind::Node => self.state.is_stable_template_root(root.template_idx),
-                BlockKind::Fragment | BlockKind::Roots => false,
-            });
+            let roots: Vec<_> = scope
+                .roots
+                .iter()
+                .map(|root| self.state.slot_root(root))
+                .collect();
+            let non_stable = !self.state.mark_slot_roots(&roots);
             let body = self.close_roots(scope, self.span_of(node))?;
             return Ok(SlotBody {
                 run: body.run,
@@ -203,10 +207,12 @@ impl<'c> VaporCompiler<'c> {
                 non_stable: false,
             });
         }
-        let non_stable = !scope
+        let roots: Vec<_> = scope
             .merged_construct_kinds
             .iter()
-            .any(|(kind, _)| *kind == MergedConstructKind::Component);
+            .map(|(kind, node_ref)| merged_root(*kind, *node_ref))
+            .collect();
+        let non_stable = !self.state.mark_slot_roots(&roots);
         let mut parts = Vec::new();
         for statement in &scope.child_statements {
             // Placement rows only position a construct inside a container.
@@ -285,6 +291,12 @@ impl<'c> VaporCompiler<'c> {
         ) {
             return Ok(None);
         }
+        // The forwarded construct is the slot block's only root, never a
+        // stable one.
+        self.state.mark_slot_roots(&[SlotRoot {
+            node_ref,
+            stable: false,
+        }]);
         let mut parts = vec![Part::Text("_extend(() => {\n")];
         for statement in &scope.child_statements {
             match statement {
@@ -537,6 +549,21 @@ impl<'c> VaporCompiler<'c> {
             });
         // The fallback's children are its block roots, as Vue returns them.
         let fallback = if scope.is_transparent_wrapper && !scope.roots.is_empty() {
+            // Inside a slot block a fallback stands in for the owning slot's
+            // content, so Vue's `genSlotOutlet` marks its roots as a slot
+            // block's.
+            if self
+                .element_stack
+                .iter()
+                .any(|open| open.is_component_scope)
+            {
+                let roots: Vec<_> = scope
+                    .roots
+                    .iter()
+                    .map(|root| self.state.slot_root(root))
+                    .collect();
+                self.state.mark_slot_roots(&roots);
+            }
             let body = self.close_roots(scope, self.span_of(node))?;
             Some(self.state.runs.commit(&mut vec![
                 Part::Text("() => {\n"),
@@ -548,41 +575,48 @@ impl<'c> VaporCompiler<'c> {
         };
         // An outlet forwards no listeners, so no handler is hoisted.
         let props = self.build_component_props(node, false, true, &mut Vec::new());
-        let flags = self
-            .element_stack
-            .last()
-            .is_some_and(|parent| parent.is_component_scope);
+        let quote = name_attr.map_or(Part::Text("\""), |attr| {
+            Part::Anchored("\"", attr.name_span.start)
+        });
+        let name_text = Part::Text(self.inputs.allocator.alloc_str(name));
+        let is_production = self.inputs.options.is_production;
+        // A root of a slot block with no stable root is FORWARDED
+        // (`markSlotRootOperations`); trailing default arguments are omitted
+        // only without flags.
+        let arguments = |forwarded: bool| {
+            let mut parts = Vec::new();
+            if fallback.is_some() || props.is_some() || name != "default" || forwarded {
+                parts.extend([quote, name_text, Part::Text("\"")]);
+            }
+            if fallback.is_some() || props.is_some() || forwarded {
+                parts.push(Part::Text(", "));
+                parts.push(props.map_or(Part::Text("null"), Part::Run));
+            }
+            if let Some(fallback) = fallback {
+                parts.extend([Part::Text(", "), Part::Run(fallback)]);
+            } else if forwarded {
+                parts.push(Part::Text(", null"));
+            }
+            if forwarded {
+                parts.push(Part::Text(if is_production {
+                    ", 4"
+                } else {
+                    ", 4 /* FORWARDED */"
+                }));
+            }
+            parts
+        };
+        let (mut plain, mut forwarded) = (arguments(false), arguments(true));
+        let arguments = self
+            .state
+            .slot_root_flags(node_ref, &mut plain, &mut forwarded);
         let mut parts = vec![
             Part::Text("const "),
             Part::Name(NameKind::Node, node_ref),
             Part::Text(" = _createSlot("),
+            Part::Run(arguments),
+            Part::Text(")"),
         ];
-        if fallback.is_some() || props.is_some() || name != "default" || flags {
-            parts.push(name_attr.map_or(Part::Text("\""), |attr| {
-                Part::Anchored("\"", attr.name_span.start)
-            }));
-            parts.extend([
-                Part::Text(self.inputs.allocator.alloc_str(name)),
-                Part::Text("\""),
-            ]);
-        }
-        if fallback.is_some() || props.is_some() || flags {
-            parts.push(Part::Text(", "));
-            parts.push(props.map_or(Part::Text("null"), Part::Run));
-        }
-        if let Some(fallback) = fallback {
-            parts.extend([Part::Text(", "), Part::Run(fallback)]);
-        } else if flags {
-            parts.push(Part::Text(", null"));
-        }
-        if flags {
-            parts.push(Part::Text(if self.inputs.options.is_production {
-                ", 4"
-            } else {
-                ", 4 /* FORWARDED */"
-            }));
-        }
-        parts.push(Part::Text(")"));
         self.state.use_helper(VaporHelper::CreateSlot);
         Ok(self.construct(node_ref, &mut parts, BlockKind::Fragment))
     }
