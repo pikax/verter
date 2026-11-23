@@ -23,7 +23,6 @@ pub(super) enum EffectWrapper {
 pub(super) enum VaporEffectNode<'c> {
     Group {
         indent: &'c str,
-        interleaved: bool,
         wrapper: EffectWrapper,
     },
     Effect {
@@ -53,15 +52,10 @@ impl Default for EffectGraph<'_> {
     }
 }
 impl<'c> EffectGraph<'c> {
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "One effect group retains effects, lexical placement, binding view and source authority as separate borrowed inputs."
-    )]
     pub(super) fn add_group(
         &mut self,
         effects: Vec<EffectId>,
         indent: &'c str,
-        interleaved: bool,
         wrapper: EffectWrapper,
         table: &[VaporEffect<'c>],
         runs: &Runs<'c>,
@@ -72,11 +66,7 @@ impl<'c> EffectGraph<'c> {
             .as_mut()
             .ok_or_else(|| refusal("sealed-effect-graph"))?;
         let group = builder
-            .add_node(VaporEffectNode::Group {
-                indent,
-                interleaved,
-                wrapper,
-            })
+            .add_node(VaporEffectNode::Group { indent, wrapper })
             .map_err(storage_refusal)?;
         self.records.resize_with(table.len(), || None);
         let mut tokens: FxHashMap<String, EffectGroupId> = FxHashMap::default();

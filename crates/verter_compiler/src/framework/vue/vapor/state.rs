@@ -1,6 +1,6 @@
 //! The immutable runs, operation rows, and two outputs of one fine-grained render.
 use oxc_allocator::Allocator;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::counters::VaporCounters;
 use super::effect::{EffectGroupId, EffectId, VaporEffect};
@@ -18,6 +18,9 @@ pub(super) struct TemplateDeclaration {
     pub(super) html: String,
     pub(super) is_root: bool,
     pub(super) is_static: bool,
+    /// The namespace runtime-vapor parses the payload in: 0 for HTML, 1 for
+    /// SVG, 2 for MathML (Vue's `Namespaces`).
+    pub(super) namespace: u8,
 }
 
 /// A component the render function resolves by name.
@@ -49,6 +52,11 @@ pub(super) struct VaporState<'c> {
     pub(super) template_ref_setter: bool,
     /// Dynamic slot function locals declared so far.
     slot_caches: u32,
+    /// Slot-root metadata of each construct, by its node name, until a slot
+    /// block marks it or the render ends.
+    pub(super) slot_root_marks: FxHashMap<u32, super::slot_roots::SlotRootMark>,
+    /// The roots of each block returning several, by its run.
+    pub(super) block_roots: FxHashMap<u32, Vec<super::slot_roots::SlotRoot>>,
     helpers: VaporHelperFlags,
     pub(super) builtins: crate::template::code_gen::shared::helpers::BuiltinComponentFlags,
 }
@@ -71,6 +79,8 @@ impl<'c> VaporState<'c> {
             handler_names: FxHashSet::default(),
             template_ref_setter: false,
             slot_caches: 0,
+            slot_root_marks: FxHashMap::default(),
+            block_roots: FxHashMap::default(),
             helpers: VaporHelperFlags::empty(),
             builtins: crate::template::code_gen::shared::helpers::BuiltinComponentFlags::empty(),
         }
@@ -164,7 +174,13 @@ impl<'c> VaporState<'c> {
         name
     }
 
-    pub(super) fn declare_template(&mut self, html: String, is_root: bool, is_static: bool) -> u32 {
+    pub(super) fn declare_template(
+        &mut self,
+        html: String,
+        is_root: bool,
+        is_static: bool,
+        namespace: u8,
+    ) -> u32 {
         let index = self.counters.next_template();
         self.use_helper(VaporHelper::Template);
         self.templates.push(TemplateDeclaration {
@@ -172,8 +188,30 @@ impl<'c> VaporState<'c> {
             html,
             is_root,
             is_static,
+            namespace,
         });
         index
+    }
+
+    /// Vue 3.6.0-rc.15 `isStableTemplateSlotRoot`: a slot root's template is
+    /// stable unless it is empty or holds only comments, which render nothing
+    /// a fallback could replace.
+    pub(super) fn is_stable_template_root(&self, template: Option<u32>) -> bool {
+        let Some(template) = template else {
+            return false;
+        };
+        self.templates
+            .iter()
+            .find(|declaration| declaration.index == template)
+            .is_some_and(|declaration| {
+                // Vue tests the trimmed content against
+                // `/^(?:<!--[\s\S]*?-->)+$/`, which any content between a
+                // leading `<!--` and a trailing `-->` matches.
+                let trimmed = declaration.html.trim();
+                let comment_only =
+                    trimmed.len() >= 7 && trimmed.starts_with("<!--") && trimmed.ends_with("-->");
+                !declaration.html.is_empty() && !comment_only
+            })
     }
 
     pub(super) fn add_effect(&mut self, effect: VaporEffect<'c>) -> EffectId {
@@ -190,26 +228,11 @@ impl<'c> VaporState<'c> {
         &mut self,
         effects: Vec<EffectId>,
         indent: &'c str,
-        interleaved: bool,
-    ) -> Result<EffectGroupId, VueTargetRefusal> {
-        self.add_effect_group_with(
-            effects,
-            indent,
-            interleaved,
-            super::graph::EffectWrapper::Render,
-        )
-    }
-    pub(super) fn add_effect_group_with(
-        &mut self,
-        effects: Vec<EffectId>,
-        indent: &'c str,
-        interleaved: bool,
         wrapper: super::graph::EffectWrapper,
     ) -> Result<EffectGroupId, VueTargetRefusal> {
         let group = self.effect_graph.add_group(
             effects,
             indent,
-            interleaved,
             wrapper,
             &self.effects,
             &self.runs,

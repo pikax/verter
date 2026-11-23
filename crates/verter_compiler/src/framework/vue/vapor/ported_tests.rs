@@ -986,13 +986,20 @@ fn dom_child_index_counts_preceding_siblings_exactly() {
     );
 
     // Coalescing: a leading text+interpolation run is ONE child, so the
-    // following element is index 1 (not 2). `<div>t{{i}}<span>{{d}}</span></div>`
-    // → the span is DOM child 1, the first child's next sibling.
-    let r = run_full_pipeline("<template><div>t{{ i }}<span>{{ d }}</span></div></template>");
-    assert!(
-        r.contains("= _next(_child(n0))"),
-        "a leading text+interpolation run coalesces to one child; the span must be DOM index 1, got:\n{r}"
-    );
+    // following element is index 1 (not 2). Beside the span, the run is its
+    // own node, reached as the div's first child (Vue 3.6.0-rc.15:
+    // `n0 = _child(n2, true)`, `n1 = _next(n0)`).
+    let r = render_code("<template><div>t{{ i }}<span>{{ d }}</span></div></template>");
+    for expected in [
+        "const n0 = _child(n2, true)",
+        " = _next(n0)",
+        "_setText(n0, \"t\" + _toDisplayString(_ctx.i))",
+    ] {
+        assert!(
+            r.contains(expected),
+            "a leading text+interpolation run coalesces to one child; the span must be DOM index 1: {expected}\n{r}"
+        );
+    }
 }
 
 #[test]
@@ -1709,6 +1716,7 @@ fn compute_if_flags_bare_if_no_else_dynamic_positive_omits_argument() {
         Some(0),
         true,
         false,
+        false,
     );
     assert_eq!(flags, None);
 }
@@ -1722,6 +1730,7 @@ fn compute_if_flags_bare_if_no_else_static_positive_emits_no_scope_only() {
         super::control_flow::IfNegative::None,
         Some(0),
         true,
+        false,
         false,
     );
     assert_eq!(
@@ -1743,6 +1752,7 @@ fn compute_if_flags_dynamic_positive_static_negative_matches_basic_interpolation
         Some(0),
         true,
         false,
+        false,
     );
     assert_eq!(
         flags.as_deref(),
@@ -1762,6 +1772,7 @@ fn compute_if_flags_both_branches_dynamic_no_no_scope_bits() {
         Some(2),
         true,
         false,
+        false,
     );
     assert_eq!(
         flags.as_deref(),
@@ -1778,6 +1789,7 @@ fn compute_if_flags_else_if_chain_never_gets_false_no_scope() {
         super::control_flow::IfNegative::Chain,
         Some(1),
         true,
+        false,
         false,
     );
     // A `v-else-if` false branch is the ELSE_IF shape (3 << 2).
@@ -1836,6 +1848,7 @@ fn compute_if_flags_nested_v_if_never_gets_no_scope_bits() {
         Some(0),
         false,
         false,
+        false,
     );
     assert_eq!(
         flags.as_deref(),
@@ -1854,6 +1867,7 @@ fn compute_if_flags_production_mode_omits_comment() {
         },
         Some(0),
         true,
+        false,
         true,
     );
     assert_eq!(flags.as_deref(), Some("325"));
