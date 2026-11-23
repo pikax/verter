@@ -1510,15 +1510,16 @@ const UNREADABLE_ARM_DECLARATION: &str =
 /// A conditional held by a lowering that a flow body drives makes each
 /// read its decision names inside the decision operation that named it,
 /// whether the body suspends at the read (its root read answering the
-/// request) or answers it at once: the read's partiality and reuse
-/// evidence land in that operation's observation, and the decision
-/// decides with them. In `"a" extends string | Dom<1> ? 1 : 2` the partial
-/// `Dom<1>` read leaves the operand preparation incomplete, so the written
+/// request) or answers it at once: the read's dependencies are observed
+/// while that operation's observation is on top, its partiality and reuse
+/// evidence land in that observation, and the decision decides with them.
+/// In `"a" extends string | Dom<1> ? 1 : 2` the partial `Dom<1>` read
+/// leaves the operand preparation incomplete, so the written
 /// `string` arm proves the true branch and the unused operands contribute
 /// only their reuse evidence: the flow-driven lowering answers what the
 /// native lowering answers, as completely. A read answered ahead of the
-/// decision instead lands its partiality in the enclosing build and none
-/// in the decision's observation.
+/// decision instead lands its dependencies and partiality in the enclosing
+/// build and none in the decision's observation.
 #[test]
 fn a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decision() {
     use verter_type_engine::project_semantic_dispatch::lower::OwnerLoweringDriverForTests as Driver;
@@ -1554,6 +1555,13 @@ fn a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decisi
         native.partial, None,
         "the native lowering proves the true branch through the written arm: {native_text} {native:?}"
     );
+    assert!(
+        native
+            .decision_reads
+            .iter()
+            .any(|read| read.partial && !read.dependencies.is_empty()),
+        "the native decision makes its partial read, with its dependencies, inside the decision: {native:?}"
+    );
     for driver in [Driver::FlowRequested, Driver::FlowInPlace] {
         let (text, flow) = lower(driver);
         assert!(
@@ -1563,6 +1571,10 @@ fn a_flow_driven_lowering_makes_its_conditional_decision_reads_inside_the_decisi
             "{driver:?}: the decision reads a partial answer into an observation that was complete: {flow:?}"
         );
         for read in &flow.decision_reads {
+            assert!(
+                !read.partial || !read.dependencies.is_empty(),
+                "{driver:?}: a partial decision read observes its dependencies while the decision's observation is on top: {read:?}"
+            );
             assert!(
                 !read.partial || read.observed_partial[1],
                 "{driver:?}: a partial decision read is partial in the decision's observation: {read:?}"
