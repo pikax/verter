@@ -2101,7 +2101,7 @@ mod watch_session {
         f.base();
         f.write(
             "tsconfig.json",
-            r#"{"extends":"./base.json","compilerOptions":{"allowJs":true},"include":["*.vue","*.ts"]}"#,
+            r#"{"extends":"./base.json","compilerOptions":{"allowJs":true,"jsx":"preserve"},"include":["*.vue","*.ts"]}"#,
         );
         f.write(
             "View.vue",
