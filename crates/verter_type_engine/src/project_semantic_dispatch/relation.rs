@@ -680,10 +680,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// [`DisjointnessProof::checker_reduces_intersection_to_never`] instead
     /// of deciding collapse itself.
     pub fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict {
+        self.nodes_comparable_settled(a, b, &|node| {
+            self.unwrap_identity_carrier_for_relation(node)
+        })
+    }
+
+    /// [`Self::nodes_comparable`], the collapse class of a disjoint pair
+    /// reading each identity carrier through `settle` ([`CarrierSettle`]).
+    pub(super) fn nodes_comparable_settled(
+        &self,
+        a: SemanticNodeId,
+        b: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> ComparabilityVerdict {
         match self.execute_relate_pair_kind(a, b, RelationKind::Comparable) {
             RelationStep::Assignable { .. } => ComparabilityVerdict::Overlaps,
             RelationStep::NotAssignable => ComparabilityVerdict::Disjoint(DisjointnessProof::new(
-                self.checker_intersection_collapse(a, b),
+                self.checker_intersection_collapse(a, b, settle),
             )),
             RelationStep::Unknown | RelationStep::BudgetExceeded(_) | RelationStep::Assumed(_) => {
                 ComparabilityVerdict::Undecided
@@ -719,17 +732,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// structurally bounded (at most two widen retries, flat union arms,
     /// unit conflicts bottom out) with family-memoized inner reads — and it
     /// runs only for a pair the reduction ALREADY answered negative, so it
-    /// cannot widen the work any unanswered pair performs.
+    /// cannot widen the work any unanswered pair performs. Every identity
+    /// carrier it looks through is read through `settle`.
     fn checker_intersection_collapse(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
+        settle: CarrierSettle<'_>,
     ) -> IntersectionCollapse {
-        let source = match self.unwrap_identity_carrier_for_relation(source) {
+        let source = match settle(source) {
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return IntersectionCollapse::Kept,
         };
-        let target = match self.unwrap_identity_carrier_for_relation(target) {
+        let target = match settle(target) {
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return IntersectionCollapse::Kept,
         };
@@ -744,7 +759,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             // A widened retry re-asks the pair on the ordinary lattice.
             if let NominalLeaf::Retry(widened_source, widened_target) = leaf {
-                return self.checker_intersection_collapse(widened_source, widened_target);
+                return self.checker_intersection_collapse(widened_source, widened_target, settle);
             }
             return IntersectionCollapse::Kept;
         }
@@ -756,11 +771,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         if let SemanticNodeData::Union(members) = &*source_data {
             let members = members.members_arc();
-            return self.union_collapse_class(members.iter().copied(), target);
+            return self.union_collapse_class(members.iter().copied(), target, settle);
         }
         if let SemanticNodeData::Union(members) = &*target_data {
             let members = members.members_arc();
-            return self.union_collapse_class(members.iter().copied(), source);
+            return self.union_collapse_class(members.iter().copied(), source, settle);
         }
         if super::canonical_algebra::tag_level_disjoint(self.graph().store(), source, target)
             || super::canonical_algebra::scalar_domain_provably_empty(
@@ -801,6 +816,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if self.discriminant_members_conflict(
                 (source_member.value, source_member.optional),
                 (target_member.value, target_member.optional),
+                settle,
             ) {
                 return IntersectionCollapse::ReducesToNever;
             }
@@ -815,6 +831,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         arms: impl Iterator<Item = SemanticNodeId>,
         other: SemanticNodeId,
+        settle: CarrierSettle<'_>,
     ) -> IntersectionCollapse {
         let mut arms = arms.peekable();
         if arms.peek().is_none() {
@@ -822,7 +839,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         for arm in arms {
             if matches!(
-                self.checker_intersection_collapse(arm, other),
+                self.checker_intersection_collapse(arm, other, settle),
                 IntersectionCollapse::Kept
             ) {
                 return IntersectionCollapse::Kept;
@@ -848,11 +865,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         (left, left_optional): (SemanticNodeId, bool),
         (right, right_optional): (SemanticNodeId, bool),
+        settle: CarrierSettle<'_>,
     ) -> bool {
         // A member value is the type the relation read for it: an indexed
         // access or a reference that reads a literal IS that literal
         // (`v: Boxed['k']` over `k: 'a'` is the unit `'a'`).
-        let read = |node: SemanticNodeId| match self.unwrap_identity_carrier_for_relation(node) {
+        let read = |node: SemanticNodeId| match settle(node) {
             IdentityCarrierUnwrap::Concrete(read) => read,
             IdentityCarrierUnwrap::Unresolvable => node,
         };
@@ -898,7 +916,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         left.iter().all(|a| {
             right.iter().all(|b| {
                 matches!(
-                    self.checker_intersection_collapse(*a, *b),
+                    self.checker_intersection_collapse(*a, *b, settle),
                     IntersectionCollapse::ReducesToNever
                 )
             })
@@ -20440,13 +20458,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// assignable to `target`.
     ///
     /// `None` when `target` is no object surface or the `Object` interface
-    /// does not settle: no refutation is proved.
+    /// does not settle: no refutation is proved. `target`'s identity
+    /// carriers are read through `settle` ([`CarrierSettle`]).
     pub(super) fn assignability_refuting_keys(
         &self,
         target: SemanticNodeId,
         canonical: &str,
+        settle: CarrierSettle<'_>,
     ) -> Option<Vec<Arc<str>>> {
-        match self.unwrap_identity_carrier_for_relation(target) {
+        match settle(target) {
             IdentityCarrierUnwrap::Concrete(concrete) => {
                 self.assignability_refuting_keys_of(concrete, canonical)
             }
@@ -20534,12 +20554,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// members). Such a source has exactly these properties and the
     /// apparent `Object` interface's, so a key absent here that
     /// [`Self::assignability_refuting_keys`] names refutes its
-    /// assignability. `None` for any other source.
+    /// assignability. `None` for any other source. `source`'s identity
+    /// carriers are read through `settle` ([`CarrierSettle`]).
     pub(super) fn closed_object_own_string_keys(
         &self,
         source: SemanticNodeId,
+        settle: CarrierSettle<'_>,
     ) -> Option<Vec<Arc<str>>> {
-        match self.unwrap_identity_carrier_for_relation(source) {
+        match settle(source) {
             IdentityCarrierUnwrap::Concrete(concrete) => self.closed_object_keys_of(concrete),
             IdentityCarrierUnwrap::Unresolvable => None,
         }

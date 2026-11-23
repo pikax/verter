@@ -715,7 +715,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         {
             LiteralContext::Keep
         } else {
-            self.literal_context_of(node, contexts, declared)
+            self.literal_context_of(node, contexts, declared, &|node| {
+                self.unwrap_identity_carrier_for_relation(node)
+            })
         };
         match context {
             LiteralContext::Keep => {
@@ -1548,13 +1550,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// named carriers (`T extends Text`, `type Text = string`) and through
     /// the constraints of the type parameters it names; `declared`
     /// supplies the constraint of a type parameter whose node carries none.
+    /// Every carrier is read through `settle`
+    /// ([`CarrierSettle`](crate::project_semantic_dispatch::relation::CarrierSettle)).
     pub(in crate::project_semantic_dispatch) fn literal_of_contextual_type(
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
         declared: &[TypeParamDecl],
+        settle: crate::project_semantic_dispatch::relation::CarrierSettle<'_>,
     ) -> bool {
-        self.literal_context_of(candidate, &[contextual], declared) == LiteralContext::Keep
+        self.literal_context_of(candidate, &[contextual], declared, settle) == LiteralContext::Keep
     }
 
     /// [`Self::literal_of_contextual_type`] against the combined
@@ -1565,6 +1570,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         candidate: SemanticNodeId,
         contexts: &[SemanticNodeId],
         declared: &[TypeParamDecl],
+        settle: crate::project_semantic_dispatch::relation::CarrierSettle<'_>,
     ) -> LiteralContext {
         let graph = self.graph();
         let held =
@@ -1584,8 +1590,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let mut visited = FxHashSet::default();
         let mut context = LiteralContext::Widen;
         for &contextual in contexts {
-            context =
-                context.or(self.literal_context_admits(held, contextual, declared, &mut visited));
+            context = context.or(self.literal_context_admits(
+                held,
+                contextual,
+                declared,
+                &mut visited,
+                settle,
+            ));
             if context == LiteralContext::Keep {
                 break;
             }
@@ -1604,12 +1615,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         contextual: SemanticNodeId,
         declared: &[TypeParamDecl],
         visited: &mut FxHashSet<SemanticNodeId>,
+        settle: crate::project_semantic_dispatch::relation::CarrierSettle<'_>,
     ) -> LiteralContext {
         let graph = self.graph();
         let authored = contextual;
-        let contextual = self.resolved_reduction_view(contextual, &|node| {
-            self.unwrap_identity_carrier_for_relation(node)
-        });
+        let contextual = self.resolved_reduction_view(contextual, settle);
         if !visited.insert(contextual) {
             return LiteralContext::Widen;
         }
@@ -1625,8 +1635,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 drop(data);
                 let mut context = LiteralContext::Widen;
                 for member in members {
-                    context =
-                        context.or(self.literal_context_admits(held, member, declared, visited));
+                    context = context
+                        .or(self.literal_context_admits(held, member, declared, visited, settle));
                     if context == LiteralContext::Keep {
                         break;
                     }
@@ -1644,10 +1654,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let Some(constraint) = constraint else {
                     return LiteralContext::Widen;
                 };
-                if held & self.base_constraint_primitive_kinds(constraint, declared) != 0 {
+                if held & self.base_constraint_primitive_kinds(constraint, declared, settle) != 0 {
                     return LiteralContext::Keep;
                 }
-                return self.literal_context_admits(held, constraint, declared, visited);
+                return self.literal_context_admits(held, constraint, declared, visited, settle);
             }
             Some(SemanticNodeData::Literal(value)) => LiteralKind::of(value).bit(),
             Some(SemanticNodeData::TemplateLiteral { .. } | SemanticNodeData::KeyOf { .. }) => {
@@ -1687,20 +1697,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// (`maybeTypeOfKind` over `getBaseConstraintOfType`): its `string`,
     /// `number` and `bigint` constituents, read through named carriers and
     /// the constraints of the type parameters it names; a generic `keyof`
-    /// may be a `string` or a `number`.
+    /// may be a `string` or a `number`. Every carrier is read through
+    /// `settle`.
     fn base_constraint_primitive_kinds(
         &self,
         constraint: SemanticNodeId,
         declared: &[TypeParamDecl],
+        settle: crate::project_semantic_dispatch::relation::CarrierSettle<'_>,
     ) -> u8 {
         let graph = self.graph();
         let mut kinds = 0u8;
         let mut pending = vec![constraint];
         let mut seen = FxHashSet::default();
         while let Some(node) = pending.pop() {
-            let node = self.resolved_reduction_view(node, &|node| {
-                self.unwrap_identity_carrier_for_relation(node)
-            });
+            let node = self.resolved_reduction_view(node, settle);
             if !seen.insert(node) {
                 continue;
             }
@@ -1737,9 +1747,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     drop(data);
                     if matches!(
                         graph
-                            .node_data(self.resolved_reduction_view(base, &|node| {
-                                self.unwrap_identity_carrier_for_relation(node)
-                            }))
+                            .node_data(self.resolved_reduction_view(base, settle))
                             .as_deref(),
                         Some(SemanticNodeData::TypeParam { .. })
                     ) {

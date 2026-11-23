@@ -117,9 +117,15 @@ through no other: intersection distribution (`distribute_intersection` →
 `intersection_parts`' object-type check), supertype reduction
 (`reduce_arms_to_supertypes`, `subtype_reduced_union`,
 `finalize_evolving_array`: the reduction views, `unit_typed_properties` and
-`may_be_below_a_primitive`), and the function joins that reduce through
+`may_be_below_a_primitive`), the function joins that reduce through
 them (`join_flow_return_contributors`, and `attach_function_kind_wrap`'s
-yield join). The flow evaluator passes its requested walk
+yield join), the collapse class of a disjoint pair
+(`nodes_comparable_settled` → `checker_intersection_collapse`, its union
+arms and discriminant members), the indexed predicate narrow's key reads
+(`assignability_refuting_keys`, `closed_object_own_string_keys`), and the
+literal-context reader (`literal_of_contextual_type`, its constraint
+walk `base_constraint_primitive_kinds`). The relation's own descent stays
+the relation authority's. The flow evaluator passes its requested walk
 (`settle_carrier`, and the frame algebra's `DispatchFlowAlgebra::settle` for
 product joins), and the root read's own joins, made after its evaluator
 returns but inside its frame, pass the same requested walk

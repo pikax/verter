@@ -1572,7 +1572,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     return (true, false);
                 }
-                match self.nodes_comparable(left, right) {
+                match self.nodes_comparable_settled(left, right, settle) {
                     ComparabilityVerdict::Disjoint(proof)
                         if proof.checker_reduces_intersection_to_never() =>
                     {
@@ -11358,10 +11358,14 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
     fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool;
     fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId>;
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId;
+    /// The checker's `isLiteralOfContextualType`
+    /// ([`ProjectSemanticDispatch::literal_of_contextual_type`]), each
+    /// carrier read through `settle`.
     fn literal_of_contextual_type(
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
+        settle: CarrierSettle<'_>,
     ) -> bool;
     /// The union of `members` under subtype reduction
     /// ([`ProjectSemanticDispatch::subtype_reduced_union`]), each carrier
@@ -11536,7 +11540,15 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
     ) -> Option<SemanticNodeId>;
     fn materialize_flow_return_wrap(&self, result: FlowReturnResult) -> FlowReturnResult;
     fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool;
-    fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict;
+    /// Whether `a` and `b` can share an inhabitant
+    /// ([`ProjectSemanticDispatch::nodes_comparable_settled`]), a disjoint
+    /// pair's collapse class reading each carrier through `settle`.
+    fn nodes_comparable(
+        &self,
+        a: SemanticNodeId,
+        b: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> ComparabilityVerdict;
     fn normalize_node_for_structural_fact_demand(
         &self,
         node: SemanticNodeId,
@@ -11712,12 +11724,23 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
     ) -> SemanticNodeId;
     fn type_parameter_apparent_receiver(&self, receiver: SemanticNodeId) -> SemanticNodeId;
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>>;
+    /// The keys refuting assignability to `target`
+    /// ([`ProjectSemanticDispatch::assignability_refuting_keys`]), its
+    /// carriers read through `settle`.
     fn assignability_refuting_keys(
         &self,
         target: SemanticNodeId,
         canonical: &str,
+        settle: CarrierSettle<'_>,
     ) -> Option<Vec<Arc<str>>>;
-    fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>>;
+    /// A plain closed object's own keys
+    /// ([`ProjectSemanticDispatch::closed_object_own_string_keys`]), its
+    /// carriers read through `settle`.
+    fn closed_object_own_string_keys(
+        &self,
+        source: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> Option<Vec<Arc<str>>>;
     fn unique_symbol_identity_for_typeof_node(
         &self,
         node: SemanticNodeId,
@@ -12316,9 +12339,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
+        settle: CarrierSettle<'_>,
     ) -> bool {
         body_read_site!("literal_of_contextual_type");
-        ProjectSemanticDispatch::literal_of_contextual_type(self, candidate, contextual, &[])
+        ProjectSemanticDispatch::literal_of_contextual_type(
+            self,
+            candidate,
+            contextual,
+            &[],
+            settle,
+        )
     }
     fn subtype_reduced_union(
         &self,
@@ -12642,9 +12672,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         body_read_site!("mentions_node");
         ProjectSemanticDispatch::mentions_node(self, node, target)
     }
-    fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict {
+    fn nodes_comparable(
+        &self,
+        a: SemanticNodeId,
+        b: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> ComparabilityVerdict {
         body_read_site!("nodes_comparable");
-        ProjectSemanticDispatch::nodes_comparable(self, a, b)
+        ProjectSemanticDispatch::nodes_comparable_settled(self, a, b, settle)
     }
     fn normalize_node_for_structural_fact_demand(
         &self,
@@ -12898,13 +12933,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         target: SemanticNodeId,
         canonical: &str,
+        settle: CarrierSettle<'_>,
     ) -> Option<Vec<Arc<str>>> {
         body_read_site!("assignability_refuting_keys");
-        ProjectSemanticDispatch::assignability_refuting_keys(self, target, canonical)
+        ProjectSemanticDispatch::assignability_refuting_keys(self, target, canonical, settle)
     }
-    fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>> {
+    fn closed_object_own_string_keys(
+        &self,
+        source: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> Option<Vec<Arc<str>>> {
         body_read_site!("closed_object_own_string_keys");
-        ProjectSemanticDispatch::closed_object_own_string_keys(self, source)
+        ProjectSemanticDispatch::closed_object_own_string_keys(self, source, settle)
     }
     fn unique_symbol_identity_for_typeof_node(
         &self,
@@ -13427,9 +13467,10 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
+        settle: CarrierSettle<'_>,
     ) -> bool {
         self.driver
-            .literal_of_contextual_type(candidate, contextual)
+            .literal_of_contextual_type(candidate, contextual, settle)
     }
     fn subtype_reduced_union(
         &self,
@@ -13697,8 +13738,13 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool {
         self.driver.mentions_node(node, target)
     }
-    fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict {
-        self.driver.nodes_comparable(a, b)
+    fn nodes_comparable(
+        &self,
+        a: SemanticNodeId,
+        b: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> ComparabilityVerdict {
+        self.driver.nodes_comparable(a, b, settle)
     }
     fn normalize_node_for_structural_fact_demand(
         &self,
@@ -13920,11 +13966,17 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         &self,
         target: SemanticNodeId,
         canonical: &str,
+        settle: CarrierSettle<'_>,
     ) -> Option<Vec<Arc<str>>> {
-        self.driver.assignability_refuting_keys(target, canonical)
+        self.driver
+            .assignability_refuting_keys(target, canonical, settle)
     }
-    fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>> {
-        self.driver.closed_object_own_string_keys(source)
+    fn closed_object_own_string_keys(
+        &self,
+        source: SemanticNodeId,
+        settle: CarrierSettle<'_>,
+    ) -> Option<Vec<Arc<str>>> {
+        self.driver.closed_object_own_string_keys(source, settle)
     }
     fn unique_symbol_identity_for_typeof_node(
         &self,
@@ -17690,14 +17742,15 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     }
 
     /// The checker's `isLiteralOfContextualType`, decided by the one
-    /// literal-context classifier the call executor also reads.
+    /// literal-context classifier the call executor also reads, each
+    /// carrier it looks through requested on this evaluation's body.
     fn literal_of_contextual_type(
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
     ) -> bool {
         self.dispatch
-            .literal_of_contextual_type(candidate, contextual)
+            .literal_of_contextual_type(candidate, contextual, &|node| self.settle_carrier(node))
     }
 
     /// The checker's contextual type of the property `name` of an object
@@ -22479,7 +22532,8 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         a: SemanticNodeId,
         b: SemanticNodeId,
     ) -> super::relation::ComparabilityVerdict {
-        self.dispatch.nodes_comparable(a, b)
+        self.dispatch
+            .nodes_comparable(a, b, &|node| self.settle_carrier(node))
     }
 
     /// Apply a guard's facts for one branch (`positive` = the branch the
@@ -24223,7 +24277,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let b_arms = self.enumerated_union_arms_or_self(b);
         for a_arm in self.enumerated_union_arms_or_self(a) {
             for &b_arm in &b_arms {
-                let verdict = match self.dispatch.nodes_comparable(a_arm, b_arm) {
+                let comparable = self
+                    .dispatch
+                    .nodes_comparable(a_arm, b_arm, &|node| self.settle_carrier(node));
+                let verdict = match comparable {
                     ComparabilityVerdict::Disjoint(_) => Some(false),
                     ComparabilityVerdict::Undecided => None,
                     ComparabilityVerdict::Overlaps => {
