@@ -26,10 +26,18 @@ use rustc_hash::FxHashMap;
 pub const FALLTHROUGH_PRELUDE: PreludeDeclaration = PreludeDeclaration {
     key: "50-fallthrough",
     text: concat!(
-        "declare const __VerterRootProbe: boolean;\n",
-        "declare function __VerterRootArm<W>(w: W): { readonly __verterRootArm: W };\n",
         "type __VerterFallthroughKeys<D> = D extends unknown ? keyof D : never;\n",
         "type __VerterFallthrough<R, D> = R extends unknown ? Partial<Omit<R, Exclude<__VerterFallthroughKeys<D>, 'class' | 'style'>>> : never;\n",
+    ),
+};
+
+/// The probe and marker a component root arm returns its surface through;
+/// declared only where an arm does.
+pub const ROOT_ARM_PRELUDE: PreludeDeclaration = PreludeDeclaration {
+    key: "51-fallthrough-root-arm",
+    text: concat!(
+        "declare const __VerterRootProbe: boolean;\n",
+        "declare function __VerterRootArm<W>(w: W): { readonly __verterRootArm: W };\n",
     ),
 };
 
@@ -103,7 +111,11 @@ impl FallthroughProjection {
         if self.pending || !self.complete {
             Vec::new()
         } else {
-            vec![NATIVE_ELEMENT_PRELUDE, FALLTHROUGH_PRELUDE]
+            let mut preludes = vec![NATIVE_ELEMENT_PRELUDE, FALLTHROUGH_PRELUDE];
+            if !self.root_statements.is_empty() {
+                preludes.push(ROOT_ARM_PRELUDE);
+            }
+            preludes
         }
     }
     #[must_use]
@@ -275,10 +287,15 @@ fn root_type(
                 .observations
                 .iter()
                 .find(|observation| observation.use_id == *id)?;
-            if matches!(
-                observation.source,
-                ComponentSource::Dynamic | ComponentSource::Recursive | ComponentSource::Unresolved
-            ) {
+            // A recursive arm would read the props this carrier is defining.
+            if observation.imports_carrier
+                || matches!(
+                    observation.source,
+                    ComponentSource::Dynamic
+                        | ComponentSource::Recursive
+                        | ComponentSource::Unresolved
+                )
+            {
                 return None;
             }
             let key_plan = attributes

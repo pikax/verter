@@ -688,7 +688,9 @@ impl VuePublicConstructorContract {
             } else {
                 returned
             };
-            let returned = if provider == SETUP_SCOPE_PROVIDER {
+            // Only a setup scope that returns component root arms needs them
+            // filtered out of its exposed surface.
+            let returned = if provider == SETUP_SCOPE_PROVIDER && extras.reads_setup_return {
                 format!("Exclude<{returned}, {{ readonly __verterRootArm: unknown }}>")
             } else {
                 returned

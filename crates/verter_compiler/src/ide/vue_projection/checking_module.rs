@@ -89,6 +89,9 @@ use crate::work_ledger::CompilerWorkLedger;
 /// Function that holds the setup statements, the template scope and the
 /// `defineExpose` return. One per module; the setup body is checked once.
 pub const SETUP_SCOPE: &str = "__VerterSetupScope";
+/// Ends a setup scope whose component root arms return their surface and
+/// which returns nothing else, so every path returns (`noImplicitReturns`).
+const ROOT_ARM_FALLBACK_RETURN: &str = "return undefined;\n";
 /// Identity wrapper the `defineExpose` callee is replaced with.
 pub const EXPOSED_VALUE: &str = "__VerterExposed";
 /// Setup-scope binding that holds the exposed value the scope returns.
@@ -405,8 +408,15 @@ pub fn compose_checking_module(
     };
     // An external script's instance is its own module's: the carrier holds
     // no public contract for it, so nothing is declared here.
+    // A standalone declaration has no setup scope to read a component root's
+    // surface from, so it publishes the declared contract alone.
+    let standalone_extras = if declaration_extras.reads_setup_return {
+        PublicDeclarationExtras::default()
+    } else {
+        declaration_extras.clone()
+    };
     let declarations = (declarations && !forwards_external_default).then(|| {
-        project_vue_declarations(source, canonical_id, &public, &capture, &declaration_extras)
+        project_vue_declarations(source, canonical_id, &public, &capture, &standalone_extras)
     });
     if let (Some(external), Some(normal)) = (external, blocks.normal) {
         ops.extend(external_script_imports(
@@ -894,12 +904,13 @@ fn compose_template_scope(
         .module
         .normal_script_bindings
         .retain(|name| public.is_normal_value_binding(name));
+    let reads_setup_return = fallthrough.declaration_extras().reads_setup_return;
     let context = project_template_context(
         &context_script,
         public,
         &referenced,
         &kinds,
-        fallthrough.declaration_extras().reads_setup_return,
+        reads_setup_return,
     );
     let reads_context = statements.iter().any(|statement| {
         statement.fragment.pieces.iter().any(|piece| match piece {
@@ -916,7 +927,9 @@ fn compose_template_scope(
         host: None,
         fragment: CheckingFragment::synth("\n"),
     }];
-    if reads_context || !context.bindings.is_empty() {
+    // The template aliases a component root bridge declares are read by the
+    // context statement alone, so it stays even when nothing else reads it.
+    if reads_context || !context.bindings.is_empty() || reads_setup_return {
         preludes.push(TEMPLATE_CONTEXT_PRELUDE);
         scope.push(ScopeStatement {
             family: ObligationFamily::Scaffold,
@@ -1872,6 +1885,8 @@ fn module_layout(
                 ops.push(delete(exposed.callee));
                 ops.push(insert(exposed.callee.start, EXPOSED_VALUE.to_string()));
                 close.push_str(&format!("return {};\n", exposed.returned));
+            } else if extras.reads_setup_return {
+                close.push_str(ROOT_ARM_FALLBACK_RETURN);
             }
             close.push_str(&format!("}}\nvoid {SETUP_SCOPE};\n"));
             // The template scope follows the setup statements, before the
@@ -1902,12 +1917,17 @@ fn module_layout(
                 &mut hoisted,
             )?;
             module_scope.push_str(&format!("function {SETUP_SCOPE}() {{\n"));
+            let fallback = if extras.reads_setup_return {
+                ROOT_ARM_FALLBACK_RETURN
+            } else {
+                ""
+            };
             scope_at(
                 &mut gaps,
                 at,
                 template,
                 &module_scope,
-                &format!("\n}}\nvoid {SETUP_SCOPE};\n"),
+                &format!("\n{fallback}}}\nvoid {SETUP_SCOPE};\n"),
             )
         }
     };

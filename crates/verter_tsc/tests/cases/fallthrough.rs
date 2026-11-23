@@ -545,6 +545,26 @@ fn run_fallthrough_matrix(projection: bool) {
         failing
     );
 
+    // A Reject* file must fail for the right reason: its attribute or prop is
+    // not assignable to the surface it reaches. Any other error (a module
+    // without a declaration, a circular generated type, a config error) would
+    // satisfy the matrix above by accident.
+    if projection {
+        let unrelated: Vec<&str> = stdout
+            .lines()
+            .filter(|line| {
+                line.split_once(": error TS")
+                    .and_then(|(_, rest)| rest.split(':').next())
+                    .and_then(|code| code.parse::<u32>().ok())
+                    .is_some_and(|code| !matches!(code, 2322 | 2345 | 2353 | 2769))
+            })
+            .collect();
+        assert!(
+            unrelated.is_empty(),
+            "every error must be an assignability rejection: {unrelated:#?}\n{stdout}"
+        );
+    }
+
     // The child components themselves must type-check cleanly — a widened
     // stub that broke its own component would show up here.
     for child in [

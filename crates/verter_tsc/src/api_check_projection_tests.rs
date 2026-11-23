@@ -159,6 +159,18 @@ fn check_with(flags: &[&str], inputs: &[Input<'_>]) -> Option<Vec<(String, u32)>
         files,
     })
     .expect("the engine checks the program");
+    // Shown with a failing comparison: the code alone does not say which
+    // statement failed.
+    for diagnostic in &diagnostics {
+        eprintln!(
+            "{}({},{}): TS{} {}",
+            diagnostic.file,
+            diagnostic.line,
+            diagnostic.col,
+            diagnostic.ts_code,
+            diagnostic.message
+        );
+    }
     let mut found: Vec<(String, u32)> = diagnostics
         .into_iter()
         .map(|diagnostic| {

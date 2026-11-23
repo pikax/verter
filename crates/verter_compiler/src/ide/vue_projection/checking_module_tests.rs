@@ -1248,7 +1248,7 @@ fn an_await_in_class_heritage_makes_the_scope_async() {
     offset_of(&text, "async function __VerterSetupScope() {");
     offset_of(
         &text,
-        "ShallowUnwrapRef<Exclude<Awaited<ReturnType<typeof __VerterSetupScope>>, { readonly __verterRootArm: unknown }>>",
+        "ShallowUnwrapRef<Awaited<ReturnType<typeof __VerterSetupScope>>>",
     );
 }
 
@@ -1289,7 +1289,7 @@ fn top_level_await_makes_the_scope_async_and_the_exposed_type_awaited() {
     offset_of(&text, "async function __VerterSetupScope() {");
     offset_of(
         &text,
-        "ShallowUnwrapRef<Exclude<Awaited<ReturnType<typeof __VerterSetupScope>>, { readonly __verterRootArm: unknown }>>",
+        "ShallowUnwrapRef<Awaited<ReturnType<typeof __VerterSetupScope>>>",
     );
 }
 
@@ -1328,7 +1328,7 @@ fn expose_binds_the_value_the_setup_scope_returns() {
     offset_of(&text, "declare function __VerterExposed<T>(exposed: T): T;");
     offset_of(
         &text,
-        "ShallowUnwrapRef<Exclude<ReturnType<typeof __VerterSetupScope>, { readonly __verterRootArm: unknown }>>",
+        "ShallowUnwrapRef<ReturnType<typeof __VerterSetupScope>>",
     );
     assert!(
         !text.contains("defineExpose("),
@@ -3539,4 +3539,91 @@ fn fallthrough_component_root_fixtures_are_fully_checked() {
         let module = composed(&source);
         assert!(module.is_complete(), "{path}: {:?}", module.withheld);
     }
+}
+
+#[test]
+fn fallthrough_native_roots_declare_no_root_arm_or_filter() {
+    let module = composed(
+        r#"<script setup lang="ts">
+defineProps<{ value: number }>();
+defineExpose({ focus() {} });
+</script><template><a/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(!text.contains("__VerterRootProbe"), "{text}");
+    assert!(!text.contains("__VerterRootArm"), "{text}");
+    assert!(!text.contains("__verterRootArm"), "{text}");
+    assert!(!text.contains("__VerterTemplateInstance"), "{text}");
+}
+
+#[test]
+fn fallthrough_component_root_scope_returns_on_every_path_and_reads_its_template_aliases() {
+    let module = composed(
+        r#"<script setup lang="ts">
+import Child from './Child.vue';
+</script><template><Child/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(
+        text.contains("if (__VerterRootProbe) return __VerterRootArm"),
+        "{text}"
+    );
+    // Under `noImplicitReturns` the probe's return needs a fallback.
+    assert!(text.contains("return undefined;\n}"), "{text}");
+    // A static root reads no context, yet the context statement keeps the
+    // template aliases read under `noUnusedLocals`.
+    assert!(
+        text.contains("null! as __VerterTemplateInstance & __VerterTemplateProps"),
+        "{text}"
+    );
+}
+
+#[test]
+fn fallthrough_component_root_standalone_declaration_reads_no_setup_scope() {
+    let module = composed_declaring(
+        r#"<script setup lang="ts">
+import Child from './Child.vue';
+defineProps<{ value: number }>();
+</script><template><Child :value="value"/></template>"#,
+    );
+    assert!(
+        module
+            .checking_text()
+            .contains("Extract<ReturnType<typeof __VerterSetupScope>"),
+        "{}",
+        module.checking_text()
+    );
+    let product = module
+        .declarations
+        .as_ref()
+        .expect("a clean carrier carries its declaration product");
+    assert!(product.is_publishable(), "{:?}", product.diagnostics);
+    let declaration = &product.declaration_source;
+    assert!(!declaration.contains("__VerterSetupScope"), "{declaration}");
+    assert!(!declaration.contains("__verterRootArm"), "{declaration}");
+}
+
+#[test]
+fn fallthrough_self_imported_root_arm_never_reads_its_own_props() {
+    let module = composed(
+        r#"<script setup lang="ts">
+import Self from './Comp.vue';
+defineProps<{ depth: number }>();
+</script><template><Self v-if="depth > 0" :depth="depth - 1"/><div v-else/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(!text.contains("if (__VerterRootProbe)"), "{text}");
+    assert!(!text.contains("__verterRootArm"), "{text}");
+    // A different module with the same basename is an ordinary child.
+    let module = composed(
+        r#"<script setup lang="ts">
+import Other from './nested/Comp.vue';
+defineProps<{ depth: number }>();
+</script><template><Other v-if="depth > 0" :depth="depth - 1"/><div v-else/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(
+        text.contains("if (__VerterRootProbe) return __VerterRootArm"),
+        "{text}"
+    );
 }
