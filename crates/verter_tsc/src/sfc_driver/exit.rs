@@ -40,13 +40,13 @@ pub struct RunOutcome {
 /// `Failed` when any project has an engine failure, any carrier is
 /// unreadable, any mapper diagnostic is `ProjectionInternal`, or the graph
 /// has a problem. Otherwise `Diagnostics` when any error exists. Otherwise
-/// `Clean`. Warnings do not change the status.
+/// `Clean`. Warnings, a carrier's own included, do not change the status.
 #[must_use]
 pub fn exit_status(outcome: &RunOutcome) -> ExitStatus {
     let failed = !outcome.graph_problems.is_empty()
         || outcome.projects.iter().any(|project| {
             project.engine_failure.is_some()
-                || project.carriers.iter().any(|carrier| {
+                || project.checked_carriers().any(|carrier| {
                     carrier.unreadable
                         || carrier
                             .result
@@ -63,10 +63,13 @@ pub fn exit_status(outcome: &RunOutcome) -> ExitStatus {
             .diagnostics
             .iter()
             .any(|d| d.severity == Severity::Error)
-            || project
-                .carriers
-                .iter()
-                .any(|carrier| !carrier.result.diagnostics.is_empty())
+            || project.checked_carriers().any(|carrier| {
+                carrier
+                    .result
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| !diagnostic.code.is_warning())
+            })
             || project
                 .attributed
                 .iter()
@@ -94,7 +97,7 @@ pub fn outcome_diagnostics(outcome: &RunOutcome) -> Vec<Diagnostic> {
     }
     for project in &outcome.projects {
         let mut lines = project.diagnostics.clone();
-        for carrier in &project.carriers {
+        for carrier in project.checked_carriers() {
             lines.extend(carrier.diagnostics());
             lines.extend(partial_check(carrier));
         }
@@ -181,7 +184,7 @@ pub fn outcome_renderer(outcome: &RunOutcome, encoding: ColumnEncoding) -> Posit
     let checked = outcome
         .projects
         .iter()
-        .flat_map(|project| &project.carriers)
+        .flat_map(|project| project.checked_carriers())
         // An unreadable carrier has no checked text to position in.
         .filter(|carrier| !carrier.unreadable)
         .map(|carrier| (carrier.carrier.to_string(), carrier.source.clone()))
@@ -278,7 +281,7 @@ struct AuthoredSources {
 impl AuthoredSources {
     fn new(outcome: &RunOutcome) -> Self {
         let mut texts = HashMap::new();
-        for carrier in outcome.projects.iter().flat_map(|p| &p.carriers) {
+        for carrier in outcome.projects.iter().flat_map(|p| p.checked_carriers()) {
             texts
                 .entry(InjectedPathKey::new(&carrier.carrier))
                 .or_insert_with(|| {

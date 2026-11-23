@@ -1,7 +1,7 @@
 //! One configured project as one certified engine program.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use verter_session::external_ts::{
@@ -20,6 +20,7 @@ use verter_session::sfc_projection_mapper::{
 use verter_session::sfc_projection_observations::{
     projection_input_basis, CertifiedProjectionBinding, SnapshotQualifiedObservation,
 };
+use verter_session_query::resolution::ProjectId;
 use verter_span::path::{canonicalize_path, InjectedPathKey};
 use verter_tsgo_api::toolchain::discovery::Resolution;
 use verter_workspace::tsgo_virtual_config::{augment_tsconfig_bytes_with, VirtualConfigOverrides};
@@ -37,6 +38,9 @@ use crate::reporter::{Diagnostic, Severity, VerterCode};
 pub struct ProjectProgramInputs<'a> {
     pub project: &'a DriverProject,
     pub carriers: &'a [CarrierProjection],
+    /// Carriers outside the membership that the program reaches by import.
+    /// They are served, never rooted.
+    pub imported: &'a [CarrierProjection],
     /// The surfaces another framework's lane renders for the member carriers
     /// this project does not own.
     pub surfaces: &'a [ForeignSurface],
@@ -132,15 +136,20 @@ pub fn project_config_bytes(
     (config, bytes)
 }
 
-/// Exactly one overlay per carrier, named by the adapter's descriptor, then
-/// one per foreign surface at the path its lane names. A surface its lane
-/// could not render is an empty module, as a failed carrier is.
+/// Exactly one overlay per carrier, member or imported, named by the
+/// adapter's descriptor, then one per foreign surface at the path its lane
+/// names. A surface its lane could not render is an empty module, as a failed
+/// carrier is.
 pub fn project_overlay(inputs: &ProjectProgramInputs<'_>) -> Vec<OverlayFile> {
-    let carriers = inputs.carriers.iter().map(|carrier| OverlayFile {
-        path: carrier.result.virtual_file.to_string(),
-        content: carrier.result.text.to_string(),
-        remap: RemapKind::Passthrough,
-    });
+    let carriers = inputs
+        .carriers
+        .iter()
+        .chain(inputs.imported)
+        .map(|carrier| OverlayFile {
+            path: carrier.result.virtual_file.to_string(),
+            content: carrier.result.text.to_string(),
+            remap: RemapKind::Passthrough,
+        });
     let surfaces = inputs.surfaces.iter().map(|surface| OverlayFile {
         path: surface.path.clone(),
         content: surface.text.as_deref().unwrap_or(EMPTY_MODULE).to_string(),
@@ -157,6 +166,11 @@ const EMPTY_MODULE: &str = "export {};";
 pub struct ProjectCheck {
     pub config: Arc<str>,
     pub carriers: Vec<CarrierProjection>,
+    /// Carriers outside the membership that the program reached by import,
+    /// projected under this project's options, in the order they were
+    /// reached. Their diagnostics are reported as tsc reports a non-root
+    /// source file; they are neither roots nor published.
+    pub imported_carriers: Vec<CarrierProjection>,
     /// Member carriers the mapper does not own (another framework's), in
     /// graph order. They are neither projected nor given to the engine.
     pub unowned_carriers: Vec<PathBuf>,
@@ -170,12 +184,25 @@ pub struct ProjectCheck {
     pub engine_failure: Option<String>,
 }
 
-struct ProjectTransforms<'a>(&'a [CarrierProjection], Option<&'a dyn WorkspaceRead>);
+impl ProjectCheck {
+    /// Every carrier the program checked: the members, then the carriers it
+    /// reached by import.
+    pub fn checked_carriers(&self) -> impl Iterator<Item = &CarrierProjection> {
+        self.carriers.iter().chain(&self.imported_carriers)
+    }
+}
+
+struct ProjectTransforms<'a> {
+    carriers: &'a [CarrierProjection],
+    imported: &'a [CarrierProjection],
+    workspace: Option<&'a dyn WorkspaceRead>,
+}
 impl TransformLookup for ProjectTransforms<'_> {
     fn result_for_virtual(&self, path: &str) -> Option<Arc<MapperTransformResult>> {
         let key = InjectedPathKey::new(path);
-        self.0
+        self.carriers
             .iter()
+            .chain(self.imported)
             .find(|c| InjectedPathKey::new(&c.result.virtual_file) == key)
             .map(|c| c.result.clone())
     }
@@ -185,7 +212,9 @@ impl TransformLookup for ProjectTransforms<'_> {
         // paths must be present in the retained workspace, including imports
         // outside the configured root inventory and related-information files.
         self.result_for_virtual(path).is_none()
-            && self.1.is_some_and(|workspace| workspace.file_exists(path))
+            && self
+                .workspace
+                .is_some_and(|workspace| workspace.file_exists(path))
     }
 }
 
@@ -214,7 +243,14 @@ pub(crate) fn missing_reference_diagnostics(
             })
         })
         .collect::<Vec<_>>();
-    attribute_diagnostics(&raw, &ProjectTransforms(&[], None))
+    attribute_diagnostics(
+        &raw,
+        &ProjectTransforms {
+            carriers: &[],
+            imported: &[],
+            workspace: None,
+        },
+    )
 }
 
 /// One project's engine program and mapper project, kept open between checks
@@ -290,7 +326,9 @@ pub(crate) fn check_project(
 /// Check one project through its live program. With `changes`, only the
 /// listed carriers are projected again, and the program is advanced in its
 /// running engine when its input basis held. It is opened anew when the basis
-/// or the mapper settings moved, or when the previous session failed. The
+/// or the mapper settings moved, when the previous session failed, or when
+/// that session served a carrier outside the membership, so the carriers a
+/// program reaches by import are always those a fresh program reaches. The
 /// surfaces of foreign carriers that did not change are kept as well.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_live_project(
@@ -312,6 +350,7 @@ pub(crate) fn check_live_project(
     let mut check = ProjectCheck {
         config: config.clone(),
         carriers: Vec::new(),
+        imported_carriers: Vec::new(),
         unowned_carriers: unowned.into_iter().cloned().collect(),
         foreign_surfaces: Vec::new(),
         diagnostics: Vec::new(),
@@ -356,6 +395,14 @@ struct ProgramInputs<'a> {
     declarations: bool,
     /// Serves the member carriers of another framework.
     surfaces: Option<&'a dyn ForeignSurfaceSource>,
+}
+
+/// What admitting one carrier a program reached by import does.
+enum ReachedImport {
+    /// Served under the importing project's options.
+    Serve(String),
+    /// Warned about: its companion path holds a real file.
+    Conflict(String),
 }
 
 impl ProgramInputs<'_> {
@@ -530,17 +577,8 @@ impl ProgramInputs<'_> {
                 .filter(|surface| !previous.contains(*surface))
                 .map(|surface| surface.path.clone()),
         );
-        let inputs = ProjectProgramInputs {
-            project,
-            carriers: &check.carriers,
-            surfaces: &check.foreign_surfaces,
-            no_emit: true,
-        };
-        let (tsconfig_path, tsconfig_bytes) =
-            project_config_bytes(&inputs, driver.workspace.as_ref());
-        let overlay = project_overlay(&inputs);
-        // The virtual config's identity covers the carriers only: a surface is
-        // served, never a root.
+        // The virtual config's identity covers the member carriers only: an
+        // imported carrier and a surface are served, never roots.
         let paths = check
             .carriers
             .iter()
@@ -551,13 +589,51 @@ impl ProgramInputs<'_> {
             compute_virtual_config_identity(driver.workspace.as_ref(), config, &paths).to_hash16(),
             &settings.identity,
         );
+        // A program that served a carrier outside its membership is opened
+        // anew rather than advanced: the engine keeps every lookup for its
+        // session, so it cannot tell an import the program still has from
+        // one since removed, and the carriers it serves, with their
+        // diagnostics, must be exactly those a fresh program reaches. A
+        // member's checking module looked for at another dialect's path, or
+        // a carrier not found at all, leaves nothing to drop: such a program
+        // advances, and a carrier created since is reached below.
+        let advance = live.session.is_some()
+            && live
+                .certified
+                .as_ref()
+                .is_some_and(|certified| certified.input_basis() == &basis)
+            && changes
+                .as_ref()
+                .is_some_and(|changes| changes.previous.imported_carriers.is_empty());
+        let changes = changes.filter(|_| advance);
+        let inputs = ProjectProgramInputs {
+            project,
+            carriers: &check.carriers,
+            imported: &check.imported_carriers,
+            surfaces: &check.foreign_surfaces,
+            no_emit: true,
+        };
+        let (tsconfig_path, tsconfig_bytes) =
+            project_config_bytes(&inputs, driver.workspace.as_ref());
+        let mut overlay = project_overlay(&inputs);
+        let open = |live: &mut LiveProgram, overlay: &[OverlayFile]| {
+            if let Some(previous) = live.session.take() {
+                previous.close();
+            }
+            live.certified = None;
+            live.session = Some(EngineSession::open(TypecheckInputs {
+                engine: &engine.path,
+                cwd: &project.root,
+                tsconfig_path: tsconfig_path.clone(),
+                tsconfig_bytes: tsconfig_bytes.clone(),
+                files: overlay.to_vec(),
+            })?);
+            live.sessions_opened += 1;
+            Ok::<(), TypecheckError>(())
+        };
+        let mut advanced = false;
         match (&mut live.session, changes) {
-            (Some(session), Some(changes))
-                if live
-                    .certified
-                    .as_ref()
-                    .is_some_and(|certified| certified.input_basis() == &basis) =>
-            {
+            (Some(session), Some(changes)) => {
                 reprojected.extend(changes.paths.iter().cloned());
                 if let Err(error) = session.update(&tsconfig_bytes, &overlay, &reprojected) {
                     if let Some(failed) = live.session.take() {
@@ -566,20 +642,61 @@ impl ProgramInputs<'_> {
                     live.certified = None;
                     return Err(error);
                 }
+                advanced = true;
             }
-            (session, _) => {
-                if let Some(previous) = session.take() {
-                    previous.close();
+            _ => open(&mut *live, &overlay)?,
+        }
+        // A carrier outside the membership is reached when the program
+        // resolves an import of it: the engine looks for its checking module
+        // on disk and does not find it. Each such carrier is served under
+        // this project's options, as vue-tsc gives every carrier its program
+        // reaches a virtual file, and the program advances until it reaches
+        // no new one.
+        loop {
+            let session = live.session.as_mut().expect("the engine session is open");
+            // A real file at the module path is what the import resolved to.
+            let candidates = session
+                .host_reads()
+                .into_iter()
+                .filter_map(|read| {
+                    let carrier = driver.mapper.carrier_of_checking_module(&read)?;
+                    (!driver.workspace.file_exists(&read)).then_some(carrier)
+                })
+                .collect::<Vec<_>>();
+            let reached = self.reached_imports(&resolver, id, candidates, check);
+            if reached.is_empty() {
+                break;
+            }
+            // An advanced session keeps every lookup it ever made, so one of
+            // these may name a carrier only an import since removed looked
+            // for. Only a session opened on the current state tells which
+            // carriers the program reaches now.
+            if advanced {
+                open(&mut *live, &overlay)?;
+                advanced = false;
+                continue;
+            }
+            let session = live.session.as_mut().expect("the engine session is open");
+            let reached = self.admit_imported(&handle, reached, check);
+            if reached.is_empty() {
+                break;
+            }
+            check.imported_carriers.extend(reached);
+            overlay = project_overlay(&ProjectProgramInputs {
+                project,
+                carriers: &check.carriers,
+                imported: &check.imported_carriers,
+                surfaces: &check.foreign_surfaces,
+                no_emit: true,
+            });
+            // Each new module is reported as created, so the lookups that
+            // failed for it match again.
+            if let Err(error) = session.update(&tsconfig_bytes, &overlay, &[]) {
+                if let Some(failed) = live.session.take() {
+                    failed.close();
                 }
                 live.certified = None;
-                *session = Some(EngineSession::open(TypecheckInputs {
-                    engine: &engine.path,
-                    cwd: &project.root,
-                    tsconfig_path,
-                    tsconfig_bytes,
-                    files: overlay.clone(),
-                })?);
-                live.sessions_opened += 1;
+                return Err(error);
             }
         }
         let session = live.session.as_ref().expect("the engine session is open");
@@ -623,6 +740,79 @@ impl ProgramInputs<'_> {
         }
     }
 
+    /// What admitting the `candidates` the program reached by import would
+    /// do, in order, without doing it: each carrier it does not serve yet is
+    /// served, or warned about when its companion path holds a real file, as
+    /// a member is. A carrier that no longer exists is not served, and a
+    /// member is served as one or was refused as one.
+    fn reached_imports(
+        &self,
+        resolver: &WorkspaceProjectResolver<'_>,
+        id: ProjectId,
+        candidates: impl IntoIterator<Item = String>,
+        check: &ProjectCheck,
+    ) -> Vec<ReachedImport> {
+        let Self {
+            driver, project, ..
+        } = *self;
+        let workspace = driver.workspace.as_ref();
+        let mut served = project
+            .carriers
+            .iter()
+            .map(|carrier| InjectedPathKey::new(&carrier.to_string_lossy()))
+            .chain(
+                check
+                    .checked_carriers()
+                    .map(|carrier| InjectedPathKey::new(&carrier.carrier)),
+            )
+            // A carrier refused for its companion path is warned about once.
+            .chain(
+                check
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.verter_code == Some(VerterCode::CarrierPathConflict))
+                    .map(|d| InjectedPathKey::new(&d.file)),
+            )
+            .collect::<HashSet<_>>();
+        let mut reached = Vec::new();
+        for carrier in candidates {
+            if !workspace.file_exists(&carrier) || !served.insert(InjectedPathKey::new(&carrier)) {
+                continue;
+            }
+            reached.push(match resolver.resolve_in_project(id, &carrier) {
+                CarrierOwnershipResolution::Ambiguous { .. } => ReachedImport::Conflict(carrier),
+                _ => ReachedImport::Serve(carrier),
+            });
+        }
+        reached
+    }
+
+    /// Admit what [`Self::reached_imports`] found: warn about each conflict
+    /// and return the other carriers, each projected for this project.
+    fn admit_imported(
+        &self,
+        handle: &MapperProjectHandle,
+        reached: Vec<ReachedImport>,
+        check: &mut ProjectCheck,
+    ) -> Vec<CarrierProjection> {
+        let workspace = self.driver.workspace.as_ref();
+        let mut served = Vec::new();
+        for reached in reached {
+            match reached {
+                ReachedImport::Conflict(carrier) => {
+                    check.diagnostics.push(path_conflict_warning(carrier));
+                }
+                ReachedImport::Serve(carrier) => served.push(project_carrier(
+                    &self.driver.mapper,
+                    handle,
+                    Path::new(&carrier),
+                    workspace,
+                )),
+            }
+        }
+        served
+    }
+
     /// Bind the certified program, record the carriers' revisions, then
     /// collect, attribute and admit its diagnostics. Returns the certification.
     #[allow(clippy::too_many_arguments)]
@@ -645,8 +835,7 @@ impl ProgramInputs<'_> {
         };
         driver.admission.bind(&certification);
         let revisions = check
-            .carriers
-            .iter()
+            .checked_carriers()
             .map(|carrier| {
                 let read_set = ProjectionReadSet {
                     carrier: carrier.carrier.clone(),
@@ -666,7 +855,11 @@ impl ProgramInputs<'_> {
         let raw = session.diagnostics(overlay).map_err(Unpublished::Failed)?;
         let attributed = attribute_diagnostics(
             &raw,
-            &ProjectTransforms(&check.carriers, Some(driver.workspace.as_ref())),
+            &ProjectTransforms {
+                carriers: &check.carriers,
+                imported: &check.imported_carriers,
+                workspace: Some(driver.workspace.as_ref()),
+            },
         );
         for diagnostic in attributed {
             if let Some((carrier, revisions)) =

@@ -92,6 +92,20 @@ fn incomplete_or_cyclic_reference_closures_are_never_sent_to_the_child() {
 }
 
 #[test]
+fn a_missing_module_specifier_is_read_verbatim_at_its_quote_or_not_at_all() {
+    let text = "import C from \"../a/C.vue\";\nimport D from '../d/D.vue';\nimport E from \"e\\u0041.vue\";\nimport F from \"open\n";
+    let at = |needle: &str| text.find(needle).unwrap();
+    assert_eq!(string_literal_at(text, at("\"../a")), Some("../a/C.vue"));
+    assert_eq!(string_literal_at(text, at("'../d")), Some("../d/D.vue"));
+    // Not at a quote: the position names no literal.
+    assert_eq!(string_literal_at(text, at("../a")), None);
+    // An escape or an unclosed literal is not guessed at.
+    assert_eq!(string_literal_at(text, at("\"e\\")), None);
+    assert_eq!(string_literal_at(text, at("\"open")), None);
+    assert_eq!(string_literal_at(text, text.len() + 1), None);
+}
+
+#[test]
 fn build_arguments_preserve_paths_and_forward_only_requested_flags() {
     let build = EngineBuild {
         configs: vec![

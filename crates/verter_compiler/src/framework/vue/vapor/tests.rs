@@ -99,14 +99,51 @@ fn static_markup_preserves_template_payloads() {
             "<template><div><span>inner</span></div></template>",
             "<div><span>inner",
         ),
-        (
-            "<template><div><!-- hello --><span/>tail</div></template>",
-            "<div><!-- hello --><span>tail",
-        ),
         ("<template><br/></template>", "<br>"),
     ] {
         let output = super::test_support::assert_legacy(source);
         assert!(output.code.contains(expected), "{}", output.code);
+    }
+}
+
+#[test]
+fn an_empty_non_void_element_keeps_its_end_tag_before_later_siblings() {
+    // Vue 3.6.0-rc.15 writes `<span></span>tail`: without the end tag the
+    // static template makes the text a child of the empty `<span>`.
+    for (source, expected) in [
+        (
+            "<template><div><!-- hello --><span/>tail</div></template>",
+            "_template(\"<div><!-- hello --><span></span>tail\", 3)",
+        ),
+        (
+            "<template><div><textarea rows=6></textarea><div class=\"x\">{{ b }}</div></div></template>",
+            "_template(\"<div><textarea rows=6></textarea><div class=x> \", 1)",
+        ),
+        (
+            "<template><div><input v-model=\"a\"><span/><b>{{ x }}</b></div></template>",
+            "_template(\"<div><input><span></span><b> \", 1)",
+        ),
+    ] {
+        let output = super::test_support::render(source);
+        assert!(output.code.contains(expected), "{expected}\n{}", output.code);
+    }
+}
+
+#[test]
+fn text_after_the_last_element_child_keeps_its_node() {
+    // Vue 3.6.0-rc.15: `<div><p>x</p> ` keeps the text node the effect sets,
+    // reached as the paragraph's next sibling.
+    let output = super::test_support::render("<template><div><p>x</p> {{ a }}</div></template>");
+    for expected in [
+        "_template(\"<div><p>x</p> \", 1)",
+        "= _next(_child(n1), true)",
+        "_setText(n0, \" \" + _toDisplayString(_ctx.a))",
+    ] {
+        assert!(
+            output.code.contains(expected),
+            "{expected}\n{}",
+            output.code
+        );
     }
 }
 
@@ -318,4 +355,29 @@ fn function_scoped_source_vars_stay_local_across_blocks() {
     let source = "<template><p v-for=\"x in (() => { { var values = [1] } return values })()\">{{ x }}</p></template>";
     let output = super::test_support::render(source);
     assert!(output.code.contains("return values"), "{}", output.code);
+}
+
+#[test]
+fn a_root_v_once_or_v_memo_covers_text_runs_beside_elements() {
+    // Vue 3.6.0-rc.15: a text run beside an element is its own node, and its
+    // text effect is still one of the block's, frozen by `v-once`.
+    let once =
+        super::test_support::render("<template><div v-once>{{ a }}<p/>{{ b }}</div></template>");
+    for expected in [
+        "_setText(n0, _toDisplayString(_ctx.a))",
+        "_setText(n1, _toDisplayString(_ctx.b))",
+    ] {
+        assert!(once.code.contains(expected), "{expected}\n{}", once.code);
+    }
+    assert!(!once.code.contains("_renderEffect("), "{}", once.code);
+    let memo = super::test_support::render(
+        "<template><div v-memo=\"[x]\">{{ a }}<p/>{{ b }}</div></template>",
+    );
+    assert!(memo.code.contains("_withMemo([x]"), "{}", memo.code);
+    assert_eq!(
+        memo.code.matches("_renderEffect(").count(),
+        1,
+        "{}",
+        memo.code
+    );
 }

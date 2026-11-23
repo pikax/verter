@@ -221,26 +221,6 @@ export class ProjectSession {
   }
 
   /**
-   * Full native component-meta query with resolution sidecars.
-   */
-  getResolvedComponentMeta(canonicalId: string): unknown | null {
-    return this._memoizedDecode("resolved", canonicalId, () => {
-      const nativeSession = this._nativeSession as {
-        getResolvedComponentMeta?: (canonicalId: string) => unknown | null;
-      };
-      const getResolvedComponentMeta = nativeSession.getResolvedComponentMeta;
-      if (typeof getResolvedComponentMeta !== "function") {
-        throw new Error(
-          "Resolved component-meta query is unavailable on the active native session",
-        );
-      }
-      const payload = getResolvedComponentMeta.call(this._nativeSession, canonicalId);
-      if (payload === null || payload === undefined) return null;
-      return decodeComponentMetaPayload(payload as ArrayBuffer | ArrayBufferView);
-    });
-  }
-
-  /**
    * Internal memo helper. Returns frozen decoded result on hit,
    * or decodes, freezes, and caches on miss.
    */

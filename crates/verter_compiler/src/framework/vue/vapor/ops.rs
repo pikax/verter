@@ -61,6 +61,12 @@ impl<'c> Runs<'c> {
     pub(super) fn get(&self, id: RunId) -> &[Part<'c>] {
         &self.parts[self.ranges[id.0 as usize].clone()]
     }
+
+    /// Make `id` read `to`'s parts from now on. Output reads runs only when
+    /// it is written, so every reference to `id` writes the new parts.
+    pub(super) fn redirect(&mut self, id: RunId, to: RunId) {
+        self.ranges[id.0 as usize] = self.ranges[to.0 as usize].clone();
+    }
 }
 
 /// One navigated child, declared once in the closure that uses it.

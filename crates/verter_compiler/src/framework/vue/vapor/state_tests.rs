@@ -32,8 +32,8 @@ fn counters_start_at_zero_for_each_state() {
 #[test]
 fn templates_are_written_in_index_order_with_flags() {
     let mut state = state();
-    let first = state.declare_template("<div>hi".into(), true, false);
-    let second = state.declare_template("<p>".into(), false, true);
+    let first = state.declare_template("<div>hi".into(), true, false, 0);
+    let second = state.declare_template("<p>".into(), false, true, 0);
     assert_eq!((first, second), (0, 1));
     state.write_preamble();
     assert!(state.helpers().has(VaporHelper::Template));

@@ -18,9 +18,7 @@ use verter_workspace::workspace_snapshot::ProjectPayload;
 use verter_workspace::VfsError;
 
 use verter_session::{FileLanguage, ScriptSourceType};
-use verter_session_query::resolution::{
-    ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind,
-};
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 use verter_workspace::WorkspaceRead;
 
 use super::declaration_mirror::{DeclarationMirror, MirrorBuilder};
@@ -481,21 +479,7 @@ fn declaration_program(
     };
     // Specifiers resolve in this project, whatever else owns the file.
     let owner = load
-        .published
-        .snapshot
-        .projects
-        .iter()
-        .find_map(|candidate| match &candidate.payload {
-            ProjectPayload::Configured { tsconfig_path, .. }
-                if Path::new(tsconfig_path.as_str()) == project.config =>
-            {
-                Some(ProjectOwnership {
-                    project_root: verter_span::path::canonicalize_path(candidate.root.as_str()),
-                    tsconfig_path: Some(tsconfig_path.as_str().to_string()),
-                })
-            }
-            _ => None,
-        })
+        .ownership(&project.config)
         .ok_or_else(|| unpublished("the project is not in the workspace snapshot".into()))?;
     let mut program =
         MirrorBuilder::new(&project.root).map_err(|error| unpublished(error.message))?;

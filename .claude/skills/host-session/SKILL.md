@@ -1044,6 +1044,49 @@ Only the first non-solution project triggers resolution; a solution-only project
 opens no program and needs no engine. Engine and graph failures use rendered
 messages, including TS5082 for an unreadable root config.
 
+A project's member carriers come from its membership, but its program also serves
+every carrier it reaches by import (vue-tsc gives each reached `.vue` a virtual
+file under the importing project's options). After the session opens or advances,
+`ProgramInputs::check` reads the engine's `host_reads`: a recorded path that is a
+carrier's checking module (`ContentMapperProjectionAdapter::carrier_of_checking_module`)
+and is not a real file is an import the engine could not resolve. That carrier, if
+it exists, is not a member and passes `resolve_in_project`'s disk-layout conflict
+check (a conflict warns as a member's does), is projected for the project and served
+as a non-root overlay in `ProjectCheck::imported_carriers`; the program advances
+with the new overlay (reported as created) until no new carrier is reached. Imported
+carriers are not roots, not part of the virtual-config identity or the projection
+input basis, never published as declarations and not counted in `carriers_checked`;
+their mapper diagnostics, revisions and engine diagnostics are reported like a
+member's (`ProjectCheck::checked_carriers`), as tsc reports a non-root source. The
+engine's read set lasts for its session, so a session whose previous check served an
+imported carrier cannot tell an import it still has from one since removed: such a
+program is opened anew on its next check instead of advanced (the `advance` gate in
+`ProgramInputs::check`), and the carriers it serves, with their mapper and engine
+diagnostics, are exactly those a fresh run reaches. A program that served no imported
+carrier still advances in place, even when the engine looked for a member's checking
+module at another dialect's path (a `lang="tsx"` or plain JS member is probed at
+`C.vue.ts` first) or for a carrier that does not exist. An advanced session still
+holds lookups made for imports since removed, so when discovery in an advanced session
+would serve or warn about any carrier, that session is closed and one is opened on the
+current state before discovery runs again: a carrier created after its import was
+removed is never served, and one created while its import stands is. A watch session counts the imported
+carriers, and the carrier of every checking module the engine looked for, among the
+project's program reads, so an edit to an imported carrier, or the creation of one an
+import names, rechecks the importing project.
+
+The engine's own `-b` build serves no carrier, so this discovery never reaches an
+emitting, carrier-less project that `EngineBuild::partition` hands to it, and the
+partition has no import data to route it elsewhere. After the build,
+`engine_build::refuse_carrier_imports` reads the module specifier at each TS2307 the
+engine attributes to a built project (the string literal at the diagnostic's
+position, never the message text), resolves it under that project's configuration
+with the workspace resolver (`GraphLoad::ownership` +
+`resolve_import_from_project_outcome`, the binding declaration output uses), and when
+it names an existing carrier replaces that project's check with a refusal naming the
+carrier, as a project that references a carrier project is refused: a failure exit,
+never a false TS2307 and never clean. A TS2307 that resolves to no carrier keeps the
+engine's diagnostic.
+
 The batch graph retains each project's published `ConfiguredMembership` (materialized files and include/exclude specs) and config dependencies. `verter_workspace::config::parse_tsconfig_json_with_dependencies` returns `TsConfigDependencies`: realpath identities captured during the existing extends-aware config and package-manifest reads, plus resolved reference targets, and a separate set of normalized lexical paths for missing reference probes. Capture adds no traversal or reads, and ordinary loader calls leave it disabled. `ProjectWatchProjectionBinding::new(&ProjectGraph)` consumes only that metadata and the latest recorded carrier read sets: config edits reload the graph; creation of a missing reference target reloads the graph and rechecks its referencing project and transitive referrers; carrier and external-source edits reproject readers; membership/root edits and transitive referrers recheck programs. Watch ingress normalizes transport path spellings through the shared path owner without filesystem probes. New files outside the config root are matched through `ConfiguredMembership::contains`; newly matching carriers enter the projection work list and request a graph refresh for the new checking path. The binding's `watched_paths` is the one filter for `--watch` file events: configs and their dependencies, missing-reference probes and anything below them, carriers, materialized members, recorded external reads, and any path a project's membership claims (so files created later count). A path under an excluded directory such as `node_modules` or an excluded output directory is not reported unless a read set names it; there is no path-substring rule. A removed, renamed or moved-in directory reports the named files below it, and a directory arriving where a project's member walk descends (`StaticMembershipSpec::descends_into`, the predicate the snapshot materializer prunes with) reports that project's config, so the graph reload walks its files (an excluded include root is never walked); a plain timestamp change of a directory reports nothing. `FileSystemChangeSource` (`notify`) registers the binding's directories (include walk roots as subtrees, the parents of named files, a missing directory through its nearest existing ancestor, observed the way the directory is needed, so a named file's missing parent never puts a subtree watch on a home directory or the filesystem root) and every ancestor of them up to the filesystem root without its subtree, as a best-effort sentinel that reports the ancestor's removal, rename or replacement, re-registers after a structural change at or above a registered or needed directory (the platform drops the watch of a removed or renamed directory, even when one of the same name replaces it), reports canonical paths stamped with their delivery instant, reports every named path and probe when the platform drops events, and closes with a `WatchError` (also returned by `watch`) when the platform refuses an existing directory. Declaration output stages beside its destination through `NativeFs`, replaces the complete directory on commit with rollback on rename failure, and discards staged files on explicit discard or drop.
 
 `sfc_driver::WatchSession` keeps one live program per project between rechecks: the engine session (`api_check::EngineSession`) and the open mapper project, whose projection cache serves unchanged carriers. `Recheck.changed` carries the changed paths that made something stale. A recheck applies them to the retained `FilesystemWorkspace` as `FileChanged`, re-projects only the listed carriers, restarts admission and rebinds each checked project, and advances its program with `EngineSession::update`: the new overlay is published, then one `updateSnapshot` notifies the changed overlay files, created/deleted checking paths and changed non-carrier sources with `ensurePrograms`, and the superseded snapshot is released. A program is reopened only when its `projection_input_basis` moved (config chain, checking paths or mapper settings) or its previous session failed; a failed project is checked again on every recheck. A config edit, a new carrier or a deleted carrier reloads the graph with the next load ordinal and checks every project of the new graph through the same rule, so only projects whose basis moved start a new engine process. Outcomes are assembled from the per-project checks exactly as a fresh run assembles them. Sources a program reads outside its root and membership come from the engine itself: `TsgoClient::host_reads` lists every callback path the client answered `useOS` (imported files, failed-lookup probes, listed directories) since that client connected. tsgo keeps what it read for its session and re-reads only notified paths, so the set is per engine session, not per check: after each check the watch session gives the binding the current session's set (`record_program_reads`), a change to any of it rechecks the project and its referrers and is notified to the engine, and the set starts over when a new session opens. A removed import keeps triggering while the session still holds its text, so restoring it sees the current file. The binding's `watched_paths` reports program reads as named files (their directory without its subtree), because engine reads include ancestor-directory probes up to the drive root.

@@ -375,6 +375,38 @@ fn the_virtual_file_is_named_by_the_descriptor_column() {
 }
 
 #[test]
+fn a_checking_module_path_names_its_carrier_and_no_other_path_does() {
+    let adapter = ContentMapperProjectionAdapter::new();
+    for dialect in [".ts", ".tsx", ".js", ".jsx"] {
+        assert_eq!(
+            adapter
+                .carrier_of_checking_module(&format!("{CARRIER}{dialect}"))
+                .as_deref(),
+            Some(CARRIER),
+            "{dialect}"
+        );
+    }
+    assert_eq!(
+        adapter
+            .carrier_of_checking_module("C:\\ws\\src\\Comp.vue.ts")
+            .as_deref(),
+        Some("c:/ws/src/Comp.vue")
+    );
+    for other in [
+        // The declaration companion is where a real declaration is found,
+        // never a checking module.
+        "/ws/src/Comp.d.vue.ts",
+        "/ws/src/Comp.vue.verter.ts",
+        "/ws/src/Comp.vue",
+        "/ws/src/Comp.ts",
+        "/ws/src/.vue.ts",
+        "/ws/src/Widget.svelte.ts",
+    ] {
+        assert_eq!(adapter.carrier_of_checking_module(other), None, "{other}");
+    }
+}
+
+#[test]
 fn projects_with_different_custom_elements_never_share_a_result() {
     let carrier = concat!(
         "<template>\n  <my-widget :value=\"count\" />\n</template>\n",
@@ -553,4 +585,83 @@ fn the_wire_result_carries_the_tuples_and_numeric_codes() {
         assert_eq!(wire.code, diagnostic.code.wire_code());
         assert_eq!(wire.start + wire.length, diagnostic.end);
     }
+}
+
+/// Composes like the adapter, after proving the case reaches the carrier
+/// parser with diagnostics, none of which breaks the template: warnings, and
+/// the one error the template stays checkable through. A case that does not
+/// panics here, which the adapter reports as an internal diagnostic.
+fn checkable_only_composer(
+    grammars: &CarrierGrammarAuthority,
+    canonical: &str,
+    content: &str,
+    custom_elements: &[String],
+    declarations: bool,
+) -> Composition {
+    let artifact =
+        accepted_artifact(grammars, canonical, content).expect("the carrier is accepted");
+    let parsed = &artifact.common().diagnostics;
+    let checkable = |d: &verter_language::LanguageDiagnostic| {
+        d.severity != verter_language::LanguageDiagnosticSeverity::Error
+            || d.code == verter_compiler::diagnostics::CompilerErrorCode::XVIfSameKey.code_str()
+    };
+    assert!(
+        !parsed.is_empty() && parsed.iter().all(checkable),
+        "the case must leave the template checkable: {parsed:?}"
+    );
+    compose_carrier(grammars, canonical, content, custom_elements, declarations)
+}
+
+/// Markup the template stays checkable through is never a carrier syntax
+/// error and never withholds a product: markup Vue's compiler accepts, which
+/// the carrier parser only warns about, and a key repeated across a `v-if`
+/// chain, which Vue's compiler refuses but which is reported under its own
+/// warning code.
+#[test]
+fn checkable_markup_is_never_a_syntax_error_and_withholds_nothing() {
+    let adapter = ContentMapperProjectionAdapter::with_composer(checkable_only_composer);
+    let handle = open(&adapter, "project");
+    let cases: [(&str, &str, &[MapperDiagnosticCode]); 3] = [
+        (
+            "a key repeated across a v-if chain",
+            concat!(
+                "<script setup lang=\"ts\">const a = true; const k = 1;</script>\n",
+                "<template><div><p v-if=\"a\" :key=\"k\">a</p><p v-else :key=\"k\">b</p></div></template>\n",
+            ),
+            &[MapperDiagnosticCode::RepeatedBranchKey],
+        ),
+        (
+            "attributes with no whitespace between them",
+            "<template><div id=\"a\"class=\"b\">x</div></template>\n",
+            &[],
+        ),
+        (
+            "an end tag with attributes",
+            "<template><div>x</div foo></template>\n",
+            &[],
+        ),
+    ];
+    for (case, source, expected) in cases {
+        let result = adapter
+            .transform(&handle, CARRIER, source)
+            .expect("the project is open");
+        let codes = result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert_eq!(codes, expected, "{case}: {:?}", result.diagnostics);
+        let module = module_of(&result);
+        assert!(module.withheld.is_empty(), "{case}: {:?}", module.withheld);
+        assert!(
+            result.complete,
+            "{case}: a warning leaves the result complete"
+        );
+    }
+    assert!(MapperDiagnosticCode::RepeatedBranchKey.is_warning());
+    assert_ne!(
+        MapperDiagnosticCode::RepeatedBranchKey.wire_code(),
+        MapperDiagnosticCode::Syntax.wire_code(),
+        "the repeated key is not carried as a syntax error"
+    );
 }

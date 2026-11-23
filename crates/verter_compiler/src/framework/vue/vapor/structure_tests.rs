@@ -14,7 +14,9 @@ fn rendered_children_condense_a_leading_space_in_static_markup() {
     );
     let corrected = render(source);
     assert!(
-        corrected.code.contains("_template(\"<div><span>tail\", 3)"),
+        corrected
+            .code
+            .contains("_template(\"<div><span></span>tail\", 3)"),
         "{}",
         corrected.code
     );

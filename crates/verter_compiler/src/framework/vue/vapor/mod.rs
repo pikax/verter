@@ -9,6 +9,8 @@ mod control_flow;
 #[cfg(test)]
 mod control_flow_tests;
 mod counters;
+#[cfg(test)]
+mod dom_shape_tests;
 mod effect;
 mod element;
 #[cfg(test)]
@@ -38,6 +40,9 @@ mod repeated_reads;
 #[cfg(test)]
 mod repeated_reads_tests;
 mod scope;
+mod slot_roots;
+#[cfg(test)]
+mod slot_roots_tests;
 mod slots;
 mod state;
 #[cfg(test)]
@@ -125,6 +130,9 @@ struct VaporCompiler<'c> {
     construct_refs: Vec<control_flow::ConstructRefs>,
     slot_frames: Vec<bool>,
     template_single_root: bool,
+    /// Whether the open template root is an element whose `v-once` or
+    /// `v-memo` wraps every effect that reaches its block.
+    frozen_root: bool,
     child_info: Vec<nav::ChildInfo>,
     refusal: Option<VueTargetRefusal>,
 }
@@ -160,6 +168,7 @@ impl<'c> VaporCompiler<'c> {
             construct_refs: Vec::new(),
             slot_frames: Vec::new(),
             template_single_root: false,
+            frozen_root: false,
             child_info: nav::child_info(inputs),
             refusal: None,
         }
@@ -333,6 +342,16 @@ impl<'c> VueTemplateVisitor for VaporCompiler<'c> {
         self.enclosing_if_chains.push(self.pending_if.take());
         let mut scope = self.state_pool.pop().unwrap_or_default();
         scope.children_all_text_like = self.child_info[node.index()].children_all_text_like;
+        // A template rooted at an SVG or MathML element is parsed in that
+        // namespace (`template(html, flags, ns)`), not as HTML.
+        let flags = self.inputs.structure.facts(node).flags;
+        scope.namespace = if flags.has(VueNodeFlags::SVG_NAMESPACE) {
+            1
+        } else if flags.has(VueNodeFlags::MATHML_NAMESPACE) {
+            2
+        } else {
+            0
+        };
         // A slot outlet's fallback, like a structural `<template>`, has no
         // DOM container: each of its children is a root of the fallback block.
         let fallback = kind == VueTemplateNodeKind::SlotOutlet
@@ -340,11 +359,17 @@ impl<'c> VueTemplateVisitor for VaporCompiler<'c> {
                 .content
                 .as_ref()
                 .is_some_and(|content| !content.children.is_empty());
+        // A slot body with several roots, like a fallback, has no DOM
+        // container: Vue gives each root its own template and returns them.
+        let slot_body = kind == VueTemplateNodeKind::Component
+            || (kind == VueTemplateNodeKind::Template && element.v_slot.is_some());
+        let multi_root_slot = slot_body && self.child_info[node.index()].slot_body_roots > 1;
         scope.is_transparent_wrapper = fallback
+            || multi_root_slot
             || (kind == VueTemplateNodeKind::Template
                 && element.v_slot.is_none()
                 && (element.v_condition.is_some() || element.v_for.is_some()));
-        if scope.is_transparent_wrapper && !fallback {
+        if scope.is_transparent_wrapper && !fallback && !multi_root_slot {
             let roots = self
                 .inputs
                 .structure
@@ -366,6 +391,17 @@ impl<'c> VueTemplateVisitor for VaporCompiler<'c> {
             )
             && element.v_slot.is_none();
         let structural = element.v_condition.is_some() || element.v_for.is_some();
+        if self.depth == 0 {
+            // The root element's own block is the one its `v-once` or
+            // `v-memo` wraps when it closes.
+            self.frozen_root = builds_open_tag
+                && !structural
+                && (element.v_once.is_some()
+                    || self.inputs.structure.attrs(node).iter().any(|attr| {
+                        attr.kind == VueAttrKind::Builtin(VueBuiltinDirective::Memo)
+                            && attr.value_span.is_some()
+                    }));
+        }
         if self.depth == 0 || structural || !builds_open_tag || block_root {
             self.html_scope_stack.push(std::mem::replace(
                 &mut self.html,
@@ -574,10 +610,17 @@ impl<'c> VueTemplateVisitor for VaporCompiler<'c> {
             return;
         }
         let tag_name = self.inputs.structure.tag_name(node).expect("element tag");
+        // Only a void element has no end tag: an empty or self-closing
+        // `<span/>` still closes, or the static template would make its
+        // following siblings its children.
         element::close_html_tag(
             &mut self.html,
             tag_name,
-            element.is_self_closing || element.content.is_none(),
+            self.inputs
+                .structure
+                .facts(node)
+                .flags
+                .has(VueNodeFlags::VOID_ELEMENT),
         );
         self.process_dynamic_props(node, &mut scope);
         let has_dynamic_text =
@@ -668,6 +711,8 @@ impl<'c> VueTemplateVisitor for VaporCompiler<'c> {
             let node_ref = scope.ensure_node_ref(&mut self.state.counters);
             let parent = self.element_stack.last_mut().expect("component scope");
             parent.node_ref = Some(node_ref);
+            // The slot's template is this element's.
+            parent.namespace = scope.namespace;
             parent.own_effects.append(&mut scope.own_effects);
             parent.child_effects.append(&mut scope.child_effects);
             parent.child_nav.append(&mut scope.child_nav);
@@ -758,6 +803,7 @@ impl<'c> VueTemplateVisitor for VaporCompiler<'c> {
         if let Err(error) = self.begin_child(node, true) {
             self.refusal.get_or_insert(error);
         }
+        let frozen = self.frozen_root && self.block_depth == 0;
         let Some(parent) = self.element_stack.last_mut() else {
             return;
         };
@@ -772,23 +818,29 @@ impl<'c> VueTemplateVisitor for VaporCompiler<'c> {
             self.html.push(' ');
             parent.text_run_has_dynamic = true;
         }
-        if !parent.children_all_text_like {
-            // The run is the child the cursor has just passed.
+        if !parent.children_all_text_like && parent.open_text_request.is_none() {
+            // Beside other nodes, every dynamic run is its own node: the run
+            // is the child the cursor has just passed.
             let dom_child_index = parent.dom_child_cursor - 1;
-            if let Some(own_ref) = parent.reserve_nav_text_ref(&mut self.state.counters) {
-                let nav_slot = parent.child_nav.len();
-                parent.child_nav.push(Nav::Reserved);
-                let stmt_slot = parent.child_statements.len();
+            let own_ref = parent.reserve_nav_text_ref(&mut self.state.counters);
+            let nav_slot = parent.child_nav.len();
+            parent.child_nav.push(Nav::Reserved);
+            // Under a root `v-once` or `v-memo`, with no block between, the
+            // root's wrapper covers the effect; otherwise it runs in place.
+            let stmt_slot = (!frozen).then(|| {
                 parent.child_statements.push(Stmt::Reserved);
-                parent
-                    .pending_nav_requests
-                    .push(PendingNavRequest::TextRef {
-                        own_ref,
-                        dom_child_index,
-                        nav_slot,
-                        stmt_slot,
-                    });
-            }
+                parent.child_statements.len() - 1
+            });
+            parent.open_text_request = Some(parent.pending_nav_requests.len());
+            parent
+                .pending_nav_requests
+                .push(PendingNavRequest::TextRef {
+                    own_ref,
+                    dom_child_index,
+                    nav_slot,
+                    stmt_slot,
+                    parts: Vec::new(),
+                });
         }
         interpolation::process_interpolation(self, interp, expression);
     }
