@@ -2085,6 +2085,33 @@ mod watch_session {
         );
     }
 
+    /// A carrier outside every membership, created with its directory after
+    /// a project imports it, is reached once the directory and the carrier
+    /// are reported, as a change source reports a new directory beside the
+    /// file created in it.
+    #[test]
+    fn watch_session_carrier_created_with_its_directory_after_its_import_matches_fresh_runs() {
+        let f = Fixture::new();
+        sibling_projects(&f);
+        f.write("a/A.vue", CLEAN);
+        f.write(
+            "b/x.ts",
+            "import C from \"../later/C.vue\";\n\nexport const component = C;\n",
+        );
+        let mut w = Watched::open(f);
+        assert_eq!(codes(&w.f.run()), vec![2307]);
+
+        w.f.write("later/C.vue", CLEAN);
+        let created = w.changed(&["later", "later/C.vue"]);
+        assert!(codes(&created).is_empty(), "{:?}", codes(&created));
+        assert_eq!(
+            project_named(&created, "b/tsconfig.json")
+                .imported_carriers
+                .len(),
+            1
+        );
+    }
+
     /// The serving ordinal of the engine session that answered a project.
     fn session_ordinal(outcome: &RunOutcome, config: &str) -> u64 {
         project_named(outcome, config)
