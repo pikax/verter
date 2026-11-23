@@ -5491,11 +5491,12 @@ export function literalMember() {
 ///   literal-context reader looks through by its carrier.
 ///
 /// No body read of a carrier's family stands anywhere but the carrier
-/// walk, and none at all under the operation's own site.
+/// walk, under the operation's own site or any other. Every row is read
+/// and reported, so one failing row does not hide another.
 #[test]
 fn an_algebra_operation_reads_its_carriers_as_requests_not_in_place() {
     use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
-    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    let mut failures = Vec::new();
     for (name, site) in [
         ("distributed", "distribute_intersection"),
         ("reduced", "reduce_arms_to_supertypes"),
@@ -5523,31 +5524,27 @@ fn an_algebra_operation_reads_its_carriers_as_requests_not_in_place() {
         let _ = body_reads::take();
         let read = dispatch.execute_via_cold_build_helper(key);
         let rows = body_reads::take();
-        assert!(
-            !read.result_is_partial() && read.partial_reasons().is_empty(),
-            "{name}: the body reads with complete evidence: {read:?}"
-        );
-        assert!(
-            rows.iter().any(|((stage, site, _), count)| {
-                *stage == Some("read_in_place") && *site == "carrier" && *count > 0
-            }),
-            "{name}: the operation's carriers were requested and read: {rows:?}"
-        );
-        assert!(
-            carrier_reads_off_the_walk(&rows).is_empty(),
-            "{name}: no carrier is read in place, outside the requested walk: {rows:?}"
-        );
-        assert!(
-            rows.iter().all(|((_, read_site, family), _)| {
-                *read_site != site
-                    || !matches!(
-                        family,
-                        SemanticQueryKeyTag::Instantiate | SemanticQueryKeyTag::IndexedAccess
-                    )
-            }),
-            "{name}: {site} reads no carrier through the dispatcher's direct walk: {rows:?}"
-        );
+        if read.result_is_partial() || !read.partial_reasons().is_empty() {
+            failures.push(format!(
+                "{name}: the body reads with partial evidence: {read:?}"
+            ));
+        }
+        if !rows.iter().any(|((stage, site, _), count)| {
+            *stage == Some("read_in_place") && *site == "carrier" && *count > 0
+        }) {
+            failures.push(format!(
+                "{name}: {site}'s carriers were not requested at the carrier walk: {rows:?}"
+            ));
+        }
+        let off_walk = carrier_reads_off_the_walk(&rows);
+        if !off_walk.is_empty() {
+            failures.push(format!(
+                "{name}: carriers read in place, outside the requested walk, at {off_walk:?}: \
+                 {rows:?}"
+            ));
+        }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 const CARRIER_OPTIONS_FILE: &str = "/semantic-task/carrier-options.ts";
