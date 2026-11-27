@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,16 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 
 /** The environment variable that names the corpus directory. */
 export const CORPUS_VARIABLE = "VERTER_PARITY_CORPUS";
+
+/**
+ * The environment variable that names a private directory for row-level
+ * output: when set, each member's full parity report (every row with its
+ * file, position, code and message) is written there as `<member>.json`.
+ */
+export const ROWS_VARIABLE = "VERTER_PARITY_ROWS";
+
+/** The prefix of each published row report line on stderr. */
+export const PUBLISHED_ROWS_PREFIX = "parity-rows ";
 
 /**
  * The corpus members, each a directory of the corpus holding a
@@ -24,7 +35,7 @@ export const MEMBERS = [
 ];
 
 const usage = `Usage: ${CORPUS_VARIABLE}=<directory> pnpm run parity:measure
-   or: ${CORPUS_VARIABLE}=<directory> node scripts/sfc-projection/parity/measure.mjs
+   or: ${CORPUS_VARIABLE}=<directory> node scripts/sfc-projection/parity/measure.mjs [--publish-rows]
 
 Measures verter-tsc's projection route against the stock vue-tsc check over the
 ${MEMBERS.map((member) => member.name).join(" and ")} members of a corpus directory
@@ -38,6 +49,12 @@ prints one JSON report of aggregate rows only (per member, per code, per cause)
 with verter-tsc's own wall time and peak memory. It never prints a file name,
 a path or a message from a diagnostic.
 
+Row-level output is private and opt-in. ${ROWS_VARIABLE}=<directory>, outside the
+Verter tree, receives each member's full parity report as <member>.json.
+--publish-rows also prints each report on stderr, one line per member starting
+"${PUBLISHED_ROWS_PREFIX.trim()}", so the run's log carries them; without ${ROWS_VARIABLE} it uses
+a temporary directory it removes afterwards. Stdout stays the aggregate report.
+
 The engine is VERTER_TSGO_BIN when set, else the TypeScript native engine
 installed in Verter's own node_modules.
 
@@ -48,7 +65,33 @@ exit 2 means it was refused or could not run.
 /** A measurement that cannot run. Its message never names a corpus path. */
 export class Refusal extends Error {}
 
-/** Check the corpus directory and its members; return the member roots. */
+/**
+ * The real path of `directory`, or of its nearest existing ancestor with the
+ * rest of the path appended, so a link or a directory yet to be made compares
+ * by where it actually lands.
+ */
+function landing(directory) {
+  const rest = [];
+  for (let current = path.resolve(directory); ; current = path.dirname(current)) {
+    try {
+      return path.join(realpathSync.native(current), ...rest.reverse());
+    } catch {}
+    if (path.dirname(current) === current) return path.resolve(directory);
+    rest.push(path.basename(current));
+  }
+}
+
+/** Whether `directory` lands inside the Verter tree at `repoRoot`. */
+export function insideTree(directory, repoRoot = REPO_ROOT) {
+  const relative = path.relative(landing(repoRoot), landing(directory));
+  return !(relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative));
+}
+
+/**
+ * Check the corpus directory and its members; return the member roots. A
+ * corpus named through a link is measured at the directory the link points to
+ * when it is located, so a link moved during the run cannot mix two corpora.
+ */
 export function locateCorpus(env, repoRoot = REPO_ROOT) {
   const corpus = env[CORPUS_VARIABLE];
   if (!corpus)
@@ -62,19 +105,33 @@ export function locateCorpus(env, repoRoot = REPO_ROOT) {
     throw new Refusal(
       `refusing to run: the corpus directory named by ${CORPUS_VARIABLE} is absent.`,
     );
-  const inside = path.relative(repoRoot, root);
-  const outside = inside === ".." || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside);
-  if (!outside)
+  if (insideTree(root, repoRoot))
     throw new Refusal(
       `refusing to run: the corpus directory named by ${CORPUS_VARIABLE} is inside the Verter tree.`,
     );
-  const members = MEMBERS.map((member) => ({ ...member, root: path.join(root, member.name) }));
+  const real = realpathSync.native(root);
+  const members = MEMBERS.map((member) => ({ ...member, root: path.join(real, member.name) }));
   for (const member of members)
     if (!existsSync(path.join(member.root, "tsconfig.json")))
       throw new Refusal(
         `refusing to run: the corpus has no ${member.name} member (a directory with a tsconfig.json).`,
       );
-  return { root, members };
+  return { root: real, members };
+}
+
+/**
+ * The private row directory named by `ROWS_VARIABLE`, or null when the
+ * option is off. Like the corpus, it must lie outside the Verter tree.
+ */
+export function locateRows(env, repoRoot = REPO_ROOT) {
+  const rows = env[ROWS_VARIABLE];
+  if (!rows) return null;
+  const root = path.resolve(rows);
+  if (insideTree(root, repoRoot))
+    throw new Refusal(
+      `refusing to run: the row directory named by ${ROWS_VARIABLE} is inside the Verter tree.`,
+    );
+  return root;
 }
 
 /** The nearest `node_modules/.bin/<name>` at or above `directory`. */
@@ -269,7 +326,9 @@ export function memberCommands(member, { verterTsc, stockCheck, engine }) {
 /**
  * Measure every member in turn and return the aggregate report. The
  * verter-tsc process is the one whose wall time and peak memory are
- * reported; the stock check's wall time is reported beside it.
+ * reported; the stock check's wall time is reported beside it. With
+ * `rowsDirectory`, each member's full parity report is written there as
+ * `<member>.json`; nothing row-level reaches the returned report.
  */
 export async function measure({
   members,
@@ -280,7 +339,9 @@ export async function measure({
   samplePeak = procPeak,
   now,
   intervalMs,
+  rowsDirectory = null,
 }) {
+  if (rowsDirectory) await mkdir(rowsDirectory, { recursive: true });
   const summaries = [];
   const rows = [];
   for (const member of members) {
@@ -309,6 +370,12 @@ export async function measure({
       { spawnCommand: spawnMeasured },
     );
     await Promise.all(records.map((record) => record.done));
+    if (rowsDirectory)
+      await writeFile(
+        path.join(rowsDirectory, `${member.name}.json`),
+        `${JSON.stringify(report, null, 2)}
+`,
+      );
     const verter = records.find((record) => record.watched);
     const stock = records.find((record) => !record.watched);
     if (verter.peakBytes === null)
@@ -351,41 +418,82 @@ export function redact(message, paths) {
     .reduce((text, value) => text.replaceAll(value, "<corpus>"), message);
 }
 
-async function main(env) {
+/**
+ * Run the measurement for `env` and the command-line `args` and return the
+ * exit status. `io` stands in for the release build (`verterTsc`, an argv
+ * prefix), the installed stock checks (`stockCheckFor`), the peak sampler and
+ * the output streams.
+ */
+export async function main(env, args = [], io = {}) {
+  const {
+    repoRoot = REPO_ROOT,
+    stdout = process.stdout,
+    stderr = process.stderr,
+    verterTsc = null,
+    stockCheckFor = null,
+    samplePeak,
+    spawnCommand,
+  } = io;
+  const publish = args.includes("--publish-rows");
   let corpus = null;
+  let temporary = null;
   const bins = [];
   try {
-    corpus = locateCorpus(env);
-    const engine = verterEngine(env);
+    corpus = locateCorpus(env, repoRoot);
+    let rowsDirectory = locateRows(env, repoRoot);
+    const engine = verterEngine(env, repoRoot);
     const stockChecks = new Map();
-    for (const member of corpus.members) {
-      const bin = findBin(member.root, "vue-tsc");
-      if (!bin)
-        throw new Refusal(
-          `refusing to run: no vue-tsc is installed for the ${member.name} member; prepare the corpus first.`,
-        );
-      bins.push(bin);
-      stockChecks.set(member.name, [bin]);
+    if (!stockCheckFor)
+      for (const member of corpus.members) {
+        const bin = findBin(member.root, "vue-tsc");
+        if (!bin)
+          throw new Refusal(
+            `refusing to run: no vue-tsc is installed for the ${member.name} member; prepare the corpus first.`,
+          );
+        bins.push(bin);
+        stockChecks.set(member.name, [bin]);
+      }
+    if (publish && !rowsDirectory) {
+      temporary = await mkdtemp(path.join(os.tmpdir(), "verter-parity-rows-"));
+      if (insideTree(temporary, repoRoot))
+        throw new Refusal("refusing to run: the temporary directory is inside the Verter tree.");
+      rowsDirectory = temporary;
     }
-    const verterTsc = await buildVerterTsc();
     const report = await measure({
       members: corpus.members,
-      verterTsc: [verterTsc],
+      verterTsc: verterTsc ?? [await buildVerterTsc(repoRoot)],
       engine,
-      stockCheckFor: (member) => stockChecks.get(member.name),
+      stockCheckFor: stockCheckFor ?? ((member) => stockChecks.get(member.name)),
+      samplePeak,
+      spawnCommand,
+      rowsDirectory,
     });
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    stdout.write(`${JSON.stringify(report, null, 2)}
+`);
+    if (publish)
+      for (const member of corpus.members) {
+        const rows = JSON.parse(
+          await readFile(path.join(rowsDirectory, `${member.name}.json`), "utf8"),
+        );
+        stderr.write(`${PUBLISHED_ROWS_PREFIX}${JSON.stringify({ member: member.name, report: rows })}
+`);
+      }
+    return 0;
   } catch (error) {
     const paths = privatePaths(corpus?.root, env[CORPUS_VARIABLE], bins);
-    process.stderr.write(`measure: ${redact(error.message, paths)}\n`);
-    process.exitCode = 2;
+    stderr.write(`measure: ${redact(error.message, paths)}
+`);
+    return 2;
+  } finally {
+    if (temporary) await rm(temporary, { recursive: true, force: true });
   }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv.length === 3 && process.argv[2] === "--help") process.stdout.write(usage);
-  else if (process.argv.length > 2) {
+  const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === "--help") process.stdout.write(usage);
+  else if (args.length > 1 || (args.length === 1 && args[0] !== "--publish-rows")) {
     process.stderr.write(usage);
     process.exitCode = 2;
-  } else main(process.env);
+  } else main(process.env, args).then((code) => (process.exitCode = code));
 }

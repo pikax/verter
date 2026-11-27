@@ -26,6 +26,8 @@
     "test:scripts": "node scripts/run-script-tests.mjs",
     "test:scripts:ci": "node scripts/run-script-tests.mjs --ci",
     "parity:measure": "node scripts/sfc-projection/parity/measure.mjs",
+    "parity:m1-eval": "node scripts/sfc-projection/parity/measure.mjs --publish-rows",
+    "parity:provision": "node scripts/sfc-projection/parity/provision-corpus.mjs",
     "test:sfc-projection": "node --test scripts/sfc-projection/verify-node.test.mjs scripts/sfc-projection/parity/*.test.mjs && node --experimental-strip-types --test tests/sfc-projection/STP5/mapper.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP6/packed.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP7/framework-boundary.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP8/abi-ratify.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP9/plan.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP10/emission.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP11/script-setup.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STP14/binder-capture.spec.ts && node --experimental-strip-types --test tests/sfc-projection/STS0/svelte-lock.spec.ts",
     "affected-tests": "node scripts/affected-tests.mjs",
     "bump": "node scripts/bump.mjs",
