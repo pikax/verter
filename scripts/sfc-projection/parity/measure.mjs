@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -371,8 +372,9 @@ export async function measure({
     );
     await Promise.all(records.map((record) => record.done));
     if (rowsDirectory)
-      await writeFile(
-        path.join(rowsDirectory, `${member.name}.json`),
+      await writeReport(
+        rowsDirectory,
+        `${member.name}.json`,
         `${JSON.stringify(report, null, 2)}
 `,
       );
@@ -398,6 +400,24 @@ export async function measure({
 }
 
 const round = (ms) => Math.round(ms);
+
+/**
+ * Write `text` as `directory/name` without following whatever already sits at
+ * that name. The text goes to a new file created exclusively (which refuses
+ * an existing entry, a link included), and a rename then puts that file in
+ * the name's place, replacing a link rather than writing through it, so an
+ * accepted row directory cannot route a report to wherever a link points.
+ */
+async function writeReport(directory, name, text) {
+  const staging = path.join(directory, `.${name}.${randomUUID()}.tmp`);
+  await writeFile(staging, text, { flag: "wx" });
+  try {
+    await rename(staging, path.join(directory, name));
+  } catch (error) {
+    await rm(staging, { force: true });
+    throw error;
+  }
+}
 
 /**
  * The paths a failure message must not reveal: the corpus root, the variable's

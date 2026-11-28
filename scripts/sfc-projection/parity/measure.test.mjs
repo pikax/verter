@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -395,6 +395,43 @@ test("a row directory inside the Verter tree is refused before anything runs", a
     assert.doesNotMatch(stderr, new RegExp(SECRET));
     assert.equal(existsSync(inside), false);
   } finally {
+    await run.cleanup();
+  }
+});
+
+test("a report file linked into the Verter tree is replaced, never written through", async (t) => {
+  const run = await syntheticRun();
+  const tree = await mkdtemp(path.join(os.tmpdir(), "verter-parity-tree-"));
+  const rows = await mkdtemp(path.join(os.tmpdir(), "verter-parity-rows-"));
+  try {
+    const tracked = path.join(tree, "tracked.txt");
+    await writeFile(tracked, "tracked\n");
+    try {
+      for (const member of MEMBERS)
+        await symlink(tracked, path.join(rows, `${member.name}.json`), "file");
+    } catch (error) {
+      if (error.code === "EPERM") return t.skip("symbolic links are not permitted here");
+      throw error;
+    }
+    const code = await main({ ...run.env, [ROWS_VARIABLE]: rows }, [], {
+      ...run.io,
+      repoRoot: tree,
+    });
+    const { stderr } = run.output();
+    assert.equal(code, 0, stderr);
+    assert.equal(readFileSync(tracked, "utf8"), "tracked\n");
+    assert.deepEqual(readdirSync(tree), ["tracked.txt"]);
+    for (const member of MEMBERS) {
+      const file = path.join(rows, `${member.name}.json`);
+      assert.equal(lstatSync(file).isSymbolicLink(), false);
+      assert.equal(JSON.parse(readFileSync(file, "utf8")).right.rows.length, 2);
+    }
+    assert.deepEqual(
+      readdirSync(rows).sort(),
+      MEMBERS.map((member) => `${member.name}.json`).sort(),
+    );
+  } finally {
+    await Promise.all([tree, rows].map((dir) => rm(dir, { recursive: true, force: true })));
     await run.cleanup();
   }
 });
